@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **C/C++ language support.** One `"cpp"` grammar (`tree-sitter-cpp`) parses the
+  whole family — `.c/.h/.cpp/.hpp/.cc/.cxx/.hh/.hxx` — uniformly, the same
+  approach clangd and most polyglot tooling take; there's no separate `.c`-only
+  language for v1. Classes, structs, enums, and template classes/functions are
+  extracted, along with the two genuinely new pieces of design work this
+  grammar needs beyond every other supported language: (1) a `function_definition`
+  carries no `name` field — it's buried in a declarator chain that can be a
+  plain identifier, an out-of-class `Class::method` qualifier, a destructor
+  (`~Class`), or an operator overload (`operator==`), so a header-declared
+  prototype and its `.cpp` out-of-line definition resolve to exactly one node,
+  not two or zero; and (2) C++ visibility is stateful — an `access_specifier`
+  token applies to every subsequent class member until the next one (default
+  `private` for `class`, `public` for `struct`), unlike every other supported
+  language's per-node exported check. Heritage (`: public Base`) always emits
+  `extends` (C++ has no `interface` keyword), and `#include` edges capture both
+  `"local.h"` and `<system>` forms. Known limitations: macros that expand to
+  declarations aren't understood, template specializations are treated as
+  ordinary functions/methods by name (no specialization identity), and a
+  bareword `#include "local.h"` (no `./` prefix) only resolves to an in-repo
+  file when it happens to match a real repo-relative path — C's directory-
+  relative-without-prefix include convention isn't specially handled.
+
 ## 0.9.0
 
 ### Added

@@ -27,6 +27,7 @@ const INDEXED = [
   "a.tsx", "a.jsx",
   "a.py", "a.pyi",
   "a.go",
+  "a.h", "a.hpp", "a.hh", "a.hxx", "a.cpp", "a.cc", "a.cxx",
 ];
 
 test("a file is labelled exactly when it is indexed", () => {
@@ -53,6 +54,10 @@ test("labels name the language, not the grammar that parses it", () => {
   assert.equal(languageLabelOf("api/main.py"), "python");
   assert.equal(languageLabelOf("api/main.pyi"), "python");
   assert.equal(languageLabelOf("cmd/main.go"), "go");
+  // One "cpp" label for the whole C/C++ family — see extract.ts's EXTENSIONS doc.
+  assert.equal(languageLabelOf("src/thing.cpp"), "cpp");
+  assert.equal(languageLabelOf("src/thing.h"), "cpp");
+  assert.equal(languageLabelOf("src/thing.hpp"), "cpp");
 
   // The grammar is unchanged — extraction, the extract cache and every `Language`
   // switch still see exactly what they saw before.

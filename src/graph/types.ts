@@ -11,7 +11,7 @@
  * M1 populates Tier-1 only; Tier-2 fields ship as `pending`/null.
  */
 
-/** What a node represents. LSP SymbolKind, narrowed to what TS + Python + Go produce. */
+/** What a node represents. LSP SymbolKind, narrowed to what TS + Python + Go + C/C++ produce. */
 export type Kind =
   | "file"
   | "class"
