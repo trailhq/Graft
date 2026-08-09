@@ -16,3 +16,8 @@ graft/
 
 # Session transcripts and prompt traces — local analysis, not product.
 transcripts/
+
+# Personal Claude Code overrides (e.g. permission allowlists) — never shared,
+# never part of a PR diff. .claude/settings.json (checked in) is the
+# team-shared config.
+.claude/settings.local.json

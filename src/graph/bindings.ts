@@ -67,6 +67,7 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     }
     return null;
   }
+  if (lang === "r") return rDefName(node);
   const defTypes =
     lang === "python"
       ? new Set(["class_definition", "function_definition"])
@@ -84,6 +85,45 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
   if ((lang === "typescript" || lang === "tsx") && node.type === "variable_declarator") {
     const value = node.childForFieldName("value");
     if (value && FN_VALUE_TYPES.has(value.type)) return node.childForFieldName("name")?.text ?? null;
+  }
+  return null;
+}
+
+const R_ASSIGN_OPS = new Set(["<-", "<<-", "="]);
+const R_RIGHT_ASSIGN_OPS = new Set(["->", "->>"]);
+
+/**
+ * The bare name a `binary_operator` (left-assign) or `function_definition`
+ * (right-assign) node defines, for R's two plain-function assignment shapes —
+ * this file's own `defName` uses it directly. extract.ts's `describeR`
+ * duplicates the same op-filtering check rather than importing this (same
+ * reasoning as the Go receiver helpers below: bindings.ts can't take a value
+ * import back on extract.ts), and additionally needs to distinguish an S3
+ * `generic.Class` method and R6/S4 class/method shapes this function doesn't
+ * know about — bindings.ts has no equivalent need since no `handleR` binding
+ * collector exists yet (R6/S4/S3 don't get a member/receiver-type table in
+ * this pass; `self`/`private` resolve directly via `ctx.enclosingClass`
+ * instead, needing no lookup). See `describeR`'s doc comment for why
+ * right-assign's AST shape needs its own branch rather than mirroring
+ * left-assign's (empirically, not assumed — `->`'s low precedence means it's
+ * absorbed into the function's own `body` field, not an outer wrapper).
+ * Null if `node` isn't one of these two shapes.
+ */
+export function rDefName(node: Parser.SyntaxNode): string | null {
+  if (node.type === "binary_operator") {
+    const op = node.childForFieldName("operator")?.text;
+    if (!op || !R_ASSIGN_OPS.has(op)) return null;
+    const lhs = node.childForFieldName("lhs");
+    const rhs = node.childForFieldName("rhs");
+    return lhs?.type === "identifier" && rhs?.type === "function_definition" ? lhs.text : null;
+  }
+  if (node.type === "function_definition") {
+    const body = node.childForFieldName("body");
+    if (body?.type !== "binary_operator") return null;
+    const op = body.childForFieldName("operator")?.text;
+    if (!op || !R_RIGHT_ASSIGN_OPS.has(op)) return null;
+    const rhs = body.childForFieldName("rhs");
+    return rhs?.type === "identifier" ? rhs.text : null;
   }
   return null;
 }
@@ -171,14 +211,18 @@ export function cppDeclaratorName(declarator: Parser.SyntaxNode): { name: string
 
 /** Resolves a call site's receiver text (from `calleeName`) to a bound type
  * name, given the enclosing walk state. `self`/`cls`/`this`/the Go receiver
- * var resolve directly to the enclosing class; anything else is a bindings-map
- * lookup, normalizing `this.` to `self.` since both are stored the same way. */
+ * var resolve directly to the enclosing class; R6's `super` (Phase 3) resolves
+ * to the PARENT class instead (`ctx.rSuperClass`, not `ctx.enclosingClass` —
+ * a `super$method()` call must climb past the current class's own same-named
+ * override, not find it); anything else is a bindings-map lookup, normalizing
+ * `this.` to `self.` since both are stored the same way. */
 export function resolveRecvType(
   receiver: string | undefined,
-  ctx: Pick<WalkCtx, "scope" | "enclosingClass" | "goReceiverVar" | "lang" | "bindings">,
+  ctx: Pick<WalkCtx, "scope" | "enclosingClass" | "goReceiverVar" | "lang" | "bindings" | "rSuperClass">,
 ): string | undefined {
   if (!receiver) return undefined;
   if (receiver === "self" || receiver === "cls" || receiver === "this") return ctx.enclosingClass ?? undefined;
+  if (receiver === "super") return ctx.rSuperClass ?? undefined;
   if (receiver.startsWith("self.") || receiver.startsWith("this.")) {
     return (
       ctx.bindings.lookup(ctx.scope, receiver) ??
@@ -244,6 +288,10 @@ function visit(
   if (lang === "python") handlePy(node, scope, classScope, bindings, aliases);
   else if (lang === "go") handleGo(node, scope, bindings);
   else if (lang === "cpp") handleCpp(node, scope, classScope, bindings, aliases);
+  // R has no member/receiver-type binding table — self/private/super resolve
+  // directly via ctx.enclosingClass/ctx.rSuperClass instead (see extract.ts's
+  // calleeName R branch) — so no handleR is needed here.
+  else if (lang === "r") void 0;
   else handleTs(node, scope, classScope, bindings, aliases);
 
   const name = defName(node, lang);

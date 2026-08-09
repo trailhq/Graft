@@ -28,6 +28,7 @@ const INDEXED = [
   "a.py", "a.pyi",
   "a.go",
   "a.h", "a.hpp", "a.hh", "a.hxx", "a.cpp", "a.cc", "a.cxx",
+  "a.R", "a.r",
 ];
 
 test("a file is labelled exactly when it is indexed", () => {
@@ -58,6 +59,8 @@ test("labels name the language, not the grammar that parses it", () => {
   assert.equal(languageLabelOf("src/thing.cpp"), "cpp");
   assert.equal(languageLabelOf("src/thing.h"), "cpp");
   assert.equal(languageLabelOf("src/thing.hpp"), "cpp");
+  assert.equal(languageLabelOf("analysis/model.R"), "r");
+  assert.equal(languageLabelOf("analysis/model.r"), "r");
 
   // The grammar is unchanged — extraction, the extract cache and every `Language`
   // switch still see exactly what they saw before.

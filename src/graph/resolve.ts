@@ -120,7 +120,12 @@ export function resolveEdges(
         // method name is not evidence that this receiver has that method.
         continue;
       }
-      const hit = resolveName(e.name!, e.file, ["function"], perFileName, globalName);
+      // Every language's bare-name call is a free function, except R (Phase 4):
+      // an untyped `obj$method()` there sets e.kinds to also allow a "method"
+      // match — see extract.ts's calleeName R branch for why (R6 methods are
+      // never kind "function", so without this every such call would be
+      // unconditionally unresolvable rather than just occasionally ambiguous).
+      const hit = resolveName(e.name!, e.file, e.kinds ?? ["function"], perFileName, globalName);
       if (hit) add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
     }
   }

@@ -72,10 +72,7 @@
       "Bash(graft:*)",
       "Bash(npx graft:*)",
       "Bash(graft-dev:*)",
-      "Bash(node dist/cli.js:*)",
-      "Bash(npm:*)",
-      "Bash(node:*)",
-      "Bash(npx:*)"
+      "Bash(node dist/cli.js:*)"
     ]
   }
 }

@@ -11,6 +11,7 @@ import TypeScript from "tree-sitter-typescript";
 import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
 import Cpp from "tree-sitter-cpp";
+import R from "tree-sitter-r";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import {
@@ -24,7 +25,7 @@ import {
 } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "cpp";
+export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "r";
 
 /**
  * Extension → the tree-sitter grammar that parses it, and the label a human expects
@@ -63,6 +64,9 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".cc", grammar: "cpp", label: "cpp" },
   { ext: ".cxx", grammar: "cpp", label: "cpp" },
   { ext: ".h", grammar: "cpp", label: "cpp" },
+  // `entryFor` lower-cases the path before matching, so this one entry covers
+  // both `.R` (the conventional case in real R codebases) and `.r`.
+  { ext: ".r", grammar: "r", label: "r" },
 ];
 
 function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
@@ -99,6 +103,16 @@ export interface RawEdge {
   /** calls with viaMember: the receiver's resolved type name (from bindings /
    * self / this / Go receiver), when a confident local clue exists. */
   recvType?: string;
+  /** calls without viaMember: which kinds the bare-name match may resolve to.
+   * Every other language's bare-name call is always a free function, so this
+   * is absent for them (resolve.ts defaults to `["function"]`). R (Phase 4) is
+   * the one exception: `obj$method()` with an untyped receiver (not
+   * self/private/super, which already resolve precisely via viaMember+recvType)
+   * still has a real shot at a correct match if the method name happens to be
+   * uniquely defined across the repo — R6 methods are kind "method", not
+   * "function", so without this override every such call would be
+   * unconditionally unresolvable rather than just occasionally ambiguous. */
+  kinds?: Kind[];
 }
 
 export interface ExtractResult {
@@ -176,12 +190,19 @@ const CPP_KINDS: Record<string, Kind> = {
   enum_specifier: "enum",
 };
 
+// R: `function_definition` carries no name field at all (unlike every other
+// supported language) — its identifier always comes from context (an
+// assignment's other side), resolved dynamically in describeR(). Empty, like
+// Go's own table — never consulted, kept only to satisfy KINDS_BY_LANG's type.
+const R_KINDS: Record<string, Kind> = {};
+
 const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   typescript: TS_KINDS,
   tsx: TS_KINDS,
   python: PY_KINDS,
   go: GO_KINDS,
   cpp: CPP_KINDS,
+  r: R_KINDS,
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -191,6 +212,8 @@ const FUNCTION_VALUE_TYPES = new Set([
   "generator_function",
 ]);
 
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
 const parser = new Parser();
 const GRAMMARS: Record<Language, unknown> = {
   typescript: TypeScript.typescript,
@@ -198,6 +221,7 @@ const GRAMMARS: Record<Language, unknown> = {
   python: Python,
   go: Go,
   cpp: Cpp,
+  r: R,
 };
 
 export interface WalkCtx {
@@ -217,6 +241,25 @@ export interface WalkCtx {
   // per-node exported check in this file. null outside any class/struct body
   // (top-level definitions default to exported — see cppExported).
   cppAccess: "public" | "private" | "protected" | null;
+  // R6 (Phase 2): which list we're inside while walking an `R6Class(...)` call's
+  // arguments — set only for the direct span of a `public =`/`private =`/
+  // `active =` `list(...)`'s own entries (see walk()'s special-cased `argument`
+  // interception), null everywhere else including inside a method's own body.
+  rR6Access: "public" | "private" | "active" | null;
+  // R (Phase 2): S3 generics registered in THIS file via a local `UseMethod()`
+  // call, precomputed once per file (see collectRGenerics). A `name.Class`
+  // assignment only becomes an S3 method if `name` is in this set or the
+  // curated base-R generics list — see describeR's doc comment for the
+  // ambiguity this guards against (`read.csv` is not S3 dispatch).
+  rGenerics: ReadonlySet<string>;
+  // R6 (Phase 3): the immediate parent class's name (from `inherit =`) for the
+  // R6 class we're currently inside, so a `super$method()` call in any of its
+  // methods' bodies can resolve directly to the PARENT's method instead of
+  // (wrongly) the current class's own same-named override. Unlike rR6Access,
+  // this is NOT reset when descending into a method — it needs to stay live
+  // for the method's whole body, only changing when a genuinely different
+  // class is entered. Null outside any class, or for a class with no parent.
+  rSuperClass: string | null;
 }
 
 /** A definition we're about to emit, normalized across the shapes we handle. */
@@ -226,10 +269,14 @@ interface DefDescriptor {
   kind: Kind;
   headerEnd: number; // char index where the signature ends (body starts)
   hashNode: Parser.SyntaxNode; // node whose text forms body_hash / span
-  // C++ out-of-line definitions (`void Foo::bar() {}`) carry their owner here —
-  // ctx.enclosingClass is null at that point (the definition sits at file/namespace
-  // scope, not nested inside the class), so it can't be derived the way every other
-  // language's method owner is. Mirrors Go's receiver-type special-case in walk().
+  // A method whose owner can't be read off ctx.enclosingClass because the
+  // definition doesn't lexically nest inside its class. C++ out-of-line
+  // definitions (`void Foo::bar() {}`) and R's S3/S4 methods both sit at
+  // file/namespace scope, dispatched by qualifier/name rather than nesting —
+  // same idea as Go's receiver-qualified methods (mirrors that special-case
+  // in walk()). R6 methods DO nest (inside the class-defining call's own
+  // public=/private=/active= lists) and rely on the ordinary
+  // ctx.enclosingClass fallback instead, so they leave this unset.
   owner?: string;
 }
 
@@ -248,6 +295,7 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
   const root = parseSource(source);
   const bindings = collectBindings(root, lang);
   const importedSymbols = collectImportedSymbols(root, lang);
+  const rGenerics = lang === "r" ? collectRGenerics(root) : EMPTY_SET;
 
   const nodes: NodeV1[] = [
     {
@@ -281,6 +329,9 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
     goReceiverVar: null,
     importedSymbols,
     cppAccess: null,
+    rR6Access: null,
+    rGenerics,
+    rSuperClass: null,
   };
   // Every id minted this file, seeded with the file node's own id (`rel`) so a
   // top-level definition can never collide with it. Threaded as its own
@@ -320,10 +371,10 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     const isGoMethod = ctx.lang === "go" && node.type === "method_declaration";
     // The bare name of this node's OWN immediate enclosing class/receiver — for a
     // Go method that's its receiver type (methods aren't nested, so ctx.enclosingClass
-    // wouldn't see it); for a C++ out-of-line definition (`Foo::bar() {}`) it's the
-    // qualifier describeCpp already resolved (desc.owner — ctx.enclosingClass is null
-    // there too, since the definition sits at file/namespace scope, not nested inside
-    // the class); for every other method it's simply what the nearest ancestor class
+    // wouldn't see it); for a C++ out-of-line definition (`Foo::bar() {}`) or an R
+    // S3/S4 method it's the qualifier/class describeCpp/describeR already resolved
+    // (desc.owner — these don't lexically nest inside their class either); for
+    // every other method it's simply what the nearest ancestor class
     // already set as ctx.enclosingClass. Only method nodes carry it — resolve.ts's
     // ownerMethod index is the sole consumer (see NodeV1.owner's doc comment).
     const owner: string | undefined =
@@ -344,7 +395,9 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
             ? goExported(desc.name)
             : ctx.lang === "cpp"
               ? cppExported(ctx)
-              : tsExported(node),
+              : ctx.lang === "r"
+                ? rExported(desc.name, ctx, node)
+                : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -379,6 +432,16 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         ctx.lang === "cpp" && (desc.kind === "class" || desc.kind === "struct")
           ? (desc.kind === "class" ? "private" : "public")
           : ctx.cppAccess,
+      // Reset on every new definition — this is a purely local marker for "we're
+      // still inside THIS class-defining call's own public=/private=/active=
+      // argument chain," not something that should leak into a nested definition
+      // (a method's own body, or — vanishingly rare but possible — another class
+      // defined inside one).
+      rR6Access: null,
+      // Unlike rR6Access, only reset when entering a genuinely new class (so it
+      // stays live through a method's whole body, where super$ calls actually
+      // happen) — inherited unchanged for every other definition kind.
+      rSuperClass: desc.kind === "class" ? (ctx.lang === "r" ? rR6ParentClass(node) : null) : ctx.rSuperClass,
     };
     for (const child of node.namedChildren) walk(child, childCtx, out, edges, minted);
     return;
@@ -400,10 +463,61 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     return;
   }
 
+  // R6 (Phase 2): `public =`/`private =`/`active =` inside an R6Class(...) call's
+  // own arguments is a `list(...)` call whose named entries become methods —
+  // this is R's version of a class body, but structurally it's several levels of
+  // ordinary call/argument nodes rather than a dedicated grammar construct, so it
+  // needs its own interception (mirrors how every other stateful/pattern-matched
+  // R construct in this walk needs one). `ctx.enclosingKind === "class"` scopes
+  // this to the class-defining call's own direct structure — once we're inside
+  // an actual method's body, enclosingKind has moved on to "method" and an
+  // unrelated nested `list(public = list(fn = function() {}))` elsewhere won't
+  // be misread as another class body.
+  if (
+    ctx.lang === "r" &&
+    ctx.enclosingKind === "class" &&
+    ctx.rR6Access === null &&
+    node.type === "argument"
+  ) {
+    const argName = node.childForFieldName("name");
+    const value = node.childForFieldName("value");
+    if (
+      argName?.type === "identifier" &&
+      (argName.text === "public" || argName.text === "private" || argName.text === "active") &&
+      value?.type === "call" &&
+      rCalleeName(value) === "list"
+    ) {
+      const access = argName.text;
+      for (const entry of rCallArgs(value)) {
+        walk(entry, { ...ctx, rR6Access: access }, out, edges, minted);
+      }
+      return;
+    }
+  }
+
   // not a definition — capture calls/imports/references, then descend with the same context
-  const callType = ctx.lang === "python" ? "call" : "call_expression";
-  if (node.type === callType) {
-    const callee = calleeName(node, ctx.lang);
+  // R's `call` node is also its ONLY vehicle for library()/require()/source() —
+  // there's no separate import-statement grammar construct to key off, so isImport
+  // must be checked before the generic calls path or every import call would be
+  // captured as a (harmlessly unresolvable, but wrong) `calls` edge instead.
+  const callType = ctx.lang === "python" || ctx.lang === "r" ? "call" : "call_expression";
+  if (isImport(node, ctx.lang)) {
+    const spec = importSpecifier(node, ctx.lang);
+    if (spec) edges.push({ source: ctx.rel, relation: "imports", specifier: spec, file: ctx.rel });
+    // Imported identifiers are declarations, not uses. The import-binding pass
+    // above already recorded them, so do not descend and emit false references.
+    return;
+  } else if (node.type === callType) {
+    // R6Class(...) / a Phase-5 mixin list(...) is already consumed by its
+    // enclosing binary_operator as the class definition (see describeR) — the
+    // walk still reaches this SAME call node again, recursing generically to
+    // find its public=/private=/active= arguments (there's no other path to
+    // them), and it must not ALSO be treated as an ordinary call to a
+    // function literally named "R6Class"/"list".
+    const consumedCallee = ctx.lang === "r" && node.type === "call" ? rCalleeName(node) : null;
+    const isConsumedRClassCall =
+      consumedCallee === "R6Class" || (consumedCallee === "list" && rIsMixinContainer(node));
+    const callee = isConsumedRClassCall ? null : calleeName(node, ctx.lang);
     if (callee) {
       const callEdge: RawEdge = {
         source: ctx.parentId,
@@ -411,16 +525,11 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         name: callee.name,
         viaMember: callee.viaMember,
         file: ctx.rel,
+        ...(callee.kinds ? { kinds: callee.kinds } : {}),
       };
       const recvType = callee.recvType ?? resolveRecvType(callee.receiver, ctx);
       edges.push(recvType ? { ...callEdge, recvType } : callEdge);
     }
-  } else if (isImport(node, ctx.lang)) {
-    const spec = importSpecifier(node, ctx.lang);
-    if (spec) edges.push({ source: ctx.rel, relation: "imports", specifier: spec, file: ctx.rel });
-    // Imported identifiers are declarations, not uses. The import-binding pass
-    // above already recorded them, so do not descend and emit false references.
-    return;
   } else if (
     node.type === "identifier" &&
     !isDirectCallee(node, callType) &&
@@ -542,6 +651,7 @@ function isDeclarationName(node: Parser.SyntaxNode): boolean {
 function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "go") return describeGo(node, ctx);
   if (ctx.lang === "cpp") return describeCpp(node, ctx);
+  if (ctx.lang === "r") return describeR(node, ctx);
 
   const mapped = ctx.kinds[node.type];
   if (mapped) {
@@ -614,6 +724,434 @@ function describeGo(node: Parser.SyntaxNode, _ctx: WalkCtx): DefDescriptor | nul
   }
 
   return null;
+}
+
+/**
+ * R definition shapes. `function_definition` carries no name field at all, so
+ * unlike every other supported language the name always comes from an
+ * enclosing assignment, detected here. The plain-function assignment check
+ * (op-filtering `binary_operator`, the right-assign body-swap) is duplicated
+ * in bindings.ts's own `rDefName` rather than imported — same reasoning as
+ * this file's Go receiver helpers: bindings.ts can't take a value import back
+ * on extract.ts. bindings.ts doesn't need the S3/S4/R6 half of this at all
+ * (no handleR binding collector exists — see bindings.ts's own doc comment).
+ *
+ * Phase 1 (flat extraction — every named function is a plain `function` node)
+ * plus Phase 2 (S3/S4/R6 class awareness, R's class systems being library
+ * *convention* rather than grammar syntax, unlike every other language graft
+ * supports):
+ *   - left-assign (`<-`/`<<-`/`=`) / right-assign (`->`/`->>`) function
+ *     assignment — Phase 1's shape, see the two `binary_operator`/
+ *     `function_definition` branches below. Right-assign's AST shape does NOT
+ *     mirror left-assign's the way it looks like it should (confirmed
+ *     empirically, not assumed — R's `->` has low enough precedence that it's
+ *     absorbed into the function's own `body` field as a `binary_operator`
+ *     instead of the function sitting inside an outer wrapper); only an
+ *     explicitly parenthesized `(function() {}) -> foo` produces the
+ *     "expected" outer-wrapping shape, which isn't specially handled (falls
+ *     through as an anonymous function).
+ *   - `name.Class <- function() {}` — an S3 method, IF `name` is a known
+ *     generic (registered locally via `UseMethod()` in this file, or one of a
+ *     curated set of common base-R generics — see `rS3Split`'s doc comment
+ *     for the false-positive risk this guards against).
+ *   - `Foo <- R6::R6Class("Foo", public = list(...), private = list(...))` —
+ *     an R6 class; its `public =`/`private =`/`active =` list entries become
+ *     methods, handled by walk()'s own `argument`-node interception (this
+ *     function only recognizes the class itself; the "a call defines a
+ *     symbol" list-walking lives in walk() since it needs to mint several
+ *     nodes, not describe a single one).
+ *   - `Foo <- list(public = list(...), private = list(...))` (Phase 5) — a
+ *     plain-list "mixin"/"extension" bundle, NOT wrapped in `R6::R6Class(...)`
+ *     at all: a real, deliberate convention found dogfooding against a real
+ *     R6-heavy corpus (25 files, 11 of them entirely invisible to the graph
+ *     without this) for sharing method bundles across classes via splicing
+ *     (`public = c(Foo$public, list(...))`) rather than `inherit =`. Only
+ *     recognized when the list actually has a `public =`/`private =` entry
+ *     (see `rIsMixinContainer`) — an ordinary data/config list never matches.
+ *     Reuses kind "class" (nothing better-fitting exists, and everything
+ *     downstream — the method-list walking, visibility — only cares that
+ *     ctx.enclosingKind is "class", not how the container was spelled); no
+ *     heritage edge, since splicing isn't `inherit =`-based inheritance.
+ *   - `setClass("Foo", ...)` / `setMethod("generic", "Foo", function() {})`
+ *     — S4 class/method calls, recognized as bare top-level `call` nodes
+ *     (setClass/setMethod have side effects registering with the S4 system;
+ *     they're essentially never assigned to a variable). `setGeneric()` is
+ *     NOT specially extracted — it doesn't naturally map to a class or method
+ *     kind, and the plan flags it as a case not worth the design risk.
+ */
+function describeR(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
+  if (node.type === "binary_operator") {
+    const op = node.childForFieldName("operator")?.text;
+    if (!op || !R_ASSIGN_OPS.has(op)) return null;
+    const lhs = node.childForFieldName("lhs");
+    const rhs = node.childForFieldName("rhs");
+    if (lhs?.type !== "identifier") return null;
+    if (rhs?.type === "function_definition") {
+      return rFunctionDescriptor(lhs.text, rhs, rhs.childForFieldName("body"), ctx);
+    }
+    if (rhs?.type === "call" && rCalleeName(rhs) === "R6Class") {
+      // The class node itself; its public=/private=/active= method lists are
+      // handled by walk()'s own `argument`-node interception, not here.
+      return { name: lhs.text, kind: "class", headerEnd: rhs.endIndex, hashNode: rhs };
+    }
+    if (rhs?.type === "call" && rCalleeName(rhs) === "list" && rIsMixinContainer(rhs)) {
+      // Phase 5: a plain-list mixin/extension bundle — same treatment as R6Class.
+      return { name: lhs.text, kind: "class", headerEnd: rhs.endIndex, hashNode: rhs };
+    }
+    return null;
+  }
+
+  if (node.type === "function_definition") {
+    // Right-assign (`function() {} -> foo`): see this function's own doc
+    // comment for why this doesn't mirror the binary_operator branch above.
+    const body = node.childForFieldName("body");
+    if (body?.type !== "binary_operator") return null;
+    const op = body.childForFieldName("operator")?.text;
+    if (!op || !R_RIGHT_ASSIGN_OPS.has(op)) return null;
+    const rhs = body.childForFieldName("rhs");
+    if (rhs?.type !== "identifier") return null;
+    return rFunctionDescriptor(rhs.text, node, body.childForFieldName("lhs"), ctx);
+  }
+
+  if (node.type === "call") {
+    return describeRTopLevelCall(node);
+  }
+
+  // R6 (Phase 2): reached via walk()'s own `argument`-node interception for a
+  // `public =`/`private =`/`active =` list entry — see the special case there
+  // for why this can't just be a flat kind-table/node-type check like every
+  // other definition shape.
+  if (node.type === "argument" && ctx.rR6Access !== null) {
+    const argName = node.childForFieldName("name");
+    const value = node.childForFieldName("value");
+    if (argName?.type !== "identifier" || value?.type !== "function_definition") return null;
+    const body = value.childForFieldName("body");
+    return {
+      name: argName.text,
+      kind: "method",
+      headerEnd: body ? body.startIndex : value.endIndex,
+      hashNode: value,
+      // owner deliberately unset — R6 methods DO lexically nest inside the
+      // class-defining call, so ctx.enclosingClass already has it.
+    };
+  }
+
+  return null;
+}
+
+const R_ASSIGN_OPS = new Set(["<-", "<<-", "="]);
+const R_RIGHT_ASSIGN_OPS = new Set(["->", "->>"]);
+
+/** A plain function assignment (left- or right-assign), OR — if `name` matches
+ * a known S3 generic's `generic.Class` pattern — an S3 method instead. `body`
+ * is the function's REAL content node (already resolved by the caller for
+ * either assignment direction), used only for `headerEnd`; `hashNode` is
+ * always the `function_definition` itself. */
+function rFunctionDescriptor(
+  name: string,
+  hashNode: Parser.SyntaxNode,
+  body: Parser.SyntaxNode | null | undefined,
+  ctx: WalkCtx,
+): DefDescriptor {
+  const headerEnd = body ? body.startIndex : hashNode.endIndex;
+  const s3 = rS3Split(name, ctx.rGenerics);
+  if (s3) {
+    return {
+      name: s3.generic,
+      idName: `${s3.className}.${s3.generic}`,
+      kind: "method",
+      headerEnd,
+      hashNode,
+      owner: s3.className,
+    };
+  }
+  return { name, kind: "function", headerEnd, hashNode };
+}
+
+/**
+ * S3 dispatch detection: does `name` split as `generic.Class` for some KNOWN
+ * generic? Tries the longest possible generic prefix first (so a dotted
+ * generic itself, like `as.character`, is found before a shorter false match)
+ * and only ever matches a generic that's either registered locally via
+ * `UseMethod()` in this file (see `collectRGenerics`) or in the small curated
+ * `R_BASE_GENERICS` set below.
+ *
+ * This is the genuinely ambiguous part of R support the plan calls out:
+ * `read.csv`, `data.frame`, and `as.character` used as an ordinary helper
+ * name are NOT S3 dispatch, and nothing in the grammar distinguishes them
+ * from `print.MyClass`. Erring toward the curated set staying small — a
+ * missed S3 method (false negative, falls back to an ordinary `function`
+ * node) is a much smaller problem than a false positive misfiling an
+ * unrelated dotted-name function as some other class's method.
+ */
+function rS3Split(name: string, generics: ReadonlySet<string>): { generic: string; className: string } | null {
+  const parts = name.split(".");
+  if (parts.length < 2) return null;
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const generic = parts.slice(0, i).join(".");
+    if (generics.has(generic) || R_BASE_GENERICS.has(generic)) {
+      return { generic, className: parts.slice(i).join(".") };
+    }
+  }
+  return null;
+}
+
+/** Common base-R S3 generics worth assuming even without local evidence —
+ * print.Foo/format.Foo etc. are the single most common real-world S3
+ * pattern, and a local `UseMethod()` call will never exist for them (they
+ * ship in base/methods/stats, not the user's own repo). Deliberately small
+ * and unsurprising rather than exhaustive — see `rS3Split`'s doc comment. */
+const R_BASE_GENERICS = new Set([
+  "print",
+  "format",
+  "summary",
+  "plot",
+  "str",
+  "toString",
+  "as.character",
+  "as.list",
+  "as.data.frame",
+  "as.vector",
+  "as.numeric",
+  "as.matrix",
+  "length",
+  "dim",
+  "names",
+  "rev",
+  "sort",
+  "unique",
+  "predict",
+  "coef",
+  "residuals",
+  "fitted",
+  "update",
+  "merge",
+  "all.equal",
+  "anova",
+  "confint",
+  "vcov",
+  "logLik",
+]);
+
+/** Every S3 generic THIS file registers via a local `UseMethod()` call, so
+ * `rS3Split` can recognize `generic.Class` methods for a repo's own generics,
+ * not just the base-R ones. Runs once per file, ahead of the main walk (same
+ * pre-pass shape as `collectImportedSymbols`). Cross-file generics — a
+ * generic defined in one file, dispatched on in another — aren't found this
+ * way; that would need a whole-repo pass extractFile has no visibility into,
+ * the same limitation Go/C++'s per-file bindings already accept. */
+function collectRGenerics(root: Parser.SyntaxNode): Set<string> {
+  const generics = new Set<string>();
+  const visit = (node: Parser.SyntaxNode): void => {
+    let fnDef: Parser.SyntaxNode | null = null;
+    let ownName: string | null = null;
+    if (node.type === "binary_operator") {
+      const op = node.childForFieldName("operator")?.text;
+      const lhs = node.childForFieldName("lhs");
+      const rhs = node.childForFieldName("rhs");
+      if (op && R_ASSIGN_OPS.has(op) && lhs?.type === "identifier" && rhs?.type === "function_definition") {
+        fnDef = rhs;
+        ownName = lhs.text;
+      }
+    } else if (node.type === "function_definition") {
+      const body = node.childForFieldName("body");
+      if (body?.type === "binary_operator") {
+        const op = body.childForFieldName("operator")?.text;
+        const rhs = body.childForFieldName("rhs");
+        if (op && R_RIGHT_ASSIGN_OPS.has(op) && rhs?.type === "identifier") {
+          fnDef = node;
+          ownName = rhs.text;
+        }
+      }
+    }
+    if (fnDef && ownName) {
+      const arg = findUseMethodArg(fnDef.childForFieldName("body"));
+      if (arg !== undefined) generics.add(arg || ownName); // "" means UseMethod() with no args
+    }
+    for (const child of node.namedChildren) visit(child);
+  };
+  visit(root);
+  return generics;
+}
+
+/** Searches a function body for a `UseMethod(...)` call and returns its
+ * string-literal generic-name argument, `""` if called with no arguments
+ * (defaults to the enclosing function's own name), or `undefined` if no
+ * `UseMethod` call is found at all. */
+function findUseMethodArg(node: Parser.SyntaxNode | null | undefined): string | undefined {
+  if (!node) return undefined;
+  if (node.type === "call" && rCalleeName(node) === "UseMethod") {
+    const first = rCallArgs(node)[0]?.childForFieldName("value");
+    return first?.type === "string" ? (rStringContent(first) ?? "") : "";
+  }
+  for (const child of node.namedChildren) {
+    const found = findUseMethodArg(child);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/** S4: `setClass("Foo", ...)` → a class; `setMethod("generic", "Foo",
+ * function() {})` → a method owned by "Foo". Both are ordinary top-level
+ * `call` nodes — S4's registration functions have side effects and are
+ * essentially never assigned to a variable, unlike R6Class. */
+function describeRTopLevelCall(node: Parser.SyntaxNode): DefDescriptor | null {
+  const callee = rCalleeName(node);
+  if (callee === "setClass") {
+    const first = rCallArgs(node)[0]?.childForFieldName("value");
+    const name = first?.type === "string" ? rStringContent(first) : null;
+    if (!name) return null;
+    return { name, kind: "class", headerEnd: node.endIndex, hashNode: node };
+  }
+  if (callee === "setMethod") {
+    const args = rCallArgs(node);
+    const generic = args[0] ? rStringContent(args[0].childForFieldName("value") ?? null) : null;
+    const className = args[1] ? rStringContent(args[1].childForFieldName("value") ?? null) : null;
+    const defArg = args.find((a) => a.childForFieldName("name")?.text === "definition") ?? args[2];
+    const fnDef = defArg?.childForFieldName("value");
+    if (!generic || !className || fnDef?.type !== "function_definition") return null;
+    const body = fnDef.childForFieldName("body");
+    return {
+      name: generic,
+      idName: `${className}.${generic}`,
+      kind: "method",
+      headerEnd: body ? body.startIndex : fnDef.endIndex,
+      hashNode: fnDef,
+      owner: className,
+    };
+  }
+  return null;
+}
+
+/** A call's callee name, whether bare (`R6Class(...)`) or namespace-qualified
+ * (`R6::R6Class(...)`). Null if the callee isn't a simple name (e.g. itself a
+ * call, or a `$`-based access). */
+function rCalleeName(node: Parser.SyntaxNode): string | null {
+  const fn = node.childForFieldName("function");
+  if (fn?.type === "identifier") return fn.text;
+  if (fn?.type === "namespace_operator") {
+    const rhs = fn.childForFieldName("rhs");
+    return rhs?.type === "identifier" ? rhs.text : null;
+  }
+  return null;
+}
+
+/** A call's positional/named `argument` children (skipping the `,`/`(`/`)`
+ * punctuation tokens that share the `arguments` node's child list). */
+function rCallArgs(node: Parser.SyntaxNode): Parser.SyntaxNode[] {
+  return node.childForFieldName("arguments")?.namedChildren.filter((c) => c.type === "argument") ?? [];
+}
+
+/** An R `string` node's unquoted text, or null if `node` isn't a string. */
+function rStringContent(node: Parser.SyntaxNode | null): string | null {
+  if (node?.type !== "string") return null;
+  const content = node.namedChildren.find((c) => c.type === "string_content");
+  return content?.text ?? null;
+}
+
+/** The value of a call's named argument (`setClass("Foo", contains = "Base")`
+ * → the `contains` argument), or null if absent. */
+function rNamedArg(node: Parser.SyntaxNode, argName: string): Parser.SyntaxNode | null {
+  const arg = rCallArgs(node).find((a) => a.childForFieldName("name")?.text === argName);
+  return arg?.childForFieldName("value") ?? null;
+}
+
+/** An R6 class-defining node's `inherit =` parent class name (a bare
+ * identifier — the parent's own generator variable, not a string), for
+ * `super$` call resolution (Phase 3). `node` is whatever describeR matched: a
+ * binary_operator for R6 (`Foo <- R6::R6Class(...)`) or, for any other kind of
+ * class (S4's setClass, which has no `super`), the call itself — always null
+ * there since `rCalleeName(call) !== "R6Class"`. */
+function rR6ParentClass(node: Parser.SyntaxNode): string | null {
+  const call = node.type === "binary_operator" ? node.childForFieldName("rhs") : node;
+  if (call?.type !== "call" || rCalleeName(call) !== "R6Class") return null;
+  const value = rNamedArg(call, "inherit");
+  return value?.type === "identifier" ? value.text : null;
+}
+
+/** Does this `list(...)` call look like a Phase-5 mixin/extension bundle —
+ * i.e. does it have a `public =` or `private =` entry whose own value is
+ * itself a `list(...)` call? This is the one check standing between "class-
+ * like container" and an ordinary data/config list (`list(a = 1, b = 2)`,
+ * or even one that happens to have a field named "public" holding something
+ * else) — real code never coincidentally shapes plain data this way, so it's
+ * a safe, precise signal without needing a naming-convention heuristic. */
+function rIsMixinContainer(node: Parser.SyntaxNode): boolean {
+  return rCallArgs(node).some((a) => {
+    const name = a.childForFieldName("name")?.text;
+    if (name !== "public" && name !== "private") return false;
+    const value = a.childForFieldName("value");
+    return value?.type === "call" && rCalleeName(value) === "list";
+  });
+}
+
+/** A base-class name list from either a bare string (`contains = "Base"`) or
+ * a `c(...)` call of strings (`contains = c("Base1", "Base2")`) — S4's
+ * multiple-inheritance form. */
+function rStringOrCVector(value: Parser.SyntaxNode | null): string[] {
+  if (!value) return [];
+  const single = rStringContent(value);
+  if (single) return [single];
+  if (value.type === "call" && rCalleeName(value) === "c") {
+    return rCallArgs(value)
+      .map((a) => rStringContent(a.childForFieldName("value")))
+      .filter((s): s is string => !!s);
+  }
+  return [];
+}
+
+/** R6 visibility follows the `public =`/`private =`/`active =` section a
+ * method was declared in (see walk()'s `argument`-node interception) —
+ * `ctx.rR6Access` is only set for that direct span, so a plain function or an
+ * S3/S4 method (neither of which has a real visibility concept) checks for a
+ * roxygen `@export` tag next (Phase 3), falling back to the leading-dot naming
+ * convention only when there's no roxygen evidence to go on at all. `node` is
+ * the exact node describeR matched — see `rRoxygenExported`'s doc comment for
+ * why that's always the right one to check for a preceding comment block. */
+function rExported(name: string, ctx: WalkCtx, node: Parser.SyntaxNode): boolean {
+  if (ctx.rR6Access !== null) return ctx.rR6Access !== "private";
+  const roxygen = rRoxygenExported(node);
+  if (roxygen !== null) return roxygen;
+  return !name.startsWith(".");
+}
+
+/**
+ * Roxygen `@export` detection (Phase 3): does `node` — a top-level definition
+ * statement (a `binary_operator` assignment, a right-assigned
+ * `function_definition`, or an S4 `setClass`/`setMethod` call) — have a
+ * roxygen doc block immediately preceding it, and if so, is it tagged
+ * `@export`?
+ *
+ * `comment` is a grammar EXTRA in this grammar (floats loosely between
+ * sibling nodes rather than attaching to "the next statement" via a field),
+ * so this walks backward through `previousNamedSibling` collecting a
+ * contiguous run of `comment` nodes — the run ends at the first non-comment
+ * sibling, or at the first comment that isn't itself a roxygen (`#'`) line,
+ * either of which is roxygen's own "this block documents the next statement"
+ * boundary.
+ *
+ * Returns:
+ *  - `true` — a roxygen block was found and it contains `@export`.
+ *  - `false` — a roxygen block was found but it does NOT contain `@export`.
+ *    This is deliberately a confident "not exported," not "unknown": roxygen
+ *    generates a package's NAMESPACE from exactly its `@export`-tagged items,
+ *    so a documented-but-untagged function is an explicit "internal, for
+ *    maintainers only" signal, not an absence of evidence.
+ *  - `null` — no roxygen block at all, so the caller should fall back to the
+ *    leading-dot naming convention instead of guessing.
+ */
+function rRoxygenExported(node: Parser.SyntaxNode): boolean | null {
+  let sib = node.previousNamedSibling;
+  let sawRoxygen = false;
+  let exported = false;
+  while (sib?.type === "comment") {
+    const text = sib.text.trim();
+    if (!text.startsWith("#'")) break; // an ordinary # comment ends the roxygen block
+    sawRoxygen = true;
+    if (/^#'\s*@export\b/.test(text)) exported = true;
+    sib = sib.previousNamedSibling;
+  }
+  return sawRoxygen ? exported : null;
 }
 
 /** The receiver's base type name for a Go method, unwrapping a pointer receiver
@@ -720,6 +1258,29 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
     }
     return edges;
   }
+  if (ctx.lang === "r") {
+    // `node` is whatever describeR matched: a binary_operator for R6
+    // (`Foo <- R6::R6Class(...)`) or the call itself for S4 (`setClass(...)`
+    // is a bare top-level statement, essentially never assigned).
+    const call = node.type === "binary_operator" ? node.childForFieldName("rhs") : node;
+    if (call?.type !== "call") return edges;
+    const callee = rCalleeName(call);
+    if (callee === "R6Class") {
+      // `inherit = ParentClass` — a bare identifier (the parent's own
+      // generator variable), not a string; R6 supports single inheritance only.
+      const value = rNamedArg(call, "inherit");
+      if (value?.type === "identifier") {
+        edges.push({ source: classId, relation: "extends", name: value.text, file: ctx.rel });
+      }
+    } else if (callee === "setClass") {
+      // `contains = "Base"` or `contains = c("Base1", "Base2")` — S4 supports
+      // multiple inheritance.
+      for (const name of rStringOrCVector(rNamedArg(call, "contains"))) {
+        edges.push({ source: classId, relation: "extends", name, file: ctx.rel });
+      }
+    }
+    return edges;
+  }
   const heritage = node.namedChildren.find((c) => c.type === "class_heritage");
   for (const clause of heritage?.namedChildren ?? []) {
     const relation: Relation | null =
@@ -741,7 +1302,7 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
 function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
-): { name: string; viaMember: boolean; receiver?: string; recvType?: string } | null {
+): { name: string; viaMember: boolean; receiver?: string; recvType?: string; kinds?: Kind[] } | null {
   const fn = node.childForFieldName("function");
   if (!fn) return null;
   if (fn.type === "identifier") return { name: fn.text, viaMember: false };
@@ -774,6 +1335,47 @@ function calleeName(
     const { scope, nameNode } = resolveCppQualified(fn);
     if (!nameNode.text) return null;
     return scope ? { name: nameNode.text, viaMember: true, recvType: scope } : { name: nameNode.text, viaMember: false };
+  }
+  if (lang === "r" && (fn.type === "extract_operator" || fn.type === "namespace_operator")) {
+    const rhs = fn.childForFieldName("rhs");
+    if (rhs?.type !== "identifier") return null;
+    if (fn.type === "extract_operator") {
+      const lhs = fn.childForFieldName("lhs");
+      if (lhs?.type === "identifier" && (lhs.text === "self" || lhs.text === "private")) {
+        // R6 (Phase 2): `self$method()` / `private$method()` — resolves directly to
+        // the enclosing class via ctx.enclosingClass, same mechanism (and same
+        // magic receiver string) as Python/TS's self/cls/this — see
+        // resolveRecvType, which already special-cases "self" generically.
+        return { name: rhs.text, viaMember: true, receiver: "self" };
+      }
+      if (lhs?.type === "identifier" && lhs.text === "super") {
+        // R6 (Phase 3): `super$method()` — R6's inheritance-dispatch keyword,
+        // resolves directly to the PARENT class via ctx.rSuperClass (NOT
+        // ctx.enclosingClass — that would wrongly find the current class's own
+        // same-named override instead of climbing to the parent).
+        return { name: rhs.text, viaMember: true, receiver: "super" };
+      }
+      // Any other `obj$method()` (Phase 4): still a PLAIN name match, not a
+      // typed member call — there's no general field-type-binding table for
+      // R6 composition (`private$other_obj$method()`), and a real codebase's
+      // dominant field-assignment shape (constructor-parameter pass-through,
+      // `do.call(class_var$new, ...)` dynamic dispatch) turned out to defeat
+      // the simple "field <- SomeClass$new()" pattern every other language's
+      // binding table relies on anyway — see plan_r_language_support.md's
+      // Phase 2 "known gaps" and the follow-up investigation against a real
+      // R6-heavy corpus. What DOES help: bare-name resolution must be allowed
+      // to match a "method" node here, not just "function" — R6 methods are
+      // always kind "method", so without `kinds` below, EVERY untyped `$`
+      // call would be unconditionally unresolvable rather than just
+      // occasionally ambiguous (resolve.ts already drops a genuinely
+      // ambiguous bare-name match rather than guessing, so this only adds
+      // resolutions for uniquely-named methods, never a wrong-class guess).
+      return { name: rhs.text, viaMember: false, kinds: ["function", "method"] };
+    }
+    // `pkg::fun()` (qualified call) — always a real function/exported symbol,
+    // never an R6 method (those are only ever reached via `$` on an instance),
+    // so no need to widen the match kinds here.
+    return { name: rhs.text, viaMember: false };
   }
   return null;
 }
@@ -818,11 +1420,23 @@ function cppReceiver(argument: Parser.SyntaxNode | null | undefined): string | u
   return undefined;
 }
 
+/** R has no import statement at the grammar level — `library(x)`, `require(x)`,
+ * and `source("f.R")` are ordinary `call` nodes, indistinguishable from any other
+ * call except by their callee name. This is call-SITE pattern matching, a first
+ * for this function's normal node-type switch — every other language's import
+ * shape is a dedicated grammar construct. */
+const R_IMPORT_CALLS = new Set(["library", "require", "source"]);
+
 function isImport(node: Parser.SyntaxNode, lang: Language): boolean {
   // Go: match the per-import leaf, so single (`import "fmt"`) and grouped
   // (`import ( … )`) forms each yield one edge as the walk recurses into the list.
   if (lang === "go") return node.type === "import_spec";
   if (lang === "cpp") return node.type === "preproc_include";
+  if (lang === "r") {
+    if (node.type !== "call") return false;
+    const fn = node.childForFieldName("function");
+    return fn?.type === "identifier" && R_IMPORT_CALLS.has(fn.text);
+  }
   return node.type === "import_statement" || node.type === "import_from_statement";
 }
 
@@ -846,6 +1460,13 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
     if (path.type === "system_lib_string") return path.text.replace(/^<|>$/g, "");
     const content = path.namedChildren.find((c) => c.type === "string_content");
     return content?.text ?? path.text.replace(/^"|"$/g, "");
+  }
+  if (lang === "r") {
+    // library(pkg) / library("pkg") / require(pkg) / source("f.R") — the target is
+    // always the first (and normally only) positional argument, bare symbol or string.
+    const value = rCallArgs(node)[0]?.childForFieldName("value") ?? null;
+    if (value?.type === "identifier") return value.text;
+    return rStringContent(value);
   }
   const str = node.namedChildren.find((c) => c.type === "string");
   if (!str) return null;
