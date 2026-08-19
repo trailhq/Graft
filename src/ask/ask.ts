@@ -32,7 +32,11 @@ import { resolveSymbol } from "../graph/traverse.js";
 import type { EdgeV1, GraphV1, NodeV1, Relation } from "../graph/types.js";
 import { rankScopesAndFuse } from "./fuse.js";
 import { fileFirstRoundRobin } from "./file-selection.js";
-import { personalizedPageRank } from "./graphrank.js";
+import {
+  personalizedPageRank,
+  personalizedPageRankPrepared,
+  preparePageRankPartitions,
+} from "./graphrank.js";
 import { readSourceFile } from "../util/source.js";
 import { counts, tokenize, type AskIndex, type AskIndexDoc } from "./index-file.js";
 
@@ -567,12 +571,20 @@ function lexical(
     // can be ordered by score. Same scoring functions and blend as the
     // single-scope path; the combination itself lives in fuse.ts. ──
     const byScope = new Map<string, typeof symbolDocs>();
+    const scopeById = new Map<string, string>();
     for (const d of symbolDocs) {
       const s = scopeOf(d.n.path, scopes).prefix;
+      scopeById.set(d.n.id, s);
       const list = byScope.get(s);
       if (list) list.push(d);
       else byScope.set(s, [d]);
     }
+    // Lazily build every scope's PageRank topology in one node/edge pass. The
+    // old nodeFilter path rebuilt the full repo adjacency once per matching
+    // scope; on large multi-project repos that turned one query into hundreds
+    // of full graph scans before the participation gate could run. Waiting for
+    // the first walk keeps no-match and graphRank:false queries edge-scan free.
+    let pageRankByScope: ReturnType<typeof preparePageRankPartitions> | undefined;
     const fusion = rankScopesAndFuse(
       [...byScope.keys()].sort(),
       {
@@ -602,15 +614,14 @@ function lexical(
             for (const t of q.keys()) if (hasTerm(name, t) || hasTerm(path, t)) return true;
             return false;
           }),
-        walk: (s, seeds) =>
-          graphRank
-            ? personalizedPageRank(graph!, seeds, {
-                nodeFilter: (id) => {
-                  const path = byId.get(id)?.path ?? "";
-                  return scopeOf(path, scopes).prefix === s && (!inPrefix || pathUnderPrefix(path, inPrefix));
-                },
-              })
-            : new Map<string, number>(),
+        walk: (s, seeds) => {
+          if (!graphRank) return new Map<string, number>();
+          pageRankByScope ??= preparePageRankPartitions(graph!, (id) => scopeById.get(id));
+          const topology = pageRankByScope?.get(s);
+          return topology
+            ? personalizedPageRankPrepared(topology, seeds)
+            : new Map<string, number>();
+        },
         rankFactor: (_s, id) => testFactor(byId.get(id)?.path ?? ""),
       },
       GRAPH_WEIGHT,
