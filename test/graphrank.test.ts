@@ -15,7 +15,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildGraph } from "../src/graph/build.js";
 import { ask } from "../src/ask/ask.js";
-import { personalizedPageRank } from "../src/ask/graphrank.js";
+import {
+  personalizedPageRank,
+  personalizedPageRankPrepared,
+  preparePageRankPartitions,
+} from "../src/ask/graphrank.js";
 import type { GraphV1, NodeV1, EdgeV1, Relation } from "../src/graph/types.js";
 
 // ── Unit: personalizedPageRank ───────────────────────────────────────────────
@@ -173,6 +177,71 @@ test("PageRank: seeds outside the filter are ignored without error", () => {
     assert.equal(pr.has("outside"), false, "filtered-out seed never appears in output");
     assert.ok((pr.get("hub") ?? 0) > 0, "in-filter seed still ranked");
   });
+});
+
+test("PageRank: prepared partitions exactly match independent nodeFilter walks", () => {
+  const g = graphOf(
+    ["a.hub", "a.left", "a.right", "b.hub", "b.left", "outside"],
+    [
+      edge("a.hub", "a.left"),
+      edge("a.hub", "a.left"), // Duplicate multiplicity/order must survive preparation.
+      edge("a.hub", "a.right"),
+      edge("b.hub", "b.left"),
+      edge("a.right", "b.left"), // Cross-partition: excluded from both walks.
+      edge("a.hub", "missing", "imports"),
+    ],
+  );
+  const partitionOf = (id: string) => id.startsWith("a.") ? "a" : id.startsWith("b.") ? "b" : undefined;
+  const prepared = preparePageRankPartitions(g, partitionOf);
+
+  for (const scope of ["a", "b"]) {
+    const seeds = new Map([
+      [`${scope}.hub`, 2],
+      [`${scope}.left`, 1],
+      [scope === "a" ? "b.hub" : "a.hub", 50], // Out-of-scope seed is ignored.
+    ]);
+    const filtered = personalizedPageRank(g, seeds, {
+      nodeFilter: (id) => partitionOf(id) === scope,
+    });
+    const reused = personalizedPageRankPrepared(prepared.get(scope)!, seeds);
+    assert.deepEqual(
+      [...reused],
+      [...filtered],
+      `${scope}: prepared topology must preserve entry order and exact floating-point scores`,
+    );
+  }
+});
+
+test("PageRank: preparing many partitions reads graph topology only once", () => {
+  const backing = graphOf(
+    ["a.hub", "a.leaf", "b.hub", "b.leaf"],
+    [edge("a.hub", "a.leaf"), edge("b.hub", "b.leaf")],
+  );
+  let nodeReads = 0;
+  let edgeReads = 0;
+  let partitionCalls = 0;
+  const counted: GraphV1 = {
+    meta: backing.meta,
+    get nodes() {
+      nodeReads += 1;
+      return backing.nodes;
+    },
+    get edges() {
+      edgeReads += 1;
+      return backing.edges;
+    },
+  };
+
+  const prepared = preparePageRankPartitions(counted, (id) => {
+    partitionCalls += 1;
+    return id[0];
+  });
+  personalizedPageRankPrepared(prepared.get("a")!, new Map([["a.hub", 1]]));
+  personalizedPageRankPrepared(prepared.get("b")!, new Map([["b.hub", 1]]));
+
+  assert.equal(nodeReads, 1, "all partitions share one node pass");
+  assert.equal(edgeReads, 1, "all partitions share one edge pass");
+  assert.equal(partitionCalls, backing.nodes.length, "each node is assigned once");
 });
 
 // ── Integration: ask() with and without graph-rank ──────────────────────────
