@@ -2,8 +2,8 @@
  * Filesystem walking used by `init`/`check` to enumerate a repo's source files.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readdirSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** Directories that are dependency/build output, never source. */
 export const SKIP_DIRS = new Set([
@@ -86,12 +86,80 @@ export interface WalkOptions {
   followNestedRepos?: boolean;
 }
 
+/**
+ * Directory `walkDir` actually enumerates.
+ *
+ * `path.resolve` does not follow a symlink, and git discovers the repo from the
+ * child cwd. Unwrap a symlink-to-directory once so the walk runs inside the
+ * target. Ordinary directories stay as `resolve(dir)` — not `realpath` — so a
+ * macOS `/var/folders/…` scratch path is the path the caller handed us.
+ *
+ * A broken symlink throws instead of the `scandir ENOENT` `readdirSync` would
+ * raise after git fails. Internal symlink policy is not decided here.
+ */
+export function canonicalWalkRoot(dir: string): string {
+  const abs = resolve(dir);
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(abs);
+  } catch {
+    return abs;
+  }
+  if (!st.isSymbolicLink()) return abs;
+
+  let real: string;
+  try {
+    real = realpathSync(abs);
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in err ? String((err as NodeJS.ErrnoException).code) : "";
+    if (code === "ELOOP") throw new Error(`symbolic link loop: ${abs}`);
+    throw new Error(`broken symbolic link: ${abs}`);
+  }
+  let realSt: ReturnType<typeof statSync>;
+  try {
+    realSt = statSync(real);
+  } catch {
+    throw new Error(`broken symbolic link: ${abs}`);
+  }
+  if (!realSt.isDirectory()) return abs;
+  return real;
+}
+
+function escapedCanonical(canonical: string, abs: string): boolean {
+  const rel = relative(canonical, abs);
+  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
+/** Keep emitted paths on the requested root so relative paths stay stable. */
+function remapWalkPaths(requested: string, canonical: string, files: string[]): string[] {
+  if (requested === canonical) return files;
+  const out: string[] = [];
+  for (const abs of files) {
+    if (escapedCanonical(canonical, abs)) continue;
+    const rel = relative(canonical, abs);
+    if (rel === "") continue;
+    out.push(join(requested, rel));
+  }
+  return out;
+}
+
+/**
+ * Recursively list source files under `dir`. A directory symlink as the *input
+ * root* is unwrapped once ({@link canonicalWalkRoot}); emitted paths are remapped
+ * onto the caller-facing root so `relPosix` stays `src/foo.ts` rather than a
+ * `../` escape through the physical path (macOS `/tmp` → `/private/tmp`).
+ * Symlinks *inside* the tree are not followed: git still `lstat`s each listed
+ * path, and the filesystem walk still requires `Dirent.isFile` / `isDirectory`.
+ */
 export function walkDir(
   dir: string,
   includes?: ReadonlySet<string>,
   opts: WalkOptions = {},
 ): string[] {
-  return gitVisibleFiles(dir, includes, opts) ?? walkFilesystem(dir, includes);
+  const requested = resolve(dir);
+  const root = canonicalWalkRoot(requested);
+  const files = gitVisibleFiles(root, includes, opts) ?? walkFilesystem(root, includes);
+  return remapWalkPaths(requested, root, files);
 }
 
 /** Git's canonical working-tree file set, relative to `dir`. Tracked files are
