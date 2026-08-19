@@ -22,6 +22,9 @@ export interface FileRankCandidate {
   rankFactor: number;
   /** Exact current score, retained for every non-winning candidate. */
   baselineScore: number;
+  /** Existing final-list tie key. When present, equal-score candidates keep
+   * the caller's baseline ordering before file-specific fallbacks apply. */
+  baselineTieKey?: string;
   /** Exact query terms that the existing lexical scorer awarded to this node. */
   matchedTerms: ReadonlySet<string>;
   /** Query terms matched in the symbol NAME field only. File/residual nodes
@@ -93,8 +96,11 @@ function coverage(
 }
 
 function baselineOrder(a: FileRankCandidate, b: FileRankCandidate): number {
+  const scoreOrder = b.baselineScore - a.baselineScore;
+  if (scoreOrder !== 0) return scoreOrder;
+  if (a.baselineTieKey !== undefined && b.baselineTieKey !== undefined)
+    return a.baselineTieKey.localeCompare(b.baselineTieKey);
   return (
-    b.baselineScore - a.baselineScore ||
     b.rawLexical - a.rawLexical ||
     tokenCost(a) - tokenCost(b) ||
     startOf(a) - startOf(b) ||

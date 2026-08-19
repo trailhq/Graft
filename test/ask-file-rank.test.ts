@@ -63,6 +63,35 @@ test("bounded residual pools one raw-lexical anchor and leaves every sibling que
   assert.deepEqual(file.queue.map((candidate) => candidate.id), ["anchor", "sibling"]);
 });
 
+test("equal baseline scores preserve the caller's existing tie order", () => {
+  const [file] = rankFilesBounded([
+    candidate({
+      id: "raw-leader",
+      file: "a.ts",
+      rawLexical: 10,
+      lexical: 0.5,
+      baselineScore: 0.5,
+      baselineTieKey: "Zulu · function",
+      matchedTerms: matched("alpha"),
+    }),
+    candidate({
+      id: "baseline-leader",
+      file: "a.ts",
+      rawLexical: 5,
+      lexical: 0.5,
+      baselineScore: 0.5,
+      baselineTieKey: "Alpha · function",
+      matchedTerms: matched("alpha"),
+    }),
+  ], weights(["alpha", 1]));
+
+  assert.equal(file.representative.id, "baseline-leader");
+  assert.deepEqual(
+    file.queue.map((candidate) => candidate.id),
+    ["baseline-leader", "raw-leader"],
+  );
+});
+
 test("anchor coverage belongs to the raw-lexical anchor, not an independent coverage leader", () => {
   const candidates = [
     candidate({
