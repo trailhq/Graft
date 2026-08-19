@@ -80,6 +80,12 @@ const MANIFEST_FILE = "manifest.json";
 /** Gitignored cache dir (per-file summaries + extractions), never committed. */
 export const CACHE_DIR = ".cache";
 
+/** Env kill switch — same truthy parsing as `GRAFT_NO_REFRESH` in ../graph/refresh.ts. */
+function envTruthy(name: string): boolean {
+  const v = process.env[name];
+  return v !== undefined && v !== "" && v !== "0" && v !== "false";
+}
+
 /** Turn a display name into a stable, filesystem- and link-safe slug. */
 export function slugify(name: string): string {
   const base = normalizeName(name)
@@ -115,6 +121,7 @@ export function contextDirFor(root: string, override?: string): string {
  * must never abort a build, so write failures are swallowed.
  */
 export function ensureGitignored(root: string, contextDir: string): void {
+  if (envTruthy("GRAFT_NO_GITIGNORE")) return;
   const rel = relPosix(root, contextDir);
   if (rel === "" || rel.startsWith("..")) return; // dir is at/above the repo root — nothing sane to ignore
   const bare = stripTrailingSlashes(rel); // "graft" (or a `--dir` subpath like "tools/ctx")
@@ -159,6 +166,7 @@ export function ensureGitignored(root: string, contextDir: string): void {
  * must not fail over a convenience file.
  */
 export function ensureSearchable(root: string, contextDir: string): void {
+  if (envTruthy("GRAFT_NO_IGNORE")) return;
   const rel = relPosix(root, contextDir);
   if (rel === "" || rel.startsWith("..")) return; // outside the repo — nothing to re-admit
   const dir = stripTrailingSlashes(rel);

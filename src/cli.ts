@@ -318,6 +318,8 @@ program
     (val: string, prev: string[]) => [...prev, val],
     [] as string[],
   )
+  .option("--no-gitignore", "skip writing graft/ into .gitignore (same as GRAFT_NO_GITIGNORE=1)")
+  .option("--no-ignore", "skip writing .ignore for ripgrep re-admit (same as GRAFT_NO_IGNORE=1)")
   .action(async (
     dir: string,
     opts: {
@@ -329,10 +331,14 @@ program
       allowPartial?: boolean;
       includeDir?: string[];
       followSubmodules?: boolean;
+      gitignore?: boolean;
+      ignore?: boolean;
     },
     command: Command,
   ) => {
     const buildStartedAt = Date.now();
+    if (opts.gitignore === false) process.env.GRAFT_NO_GITIGNORE = "1";
+    if (opts.ignore === false) process.env.GRAFT_NO_IGNORE = "1";
     const concurrency = opts.concurrency ? Math.max(1, Number(opts.concurrency)) : undefined;
     if (opts.concurrency && !Number.isFinite(concurrency)) {
       console.error(`✗ --concurrency must be a number, got "${opts.concurrency}"`);
@@ -472,7 +478,11 @@ program
     for (const e of g.errors) console.error(`✗ ${e}`);
 
     const rel = relative(process.cwd(), g.contextDir) || "graft";
-    console.log(`  ${rel}/ is git-ignored (added automatically) — a local cache; teammates run \`graft build\` to get their own.`);
+    if (process.env.GRAFT_NO_GITIGNORE) {
+      console.log(`  ${rel}/ is a local cache — add it to your gitignore if you want it untracked.`);
+    } else {
+      console.log(`  ${rel}/ is git-ignored (added automatically) — a local cache; teammates run \`graft build\` to get their own.`);
+    }
 
     // #127: a --deep run whose LLM calls failed used to print the same success
     // footer and exit 0, so a quota-exhausted build looked identical to a clean

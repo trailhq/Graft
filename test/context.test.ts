@@ -376,6 +376,46 @@ test("ensureGitignored: no-op when the graph dir is outside the repo root", () =
   }
 });
 
+test("ensureGitignored: GRAFT_NO_GITIGNORE=1 skips writing .gitignore", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxgi-"));
+  process.env.GRAFT_NO_GITIGNORE = "1";
+  try {
+    ensureGitignored(dir, contextDirFor(dir));
+    assert.equal(existsSync(join(dir, ".gitignore")), false);
+  } finally {
+    delete process.env.GRAFT_NO_GITIGNORE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensureSearchable: GRAFT_NO_IGNORE=1 skips writing .ignore", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxsearch-"));
+  process.env.GRAFT_NO_IGNORE = "1";
+  try {
+    ensureSearchable(dir, contextDirFor(dir));
+    assert.equal(existsSync(join(dir, ".ignore")), false);
+  } finally {
+    delete process.env.GRAFT_NO_IGNORE;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("graft build with GRAFT_NO_GITIGNORE and GRAFT_NO_IGNORE does not touch ignore files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxgi-build-"));
+  try {
+    writeFileSync(join(dir, "main.ts"), "export function main(): number {\n  return 1;\n}\n");
+    execFileSync(process.execPath, ["--import", "tsx", "src/cli.ts", "build", dir], {
+      stdio: "pipe",
+      env: { ...process.env, GRAFT_NO_GITIGNORE: "1", GRAFT_NO_IGNORE: "1" },
+    });
+    assert.equal(existsSync(join(dir, ".gitignore")), false);
+    assert.equal(existsSync(join(dir, ".ignore")), false);
+    assert.equal(existsSync(join(dir, "graft")), true, "build still writes the graph");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ensureSearchable — gitignoring the graph must not also hide it from `grep`.
 // ripgrep honours .gitignore, so without this the cards are unreachable by the
 // one mechanism they were designed around.
