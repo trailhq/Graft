@@ -192,7 +192,9 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
 
 - **Full-fidelity** — hand-written extractors with scope-aware, cross-file call
   and import resolution:
-  **TypeScript / JavaScript** (incl. JSX & TSX), **Python**, **Go**, **Java**.
+  **TypeScript / JavaScript** (incl. JSX & TSX), **Python**, **Go**, **Java**,
+  **R** (`.R`/`.r` — plain functions, S3/S4/R6 classes and methods, roxygen
+  `@export`, `library()`/`source()` imports).
 
 - **Broad** — symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
