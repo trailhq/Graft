@@ -21,6 +21,7 @@ import { resolve } from "node:path";
 import { relPosix } from "../util/paths.js";
 import { contextDirFor } from "../context/node-file.js";
 import { extractFile, languageOf } from "./extract.js";
+import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
 import { listSourceFiles } from "./build.js";
 import { readGraph, wiringPath } from "./write.js";
 import { readSourceFile } from "../util/source.js";
@@ -35,13 +36,24 @@ export interface GraphCheckResult {
   stale: string[];
   /** Nodes never summarized (reported for context; not counted as drift). */
   pending: number;
+  /** Committed nodes in total — the denominator that turns `pending` into a
+   * coverage figure. A deep build that lost most of its LLM calls (#127) is only
+   * distinguishable from a deliberate Tier-1 build by the SHARE that is missing. */
+  nodes: number;
 }
 
 export interface GraphCheckOptions {
   contextDir?: string;
 }
 
-export function checkGraph(dir: string, opts: GraphCheckOptions = {}): GraphCheckResult {
+// async: the breadth tier's WASM grammars load asynchronously and must be warmed
+// before the (synchronous) re-extraction below, exactly as buildGraph does — else
+// breadth-tier files (.rs, …) would re-extract as empty here and read as `removed`
+// against a graph that built them, so `graft check` would never report OK.
+export async function checkGraph(
+  dir: string,
+  opts: GraphCheckOptions = {},
+): Promise<GraphCheckResult> {
   const root = resolve(dir);
   const outDir = contextDirFor(root, opts.contextDir);
 
@@ -53,6 +65,7 @@ export function checkGraph(dir: string, opts: GraphCheckOptions = {}): GraphChec
     changed: [],
     stale: [],
     pending: 0,
+    nodes: 0,
   };
 
   const committed = readGraph(wiringPath(outDir));
@@ -62,9 +75,14 @@ export function checkGraph(dir: string, opts: GraphCheckOptions = {}): GraphChec
   }
 
   // Freshly extract Tier-1 nodes from the code on disk (same file set as build).
+  const sourceFiles = listSourceFiles(root, outDir);
+  await warmGenericGrammars(
+    new Set(sourceFiles.map((f) => genericLangOf(f)?.name).filter((n): n is string => !!n)),
+  );
   const current = new Map<string, string>(); // id → body_hash
-  for (const file of listSourceFiles(root, outDir)) {
-    const lang = languageOf(file)!;
+  for (const file of sourceFiles) {
+    const lang = languageOf(file);
+    const generic = lang ? null : genericLangOf(file);
     let source: string | null;
     try {
       source = readSourceFile(file);
@@ -73,7 +91,9 @@ export function checkGraph(dir: string, opts: GraphCheckOptions = {}): GraphChec
     }
     if (source === null) continue; // unsupported encoding (e.g. UTF-16BE)
     try {
-      const { nodes } = extractFile(relPosix(root, file), source, lang);
+      const { nodes } = lang
+        ? extractFile(relPosix(root, file), source, lang)
+        : extractGeneric(relPosix(root, file), source, generic!.name);
       for (const n of nodes) current.set(n.id, n.body_hash);
     } catch {
       // parse failure → skip; the committed nodes for this file become `removed`.
@@ -81,6 +101,7 @@ export function checkGraph(dir: string, opts: GraphCheckOptions = {}): GraphChec
   }
 
   const committedById = new Map(committed.nodes.map((n) => [n.id, n]));
+  result.nodes = committedById.size;
   for (const [id, node] of committedById) {
     const now = current.get(id);
     if (now === undefined) result.removed.push(id);
@@ -108,7 +129,12 @@ export function formatGraphCheckReport(r: GraphCheckResult): string {
     return "graph check: NO GRAPH\n\nNo graft/.graph/wiring.json found. Run `graft build` first.";
   }
   if (r.ok) {
-    const note = r.pending ? ` (${r.pending} node(s) not yet summarized — run \`graft build --deep\`)` : "";
+    // A share, not a bare count: "1203 not yet summarized" reads the same whether
+    // the repo was never deep-built or a deep build failed most of its calls.
+    const pct = r.nodes > 0 ? Math.round(((r.nodes - r.pending) / r.nodes) * 100) : 0;
+    const note = r.pending
+      ? ` (meaning tier ${pct}% complete — ${r.pending} of ${r.nodes} node(s) not yet summarized; run \`graft build --deep\`)`
+      : "";
     return `graph check: OK — the wiring graph is in sync with the code.${note}`;
   }
 

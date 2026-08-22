@@ -13,7 +13,7 @@
  */
 import { resolve } from "node:path";
 import { contextDirFor } from "../context/node-file.js";
-import { savingsFooter, savingsFor, type Savings } from "../context/savings.js";
+import { withSavings, savingsFor, type Savings } from "../context/savings.js";
 import { loadGraphCached } from "./load.js";
 import { resolveSymbol, edgeWalk, type Direction, type EdgeHit } from "./traverse.js";
 import type { GraphV1, NodeV1 } from "./types.js";
@@ -207,5 +207,5 @@ export function runCallersCommand(query: string, dir: string, opts: CallersCliOp
     lines.push("");
   }
   const body = lines.join("\n").replace(/\n+$/, "\n");
-  process.stdout.write(body + savingsFooter(body, saved));
+  process.stdout.write(withSavings(body, saved));
 }

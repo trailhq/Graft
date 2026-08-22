@@ -10,6 +10,7 @@
  * input count so {@link Usage.input} is uncached-only.
  */
 import OpenAI from "openai";
+import { transportRetries } from "./types.js";
 import type { ChatModel, ChatRequest, ChatResponse, Message, ToolCall, ToolSpec, Usage } from "./types.js";
 
 const PROVIDER = "openai";
@@ -98,6 +99,7 @@ export class OpenAIChatModel implements ChatModel {
         apiKey: opts.apiKey,
         baseURL: opts.baseUrl,
         defaultHeaders: opts.headers,
+        maxRetries: transportRetries(),
       });
   }
 

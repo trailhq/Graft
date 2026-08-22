@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { underGraft, main, lastFileScopeHint, promptAskTimeout } from '../src/claude/hooks.js';
 import { readStats, readSession } from '../src/claude/state.js';
 import { runSync } from '../src/claude/sync-run.js';
-import { savingsFooter } from '../src/context/savings.js';
+import { savingsLine } from '../src/context/savings.js';
 import { writeStats, emptyStats, acquireLock } from '../src/claude/state.js';
 
 test('underGraft detects edits inside graft/', () => {
@@ -426,13 +426,13 @@ test('tool-savings is a no-op (no session file) when the tool output has no graf
   }
 });
 
-test('tool-savings counts a REAL savingsFooter (with the turn nudge) exactly once', async () => {
+test('tool-savings counts a REAL savings line (with the turn nudge) exactly once', async () => {
   const d = mkdtempSync(join(tmpdir(), 'graft-savings-real-'));
   process.env.CLAUDE_PROJECT_DIR = d;
   try {
     // body ≈ 10 tok, baseline ≈ 2000 tok → footer claims ≈ 1990 saved. The nudge
     // (with its "🌱 graft saved ~N tokens" example) must NOT be double-counted.
-    const footer = savingsFooter('x'.repeat(40), { files: 2, baselineChars: 8000 });
+    const footer = savingsLine('x'.repeat(40), { files: 2, baselineChars: 8000 });
     const stdin = JSON.stringify({ session_id: 'real', tool_response: { stdout: `callers …${footer}` } });
     await runWithStdin(stdin, () => main('tool-savings'));
     assert.equal(readSession(d, 'real').savedTokens, 1990);

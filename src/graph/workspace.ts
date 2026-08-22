@@ -8,9 +8,13 @@
  *   { "version": 1, "children": ["repoA", "repoB"] }
  *
  * Queries run at the parent federate across the children: `ask` fuses every
- * child's ranked hits with the same RRF `fuseScopes` used inside a single
- * multi-scope repo (so the big repo can't drown the small one), `grep`/`map`/
- * `check`/`callers` run per child and merge, always labeled `<child>/`.
+ * child's ranked hits with `fuseScopes`, reciprocal-rank fusion, so the big
+ * repo can't drown the small one. Scopes INSIDE one repo no longer take that
+ * path — they share corpus statistics and a normalization denominator, so they
+ * are combined by score (see `ask/fuse.ts`). Separate child repositories have
+ * no such shared scale, which is exactly the case rank fusion is for.
+ * `grep`/`map`/`check`/`callers` run per child and merge, always labeled
+ * `<child>/`.
  *
  * This module owns the pure/core pieces (the format, its readers/writers, graph
  * loading, and the federated command bodies that return renderable data). The
@@ -37,7 +41,7 @@ import { ask, type AskHit, type AskResult } from "../ask/ask.js";
 import { fuseScopes, STRONG_FLOOR, HIGH_FLOOR, type ScopedDoc } from "../ask/fuse.js";
 import { grepGraph, type GrepGroup, type GrepResult } from "../search/grep.js";
 import { formatGrepResult, zeroHitNote } from "../search/grep-cli.js";
-import { savingsFooter, type Savings } from "../context/savings.js";
+import { withSavings, type Savings } from "../context/savings.js";
 
 /** The parent index written to `<parent>/graft/workspace.json`. Nodes/edges
  * never live at the parent — they live in each child's own `graft/`. */
@@ -188,18 +192,25 @@ interface ChildRun {
 // STRONG_FLOOR / HIGH_FLOOR (a child federates if its top hit matched a
 // query term in a NAME/PATH field ≥ STRONG_FLOOR, OR its overall name+path+
 // body coverage is broad enough to be real even body-only, ≥ HIGH_FLOOR) are
-// defined ONCE in `../ask/fuse.js` and imported here — `rankScopesAndFuse`
-// (single-graph multi-scope, `src/ask/fuse.ts`) gates on the exact same two
-// floors, so the two paths that solve the identical "a weak scope must not
-// federate beside a strong one" problem can never drift apart again.
+// defined ONCE in `../ask/fuse.js` and imported here. This is now their only
+// caller: a share-of-the-query threshold is the best available signal when the
+// candidates carry no common score scale, which is the situation across child
+// repositories. `rankScopesAndFuse` used to gate on them for the same reason
+// and no longer needs to — within one repo the scores are comparable, so a
+// weak scope is held back by scoring low rather than by a strength floor.
 
 /**
- * Federated `ask` across a workspace: run each child's own per-scope ask
- * pipeline, then fuse ALL the children's scope lists with the same
- * `fuseScopes` used inside a single multi-scope repo. Each child contributes
- * one fusion scope per intra-child scope, labeled `<child>/<scope>` (or just
- * `<child>` for a child's root scope), so a big repo can't drown a small one —
- * rank positions are comparable across repos where raw scores are not.
+ * Federated `ask` across a workspace: run each child's own ask pipeline, then
+ * fuse ALL the children's scope lists with `fuseScopes` (reciprocal rank). Each
+ * child contributes one fusion scope per intra-child scope, labeled
+ * `<child>/<scope>` (or just `<child>` for a child's root scope), so a big repo
+ * can't drown a small one — rank positions are comparable across repos where
+ * raw scores are not.
+ *
+ * Rank fusion is still right HERE, and only here: each child was scored against
+ * its own corpus, so cross-child scores share no scale. Within a single repo
+ * that is no longer true — `rankScopesAndFuse` gives every scope the same
+ * statistics and the same denominator and combines them by score.
  *
  * Returns a normal `AskResult`; `formatAsk` renders it unchanged, labeling each
  * hit `[<child>/…]` via the standard multi-scope path.
@@ -375,15 +386,15 @@ export function federateMap(
 
 /** Per-child drift status. `ok` is false when any BUILT child is stale — an
  * unbuilt child is surfaced (coverage), never a failure. */
-export function federateCheck(
+export async function federateCheck(
   root: string,
   override?: string,
-): { text: string; ok: boolean } {
+): Promise<{ text: string; ok: boolean }> {
   const wg = loadWorkspaceGraphs(root, override);
   const lines = [`workspace check — ${wg.loaded.length + wg.missing.length} repo(s)`, ""];
   let ok = true;
   for (const { child } of wg.loaded) {
-    const g = checkGraph(join(root, child));
+    const g = await checkGraph(join(root, child));
     if (g.ok) {
       lines.push(`${child}/: OK`);
     } else {
@@ -429,7 +440,7 @@ export function federateCallers(
       else for (const h of hits) lines.push(hitLine(direction, h, showDepth));
     }
     const body = lines.join("\n");
-    blocks.push(body + savingsFooter(body, callersSavings(graph, results)));
+    blocks.push(withSavings(body, callersSavings(graph, results)));
   }
 
   const cov = coverageNote(wg);

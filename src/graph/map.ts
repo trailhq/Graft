@@ -22,7 +22,7 @@ import type { GraphV1, NodeV1 } from "./types.js";
 import { languageLabelOf } from "./extract.js";
 import { WALK_RELATIONS } from "./relations.js";
 import { scopeLabel, scopeOf, scopesOfGraph } from "./scopes.js";
-import { savingsFooter, savingsFor, type Savings } from "../context/savings.js";
+import { withSavings, savingsFor, type Savings } from "../context/savings.js";
 
 export interface Hub {
   name: string;
@@ -346,5 +346,5 @@ export function formatRepoMap(map: RepoMap): string {
   lines.push(`hotspots: ${map.hotspots.map(formatHotspot).join("  ")}`);
 
   const body = lines.join("\n");
-  return body + savingsFooter(body, map.saved) + "\n";
+  return withSavings(body, map.saved) + "\n";
 }

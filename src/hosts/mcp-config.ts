@@ -144,6 +144,15 @@ export function mcpTargets(
       case 'gemini':
         out.push(jsonTarget(id, id, join(repo, '.gemini', 'settings.json'), 'mcpServers', entry));
         break;
+      case 'antigravity':
+        // Antigravity reads MCP from its OWN registry, separate from Gemini CLI's
+        // `.gemini/settings.json` — a global `~/.gemini/config/mcp_config.json` (the
+        // gap #62 reported). Standard `{command,args}` under `mcpServers`. Global
+        // scope: it applies to every workspace opened in Antigravity.
+        out.push(
+          jsonTarget(id, 'antigravity', join(home, '.gemini', 'config', 'mcp_config.json'), 'mcpServers', entry, 'global'),
+        );
+        break;
       case 'kiro':
         out.push(jsonTarget(id, id, join(repo, '.kiro', 'settings', 'mcp.json'), 'mcpServers', entry));
         break;

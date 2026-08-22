@@ -63,6 +63,20 @@ export const HOSTS: HostTarget[] = [
     detect: (p) => p.dirExists(join(p.home, '.gemini')),
   },
   {
+    id: 'antigravity',
+    name: 'Google Antigravity',
+    kind: 'section',
+    relPath: 'AGENTS.md',
+    content: instructionBody,
+    // Antigravity-specific markers, NOT the bare `~/.gemini` (which is also Gemini CLI's):
+    // its global config dir (`~/.gemini/config/`, where mcp_config.json + hooks.json live)
+    // or a workspace `.agents/` dir. Keeps a plain Gemini-CLI user from auto-selecting it.
+    detect: (p) =>
+      p.dirExists(join(p.home, '.gemini', 'config')) ||
+      p.dirExists(join(p.home, '.gemini', 'antigravity-cli')) ||
+      p.dirExists(join(p.repo, '.agents')),
+  },
+  {
     id: 'copilot',
     name: 'GitHub Copilot',
     kind: 'section',

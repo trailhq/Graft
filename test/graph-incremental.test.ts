@@ -17,6 +17,7 @@ import { readAskIndex } from "../src/ask/index-file.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import type { GraphV1 } from "../src/graph/types.js";
 import { chmodDenialUnavailable } from "./helpers.js";
+import { writeBuildConfig } from "../src/util/state.js";
 
 const MATH = [
   "export function add(a: number, b: number): number {",
@@ -36,6 +37,19 @@ function repo(): string {
   writeFileSync(join(d, "src", "math.ts"), MATH);
   writeFileSync(join(d, "src", "app.ts"), APP);
   return d;
+}
+
+function gitRun(root: string, args: string[]): void {
+  execFileSync("git", args, { cwd: root, stdio: "ignore" });
+}
+
+function commitRepo(root: string, message: string): void {
+  gitRun(root, ["add", "-A"]);
+  gitRun(root, [
+    "-c", "user.name=Graft Tests",
+    "-c", "user.email=graft-tests@example.invalid",
+    "commit", "-qm", message,
+  ]);
 }
 
 const outOf = (d: string): string => join(d, "graft");
@@ -177,6 +191,72 @@ test("every file on disk lands in the fingerprint", async () => {
   const fp = readFingerprint(outOf(d));
   assert.ok(fp);
   assert.deepEqual(Object.keys(fp!.files).sort(), ["src/app.ts", "src/math.ts"]);
+});
+
+test("initialized submodule files share the graph and freshness fingerprint (#74)", async () => {
+  const parent = repo();
+  const child = mkdtempSync(join(tmpdir(), "graft-incr-submodule-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: parent });
+    commitRepo(parent, "parent fixture");
+
+    execFileSync("git", ["init", "-q"], { cwd: child });
+    mkdirSync(join(child, "src"), { recursive: true });
+    writeFileSync(join(child, ".gitignore"), "*.generated.ts\n");
+    writeFileSync(join(child, "src", "sub.ts"), "export function subValue(): number { return 1; }\n");
+    commitRepo(child, "child fixture");
+
+    gitRun(parent, [
+      "-c", "protocol.file.allow=always",
+      "submodule", "add", "-q", child.replace(/\\/g, "/"), "modules/child",
+    ]);
+    commitRepo(parent, "add child submodule");
+
+    const checkout = join(parent, "modules", "child", "src");
+    writeFileSync(join(checkout, "visible.ts"), "export const visible = 1;\n");
+    writeFileSync(join(checkout, "ignored.generated.ts"), "export const ignored = 1;\n");
+
+    const defaultBuild = await buildGraph(parent);
+    assert.equal(defaultBuild.files, 2, "submodules stay outside the graph by default");
+    const defaultGraph = readGraph(wiringPath(outOf(parent))) as GraphV1;
+    assert.ok(!defaultGraph.nodes.some((n) => n.path.startsWith("modules/child/")));
+
+    writeBuildConfig(parent, { followSubmodules: true });
+    const first = await buildGraph(parent);
+    assert.equal(first.files, 4);
+    const graph = readGraph(wiringPath(outOf(parent))) as GraphV1;
+    assert.ok(graph.nodes.some((n) => n.id === "modules/child/src/sub.ts#subValue"));
+    assert.ok(graph.nodes.some((n) => n.path === "modules/child/src/visible.ts"));
+    assert.ok(!graph.nodes.some((n) => n.path.endsWith("ignored.generated.ts")));
+    assert.deepEqual(Object.keys(readFingerprint(outOf(parent))!.files).sort(), [
+      "modules/child/src/sub.ts",
+      "modules/child/src/visible.ts",
+      "src/app.ts",
+      "src/math.ts",
+    ]);
+    assert.ok(isClean(probeDrift(parent, outOf(parent))!));
+
+    writeFileSync(join(checkout, "sub.ts"), "export function changedSubValue(): number { return 2; }\n");
+    writeFileSync(join(checkout, "added.ts"), "export const added = 1;\n");
+    rmSync(join(checkout, "visible.ts"));
+    writeFileSync(join(checkout, "another.generated.ts"), "export const stillIgnored = 1;\n");
+
+    assert.deepEqual(probeDrift(parent, outOf(parent)), {
+      changed: ["modules/child/src/sub.ts"],
+      added: ["modules/child/src/added.ts"],
+      removed: ["modules/child/src/visible.ts"],
+    });
+
+    await buildGraph(parent);
+    const refreshed = readGraph(wiringPath(outOf(parent))) as GraphV1;
+    assert.ok(refreshed.nodes.some((n) => n.id === "modules/child/src/sub.ts#changedSubValue"));
+    assert.ok(refreshed.nodes.some((n) => n.path === "modules/child/src/added.ts"));
+    assert.ok(!refreshed.nodes.some((n) => n.path === "modules/child/src/visible.ts"));
+    assert.ok(isClean(probeDrift(parent, outOf(parent))!));
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(child, { recursive: true, force: true });
+  }
 });
 
 test("gitignored generated files stay out of the graph, fingerprint, and drift probe (#39)", async () => {

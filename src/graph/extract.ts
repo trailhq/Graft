@@ -11,12 +11,14 @@ import TypeScript from "tree-sitter-typescript";
 import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
 import R from "tree-sitter-r";
+import Java from "tree-sitter-java";
+import PHP from "tree-sitter-php";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "r";
+export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "php" | "r";
 
 /**
  * Extension → the tree-sitter grammar that parses it, and the label a human expects
@@ -45,6 +47,8 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".pyi", grammar: "python", label: "python" },
   { ext: ".py", grammar: "python", label: "python" },
   { ext: ".go", grammar: "go", label: "go" },
+  { ext: ".java", grammar: "java", label: "java" },
+  { ext: ".php", grammar: "php", label: "php" },
   // `entryFor` lower-cases the path before matching, so this one entry covers
   // both `.R` (the conventional case in real R codebases) and `.r`.
   { ext: ".r", grammar: "r", label: "r" },
@@ -53,6 +57,11 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
 function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
   const p = path.toLowerCase();
   return EXTENSIONS.find((e) => p.endsWith(e.ext));
+}
+
+/** Every file extension a depth-tier (hand-written) extractor claims. */
+export function depthExtensions(): string[] {
+  return EXTENSIONS.map((e) => e.ext);
 }
 
 /** Map a file path to a supported language, or null if unsupported. */
@@ -94,6 +103,11 @@ export interface RawEdge {
    * "function", so without this override every such call would be
    * unconditionally unresolvable rather than just occasionally ambiguous. */
   kinds?: Kind[];
+  /** calls: the number of arguments at the CALL SITE. Only emitted for languages
+   * with overloading (Java), where a same-named sibling on the same class is
+   * otherwise indistinguishable — and picking wrong turns a delegating overload
+   * into a self-loop. */
+  argCount?: number;
 }
 
 export interface ExtractResult {
@@ -168,6 +182,36 @@ const GO_KINDS: Record<string, Kind> = {
 // assignment's other side), resolved dynamically in describeR(). Empty, like
 // Go's own table — never consulted, kept only to satisfy KINDS_BY_LANG's type.
 const R_KINDS: Record<string, Kind> = {};
+// Java: a record is a nominal data carrier, so it takes "struct" — the same role
+// Go's struct plays — rather than "class", which would make a service and a DTO
+// indistinguishable in a repo where DTOs are most of the type surface.
+const JAVA_KINDS: Record<string, Kind> = {
+  class_declaration: "class",
+  interface_declaration: "interface",
+  enum_declaration: "enum",
+  record_declaration: "struct",
+  annotation_type_declaration: "interface",
+  annotation_type_element_declaration: "method",
+  method_declaration: "method",
+  constructor_declaration: "method",
+};
+
+/** Java type declarations: they set `enclosingClass` for the methods nested in them,
+ * which "class"-only logic would miss for a record's or interface's members. */
+const JAVA_TYPE_KINDS: ReadonlySet<Kind> = new Set<Kind>(["class", "interface", "enum", "struct"]);
+
+// PHP: definition node types are all distinct (no py-style function→method
+// promotion needed — a class body uses `method_declaration`, not
+// `function_definition`). `trait_declaration` maps to the PHP-only `trait` kind.
+const PHP_KINDS: Record<string, Kind> = {
+  function_definition: "function",
+  method_declaration: "method",
+  class_declaration: "class",
+  interface_declaration: "interface",
+  trait_declaration: "trait",
+  enum_declaration: "enum",
+};
+
 
 const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   typescript: TS_KINDS,
@@ -175,6 +219,32 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   python: PY_KINDS,
   go: GO_KINDS,
   r: R_KINDS,
+  java: JAVA_KINDS,
+  php: PHP_KINDS,
+};
+
+/**
+ * The node type(s) that constitute a call site, per language.
+ *
+ * Java is the reason this is a set rather than a string: `method_invocation` and
+ * `object_creation_expression` (`new Foo()`) are separate node types, and a Java
+ * codebase's constructor calls are a large share of its real edges. PHP is
+ * likewise multi-shape: a call is a function / member / nullsafe-member / scoped
+ * call, never a single `call_expression`.
+ */
+const CALL_TYPES: Record<Language, ReadonlySet<string>> = {
+  typescript: new Set(["call_expression"]),
+  tsx: new Set(["call_expression"]),
+  python: new Set(["call"]),
+  go: new Set(["call_expression"]),
+  java: new Set(["method_invocation", "object_creation_expression"]),
+  php: new Set([
+    "function_call_expression",
+    "member_call_expression",
+    "nullsafe_member_call_expression",
+    "scoped_call_expression",
+  ]),
+  r: new Set(["call"]),
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -193,6 +263,8 @@ const GRAMMARS: Record<Language, unknown> = {
   python: Python,
   go: Go,
   r: R,
+  java: Java,
+  php: PHP.php,
 };
 
 export interface WalkCtx {
@@ -242,6 +314,8 @@ interface DefDescriptor {
   // class-defining call's own public=/private=/active= lists) and rely on the
   // ordinary ctx.enclosingClass fallback instead, so they leave this unset.
   owner?: string;
+  arity?: number; // declared parameter count — overload disambiguation (Java)
+  variadic?: boolean; // last parameter is a vararg, so `arity` is a minimum
 }
 
 /** tree-sitter's string `parse()` fails with "Invalid argument" on any input
@@ -357,7 +431,11 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
             ? goExported(desc.name)
             : ctx.lang === "r"
               ? rExported(desc.name, ctx, node)
-              : tsExported(node),
+              : ctx.lang === "java"
+                ? javaExported(node)
+                : ctx.lang === "php"
+                  ? phpExported(node)
+                  : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -365,14 +443,18 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       summary: null,
       crux: null,
       ...(owner !== undefined ? { owner } : {}),
+      ...(desc.arity !== undefined ? { arity: desc.arity } : {}),
+      ...(desc.variadic ? { variadic: true } : {}),
     });
     // structural containment
     edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
-    // class heritage
-    if (desc.kind === "class") edges.push(...heritageEdges(node, id, ctx));
+    // class heritage — in Java an interface may also `extends`, and a record/enum
+    // may `implements`, so every type declaration is a heritage site, not just a class.
+    const javaTypeDecl = ctx.lang === "java" && JAVA_TYPE_KINDS.has(desc.kind);
+    if (desc.kind === "class" || javaTypeDecl) edges.push(...heritageEdges(node, id, ctx));
 
     const enclosingClass =
-      desc.kind === "class"
+      desc.kind === "class" || javaTypeDecl
         ? desc.name
         : isGoMethod
           ? goReceiverType(node)
@@ -440,14 +522,14 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
   // there's no separate import-statement grammar construct to key off, so isImport
   // must be checked before the generic calls path or every import call would be
   // captured as a (harmlessly unresolvable, but wrong) `calls` edge instead.
-  const callType = ctx.lang === "python" || ctx.lang === "r" ? "call" : "call_expression";
+  const callTypes = CALL_TYPES[ctx.lang];
   if (isImport(node, ctx.lang)) {
     const spec = importSpecifier(node, ctx.lang);
     if (spec) edges.push({ source: ctx.rel, relation: "imports", specifier: spec, file: ctx.rel });
     // Imported identifiers are declarations, not uses. The import-binding pass
     // above already recorded them, so do not descend and emit false references.
     return;
-  } else if (node.type === callType) {
+  } else if (callTypes.has(node.type)) {
     // R6Class(...) / a Phase-5 mixin list(...) is already consumed by its
     // enclosing binary_operator as the class definition (see describeR) — the
     // walk still reaches this SAME call node again, recursing generically to
@@ -467,12 +549,25 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         file: ctx.rel,
         ...(callee.kinds ? { kinds: callee.kinds } : {}),
       };
+      // Java only: the call site's argument count, to pick the right overload.
+      const argCount = ctx.lang === "java" ? javaArgCount(node) : undefined;
+      if (argCount !== undefined) callEdge.argCount = argCount;
       const recvType = resolveRecvType(callee.receiver, ctx);
       edges.push(recvType ? { ...callEdge, recvType } : callEdge);
     }
+  } else if (ctx.lang === "php" && node.type === "use_declaration") {
+    // Trait composition inside a class body (`use HasFactory, Notifiable;`).
+    // Modelled as `implements`: like an interface, a trait is a contract of
+    // behaviour the class mixes in (Graft's Relation set has no `uses`).
+    for (const t of node.namedChildren) {
+      if (t.type === "name" || t.type === "qualified_name") {
+        edges.push({ source: ctx.parentId, relation: "implements", name: t.text.replace(/^.*\\/, ""), file: ctx.rel });
+      }
+    }
+    return;
   } else if (
     node.type === "identifier" &&
-    !isDirectCallee(node, callType) &&
+    !isDirectCallee(node, callTypes) &&
     !isDeclarationName(node)
   ) {
     const imported = ctx.importedSymbols.get(node.text);
@@ -530,6 +625,23 @@ function collectTsImportBindings(
 }
 
 /**
+ * Do these two wrappers stand for the same syntax node? `===` does not answer that:
+ * node-tree-sitter materializes `SyntaxNode` objects on demand and caches them
+ * weakly, so reaching one node twice can return two different JS objects. Comparing
+ * wrappers makes a purely syntactic question depend on collector timing — two cold
+ * builds of unchanged source then disagree on `references` edges (#116).
+ *
+ * `id` is the stable identity, unique within one tree, so the tree is compared too.
+ * A `Tree` is one object per parse (unlike its nodes), so `===` is right for it.
+ */
+function sameSyntaxNode(
+  a: Parser.SyntaxNode | null | undefined,
+  b: Parser.SyntaxNode | null | undefined,
+): boolean {
+  return !!a && !!b && a.tree === b.tree && a.id === b.id;
+}
+
+/**
  * A parameter or local declaration wins over an import inside that function.
  * Drop that imported binding for the whole function rather than create a false
  * dependency. Nested functions are separate scopes and filter themselves.
@@ -542,7 +654,7 @@ function withoutShadowedImports(
   const shadowed = new Set<string>();
   const definitionValue = definition.childForFieldName("value");
   const visit = (node: Parser.SyntaxNode): void => {
-    if (node !== definition && node !== definitionValue && isFunctionBoundary(node)) {
+    if (!sameSyntaxNode(node, definition) && !sameSyntaxNode(node, definitionValue) && isFunctionBoundary(node)) {
       const name = node.childForFieldName("name");
       if (name?.type === "identifier") shadowed.add(name.text);
       return;
@@ -574,16 +686,22 @@ function isFunctionBoundary(node: Parser.SyntaxNode): boolean {
   );
 }
 
-/** A direct invocation already emits a stronger `calls` edge. */
-function isDirectCallee(node: Parser.SyntaxNode, callType: string): boolean {
+/** A direct invocation already emits a stronger `calls` edge. Java names the callee
+ * in a `name` field (there is no `function` field on `method_invocation`), so both
+ * spellings count. */
+function isDirectCallee(node: Parser.SyntaxNode, callTypes: ReadonlySet<string>): boolean {
   const parent = node.parent;
-  return parent?.type === callType && parent.childForFieldName("function") === node;
+  if (!parent || !callTypes.has(parent.type)) return false;
+  return (
+    sameSyntaxNode(parent.childForFieldName("function"), node) ||
+    sameSyntaxNode(parent.childForFieldName("name"), node)
+  );
 }
 
 /** Definition/declaration identifiers name a new binding; they do not use one. */
 function isDeclarationName(node: Parser.SyntaxNode): boolean {
   const parent = node.parent;
-  return parent?.childForFieldName("name") === node;
+  return sameSyntaxNode(parent?.childForFieldName("name"), node);
 }
 
 /** Recognize the definition shapes: mapped node types, Go's type/method forms, and
@@ -591,6 +709,21 @@ function isDeclarationName(node: Parser.SyntaxNode): boolean {
 function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "go") return describeGo(node, ctx);
   if (ctx.lang === "r") return describeR(node, ctx);
+  if (ctx.lang === "java") return describeJava(node, ctx);
+
+  // PHP closures: `$h = function () {…}` / `fn() => …`, and bare callbacks
+  // (`$routes->get('/x', function () {…})`). Captured as function nodes so a
+  // closure-only file (a routing table, a DI container) keeps its structure
+  // and the calls inside attribute to the closure, not the file.
+  if (ctx.lang === "php" && (node.type === "anonymous_function" || node.type === "arrow_function")) {
+    const body = node.childForFieldName("body");
+    return {
+      name: phpClosureName(node),
+      kind: "function",
+      headerEnd: body ? body.startIndex : node.endIndex,
+      hashNode: node,
+    };
+  }
 
   const mapped = ctx.kinds[node.type];
   if (mapped) {
@@ -1093,6 +1226,46 @@ function rRoxygenExported(node: Parser.SyntaxNode): boolean | null {
   return sawRoxygen ? exported : null;
 }
 
+/** Java definition shapes. Uniform in a way Go's are not: every declaration carries
+ * a `name` field and (for types and most members) a `body`, so one mapped lookup
+ * covers classes, interfaces, enums, records, methods, and constructors. Methods are
+ * lexically nested in their type, so — unlike Go — they need no receiver qualification. */
+function describeJava(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
+  const mapped = ctx.kinds[node.type];
+  if (!mapped) return null;
+  const name = node.childForFieldName("name")?.text;
+  if (!name) return null;
+  const body = node.childForFieldName("body");
+  const desc: DefDescriptor = {
+    name,
+    kind: mapped,
+    headerEnd: body ? body.startIndex : node.endIndex,
+    hashNode: node,
+  };
+  // Only callables carry arity. A record declaration also has a `parameters` node,
+  // but its components are not an overload set and must never be filtered against.
+  if (node.type === "method_declaration" || node.type === "constructor_declaration") {
+    const params = node.childForFieldName("parameters");
+    if (params) {
+      const declared = params.namedChildren.filter(
+        (c) => c.type === "formal_parameter" || c.type === "spread_parameter",
+      );
+      desc.arity = declared.length;
+      if (declared.some((c) => c.type === "spread_parameter")) desc.variadic = true;
+    }
+  }
+  return desc;
+}
+
+/** Java visibility: `public` (or `protected`) on the declaration's own modifier list.
+ * A package-private or private member is not part of the API surface. Read off the
+ * `modifiers` child's tokens, ignoring annotations, which live in the same node. */
+function javaExported(node: Parser.SyntaxNode): boolean {
+  const mods = node.namedChildren.find((c) => c.type === "modifiers");
+  if (!mods) return false;
+  return mods.children.some((c) => c.type === "public" || c.type === "protected");
+}
+
 /** The receiver's base type name for a Go method, unwrapping a pointer receiver
  * (`func (u *User) …` → `User`). Null if it can't be read. */
 function goReceiverType(node: Parser.SyntaxNode): string | null {
@@ -1111,8 +1284,52 @@ function goExported(name: string): boolean {
   return first !== first.toLowerCase() && first === first.toUpperCase();
 }
 
+/** PHP visibility: a class member is "exported" unless it is `private`/`protected`.
+ * Top-level functions/classes carry no visibility modifier and are always visible. */
+function phpExported(node: Parser.SyntaxNode): boolean {
+  const vis = node.namedChildren.find((c) => c.type === "visibility_modifier");
+  return vis ? vis.text === "public" : true;
+}
+
+/** Name for a PHP closure / arrow-fn: the variable it's assigned to
+ * (`$handler = fn(...)` -> `handler`, mirroring how TS names arrow-consts),
+ * else the anonymous `{closure}` (deduplicated per file by mintId).
+ *
+ * The "is this the assignment's right-hand side" check compares tree-sitter node
+ * `.id` (a stable per-tree node identity) rather than `===` on the wrapper
+ * objects: the binding does not guarantee that two traversals to the same
+ * underlying node hand back the same JS wrapper, so `right === node` can be false
+ * even when they are the same node — producing a stray `{closure}` name that
+ * makes `graft check` report the graph STALE against its own stored output. */
+function phpClosureName(node: Parser.SyntaxNode): string {
+  const parent = node.parent;
+  if (parent?.type === "assignment_expression" && parent.childForFieldName("right")?.id === node.id) {
+    const left = parent.childForFieldName("left");
+    if (left?.type === "variable_name") return left.text.replace(/^\$/, "");
+  }
+  return "{closure}";
+}
+
 function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): RawEdge[] {
   const edges: RawEdge[] = [];
+  if (ctx.lang === "java") {
+    // `superclass` holds `extends X`; `super_interfaces` holds `implements A, B`
+    // (and, on an interface declaration, `extends A, B` — which tree-sitter-java
+    // still spells `extends_interfaces`).
+    for (const child of node.namedChildren) {
+      const relation: Relation | null =
+        child.type === "superclass"
+          ? "extends"
+          : child.type === "super_interfaces" || child.type === "extends_interfaces"
+            ? "implements"
+            : null;
+      if (!relation) continue;
+      for (const t of typeIdentifiersIn(child)) {
+        edges.push({ source: classId, relation, name: t, file: ctx.rel });
+      }
+    }
+    return edges;
+  }
   if (ctx.lang === "python") {
     const supers = node.childForFieldName("superclasses"); // argument_list
     for (const c of supers?.namedChildren ?? []) {
@@ -1145,6 +1362,21 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
     }
     return edges;
   }
+  if (ctx.lang === "php") {
+    // `class C extends B implements I, J` → base_clause (extends) +
+    // class_interface_clause (implements); names may be namespace-qualified.
+    for (const clause of node.namedChildren) {
+      const relation: Relation | null =
+        clause.type === "base_clause" ? "extends" : clause.type === "class_interface_clause" ? "implements" : null;
+      if (!relation) continue;
+      for (const t of clause.namedChildren) {
+        if (t.type === "name" || t.type === "qualified_name") {
+          edges.push({ source: classId, relation, name: t.text.replace(/^.*\\/, ""), file: ctx.rel });
+        }
+      }
+    }
+    return edges;
+  }
   const heritage = node.namedChildren.find((c) => c.type === "class_heritage");
   for (const clause of heritage?.namedChildren ?? []) {
     const relation: Relation | null =
@@ -1163,10 +1395,47 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
   return edges;
 }
 
+/** Every `type_identifier` under a heritage clause, so `implements A, B<C>` yields
+ * each named type rather than the clause's raw text. */
+function typeIdentifiersIn(node: Parser.SyntaxNode): string[] {
+  const out: string[] = [];
+  const visit = (n: Parser.SyntaxNode): void => {
+    if (n.type === "type_identifier") out.push(n.text);
+    for (const c of n.namedChildren) visit(c);
+  };
+  visit(node);
+  return out;
+}
+
 function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
 ): { name: string; viaMember: boolean; receiver?: string; kinds?: Kind[] } | null {
+  // Java first: `method_invocation` has NO `function` field (it splits the callee
+  // into `object` + `name`), so the shared lookup below would return null for every
+  // Java call site and the language would extract nodes with no call edges at all.
+  if (lang === "java") {
+    if (node.type === "object_creation_expression") {
+      // `new Foo()` — the constructed type is the call target, named as the graph
+      // names it.
+      const name = javaConstructedTypeName(node.childForFieldName("type"));
+      return name ? { name, viaMember: false } : null;
+    }
+    const nameNode = node.childForFieldName("name");
+    if (!nameNode) return null;
+    const obj = node.childForFieldName("object");
+    // No `object` means an implicit-`this` call (`decorate(name)`), which in Java is a
+    // method call, not a free function — Java has none. Reporting it as a plain call
+    // would send it to the function-only resolver and drop it, losing the most common
+    // intra-class edge there is. Spelling it as a `this` member call routes it through
+    // owner-qualified resolution, which also walks the superclass chain and stays
+    // conservative: an unmatched name (e.g. a static import) resolves to nothing.
+    if (!obj) return { name: nameNode.text, viaMember: true, receiver: "this" };
+    return { name: nameNode.text, viaMember: true, receiver: javaReceiver(obj) };
+  }
+
+  if (lang === "php") return phpCallee(node);
+
   const fn = node.childForFieldName("function");
   if (!fn) return null;
   if (fn.type === "identifier") return { name: fn.text, viaMember: false };
@@ -1229,6 +1498,64 @@ function calleeName(
   return null;
 }
 
+/** The number of arguments at a Java call site (`method_invocation` or
+ * `object_creation_expression`), read off the `arguments` list. Undefined when the
+ * list is absent, which keeps resolution at its previous name-only behavior rather
+ * than filtering on a count we never established. */
+function javaArgCount(node: Parser.SyntaxNode): number | undefined {
+  const args = node.childForFieldName("arguments");
+  return args ? args.namedChildren.length : undefined;
+}
+
+/**
+ * The name a `new` CONSTRUCTS, as the graph names it — or null when this pass cannot
+ * say, in which case the construction resolves to nothing.
+ *
+ * Erasing type arguments is the only transformation here, because it is the only one
+ * that provably does not change which type is being named:
+ *
+ *     Box            -> Box
+ *     Box<String>    -> Box     (the node is `Box`; the arguments are not part of it)
+ *     Box<>          -> Box
+ *
+ * A QUALIFIED name is deliberately dropped rather than reduced to its final segment:
+ *
+ *     java.io.File   -> null    (not the repo's own `File`)
+ *     Beta.Builder   -> null    (not `Alpha.Builder` in the same file)
+ *
+ * Collapsing those was the first attempt at this fix, and it traded lost edges for
+ * WRONG ones — `new java.io.File(…)` resolved to an unrelated in-repo `File`, and a
+ * nested `Beta.Builder` bound to a sibling `Alpha.Builder` at `extracted` confidence,
+ * because the same-file tiebreak takes the first candidate. Dropping keeps this pass
+ * on the resolver's own rule: resolve precisely, or not at all.
+ *
+ * Deliberately NOT shared with bindings.ts's `javaTypeName`. That one answers "what
+ * type does this variable HOLD", where reducing `java.util.List` to `List` is a local
+ * heuristic with different stakes; this one answers "what type is being constructed",
+ * and the two questions do not have the same safe answer. Supporting qualified
+ * construction properly needs an import-aware type index, not a longer helper.
+ */
+function javaConstructedTypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "generic_type") return javaConstructedTypeName(node.namedChildren[0]);
+  return node.type === "type_identifier" ? node.text : null;
+}
+
+/** A Java call's receiver text: a bare identifier (`repo.save()`), `this`, or
+ * `this.x` for a field access (`this.repo.save()`). A chained call or a qualified
+ * static reference yields none — there is no confident local clue to bind. */
+function javaReceiver(obj: Parser.SyntaxNode | null | undefined): string | undefined {
+  if (!obj) return undefined;
+  if (obj.type === "identifier") return obj.text;
+  if (obj.type === "this") return "this";
+  if (obj.type === "field_access") {
+    const inner = obj.childForFieldName("object");
+    const field = obj.childForFieldName("field");
+    if (inner?.type === "this" && field) return `this.${field.text}`;
+  }
+  return undefined;
+}
+
 /** py `attribute` node's receiver text: bare identifier, or `self.x` for a
  * chained `self.x.y()`. Anything else (e.g. a chained call `f().g()`) → none. */
 function pyReceiver(fn: Parser.SyntaxNode): string | undefined {
@@ -1239,6 +1566,54 @@ function pyReceiver(fn: Parser.SyntaxNode): string | undefined {
     const innerAttr = obj.childForFieldName("attribute");
     if (innerObj?.type === "identifier" && innerObj.text === "self" && innerAttr) return `self.${innerAttr.text}`;
   }
+  return undefined;
+}
+
+/**
+ * PHP call shapes: `foo()` (function_call_expression), `$obj->m()` /
+ * `$obj?->m()` (member/nullsafe_member_call_expression), and `Cls::m()`
+ * (scoped_call_expression). The called name is the trailing `name`; the
+ * receiver, when locally knowable (`$this`, `self`/`static`/`parent`), feeds
+ * receiver-typed resolution the same way Python's `self` and Go's receiver do.
+ */
+function phpCallee(node: Parser.SyntaxNode): { name: string; viaMember: boolean; receiver?: string } | null {
+  if (node.type === "function_call_expression") {
+    const fn = node.childForFieldName("function");
+    const name = fn ? phpName(fn) : null;
+    return name ? { name, viaMember: false } : null;
+  }
+  const nameNode = node.childForFieldName("name");
+  if (!nameNode) return null;
+  if (node.type === "scoped_call_expression") {
+    return { name: nameNode.text, viaMember: true, receiver: phpScopeReceiver(node.childForFieldName("scope")) };
+  }
+  // member_call_expression / nullsafe_member_call_expression
+  return { name: nameNode.text, viaMember: true, receiver: phpObjReceiver(node.childForFieldName("object")) };
+}
+
+/** A PHP callee identifier: bare `name`, or the trailing segment of a
+ * `qualified_name` (`\App\helpers\slug` → `slug`). Dynamic calls (`$fn()`) → null. */
+function phpName(node: Parser.SyntaxNode): string | null {
+  if (node.type === "name") return node.text;
+  if (node.type === "qualified_name") return node.text.replace(/^.*\\/, "") || null;
+  return null;
+}
+
+/** `$obj->m()` receiver: `$this` normalizes to `this` (→ enclosing class); any
+ * other variable is returned verbatim for a bindings lookup. */
+function phpObjReceiver(obj: Parser.SyntaxNode | null): string | undefined {
+  if (obj?.type !== "variable_name") return undefined;
+  return obj.text === "$this" ? "this" : obj.text;
+}
+
+/** `Cls::m()` receiver: `self`/`static`/`parent` normalize to `self` (→ enclosing
+ * class); an explicit class name is the trailing segment of its qualified path. */
+function phpScopeReceiver(scope: Parser.SyntaxNode | null): string | undefined {
+  if (!scope) return undefined;
+  const text = scope.text;
+  if (scope.type === "relative_scope" || text === "self" || text === "static" || text === "parent") return "self";
+  if (scope.type === "name") return text;
+  if (scope.type === "qualified_name") return text.replace(/^.*\\/, "");
   return undefined;
 }
 
@@ -1271,10 +1646,19 @@ function isImport(node: Parser.SyntaxNode, lang: Language): boolean {
     const fn = node.childForFieldName("function");
     return fn?.type === "identifier" && R_IMPORT_CALLS.has(fn.text);
   }
+  if (lang === "java") return node.type === "import_declaration";
+  // PHP: one edge per imported symbol — the clause leaf inside a (possibly
+  // grouped) `use A\B, C\D;` / `use A\{B, C};` declaration.
+  if (lang === "php") return node.type === "namespace_use_clause";
   return node.type === "import_statement" || node.type === "import_from_statement";
 }
 
 function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null {
+  if (lang === "php") {
+    // namespace_use_clause → its `qualified_name`/`name`, e.g. `App\Models\Animal`.
+    const q = node.namedChildren.find((c) => c.type === "qualified_name" || c.type === "name");
+    return q ? q.text.replace(/^\\/, "") : null;
+  }
   if (lang === "python") {
     const m =
       node.childForFieldName("module_name") ??
@@ -1292,6 +1676,15 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
     const value = rCallArgs(node)[0]?.childForFieldName("value") ?? null;
     if (value?.type === "identifier") return value.text;
     return rStringContent(value);
+  }
+  if (lang === "java") {
+    // `import a.b.C;` / `import static a.b.C.d;` / `import a.b.*;` — the fully
+    // qualified name is the scoped_identifier; a wildcard `*` is a separate token
+    // and is dropped, leaving the package as the import target.
+    const id = node.namedChildren.find(
+      (c) => c.type === "scoped_identifier" || c.type === "identifier",
+    );
+    return id?.text ?? null;
   }
   const str = node.namedChildren.find((c) => c.type === "string");
   if (!str) return null;

@@ -20,6 +20,7 @@
  * only and is never used to re-slice.
  */
 import type { CruxSummarizer, NodeCrux, NodeRef } from "../ai/crux.js";
+import { LlmFailureGate } from "../ai/failure.js";
 import type { Crux, NodeV1 } from "./types.js";
 
 /** Cap on the stored crux: an over-long pick is trimmed to its leading slice. */
@@ -35,6 +36,21 @@ export interface EnrichOptions {
   concurrency?: number;
   /** Progress is reported per file (one LLM call each), as files finish — not per node. */
   onProgress?: (info: { index: number; total: number; node: string }) => void;
+  /**
+   * Durability flush of the (partially) enriched graph, called from the per-file
+   * completion handler at most once every {@link CHECKPOINT_MS}. Without it, crux
+   * only reached wiring.json at build end, so an interrupted --deep run discarded
+   * every crux it had already computed and paid for (#128). Single-threaded, so it
+   * never interleaves with a node mutation.
+   */
+  checkpoint?: () => void;
+}
+
+/** How often the crux pass flushes partial progress to disk. Read at call time (not
+ * module load) so a test seam `GRAFT_CRUX_CHECKPOINT_MS=0` (flush on every completed
+ * file) takes effect. */
+function checkpointMs(): number {
+  return Number(process.env.GRAFT_CRUX_CHECKPOINT_MS ?? 15000);
 }
 
 export interface EnrichStats {
@@ -43,6 +59,16 @@ export interface EnrichStats {
   stale: number; // body changed, left with an outdated summary (no LLM this run)
   pending: number; // never summarized and not computed this run
   errors: string[];
+  /** Files whose LLM call failed outright. The count `errors` used to only imply —
+   * a caller has to be able to decide "this build is degraded" without parsing
+   * message strings (#127). */
+  failedFiles: number;
+  /** Files never attempted, because {@link EnrichStats.fatal} stopped the pass. */
+  skippedFiles: number;
+  /** Set when the pass gave up early: quota/auth rejection, or a run of failures
+   * that says the provider is not going to start working. The reason is written
+   * for a human — it is what `graft build --deep` exits non-zero with. */
+  fatal?: string;
 }
 
 export async function enrichGraph(
@@ -51,7 +77,15 @@ export async function enrichGraph(
   sources: Map<string, string>,
   opts: EnrichOptions = {},
 ): Promise<EnrichStats> {
-  const stats: EnrichStats = { cached: 0, computed: 0, stale: 0, pending: 0, errors: [] };
+  const stats: EnrichStats = {
+    cached: 0,
+    computed: 0,
+    stale: 0,
+    pending: 0,
+    errors: [],
+    failedFiles: 0,
+    skippedFiles: 0,
+  };
 
   // Which nodes actually need an LLM call this run (after cache carry-over).
   const dirty: NodeV1[] = [];
@@ -100,11 +134,34 @@ export async function enrichGraph(
   const files = [...byFile.keys()];
   const limit = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
   let done = 0;
+  const flushEvery = checkpointMs();
+  let lastCheckpoint = Date.now();
+
+  // Shared with the concept pass (`context/build.ts`), so both agree on when a
+  // provider has stopped working. Counted across the whole pass, not per worker:
+  // with `-j 5` the interleaving is what a user sees as "everything is failing now".
+  const gate = new LlmFailureGate();
 
   await mapWithConcurrency(files, limit, async (path) => {
     const fileNodes = byFile.get(path)!;
     const source = sources.get(path)!;
     const lineCount = source.split("\n").length;
+
+    // Once the pass is fatal, the remaining files are not attempted: every call
+    // would fail the same way, and on a metered gateway each one still costs a
+    // request. They are counted so the caller can report what was left undone.
+    if (gate.stopped) {
+      gate.skip();
+      for (const node of fileNodes) {
+        if (node.summary_state === "stale") stats.stale++;
+        else stats.pending++;
+      }
+      // Still reported, so the caller's progress counter reaches `total` instead of
+      // freezing at the file that broke — the abort is announced by the build's
+      // summary, not by a stalled line.
+      opts.onProgress?.({ index: done++, total: files.length, node: path });
+      return;
+    }
 
     const refs: NodeRef[] = fileNodes.map((n) => {
       const [startLine, endLine] = spanLines(n.span, lineCount);
@@ -112,7 +169,12 @@ export async function enrichGraph(
     });
 
     const { results, error } = await collectFileCrux(summarizer, path, source, refs);
-    if (error) stats.errors.push(`${path}: ${error}`);
+    if (error) {
+      stats.errors.push(`${path}: ${error}`);
+      gate.record(error);
+    } else {
+      gate.succeeded();
+    }
 
     for (const node of fileNodes) {
       const r = results.size > 0 ? results.get(node.id) : undefined;
@@ -130,8 +192,19 @@ export async function enrichGraph(
 
     // Report on completion so the counter climbs monotonically under concurrency.
     opts.onProgress?.({ index: done++, total: files.length, node: path });
+
+    // Flush partial crux to disk periodically, so a killed --deep run keeps what it
+    // has already computed (#128). Throttled by wall-clock; the caller's checkpoint
+    // writes wiring.json atomically, and the next run folds it back in by body_hash.
+    if (opts.checkpoint && Date.now() - lastCheckpoint >= flushEvery) {
+      lastCheckpoint = Date.now();
+      opts.checkpoint();
+    }
   });
 
+  stats.failedFiles = gate.failed;
+  stats.skippedFiles = gate.skipped;
+  stats.fatal = gate.fatal;
   return stats;
 }
 

@@ -13,6 +13,7 @@ import { statSync } from 'node:fs';
 import { HOSTS, detectHosts, type DetectProbe, type HostTarget } from './registry.js';
 import { mcpTargets } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
+import { antigravitySkillTargets } from './antigravity.js';
 import { claudeTargets } from '../claude/init.js';
 
 /** Where a write lands. 'global' = outside the repo, affects every project. */
@@ -26,7 +27,7 @@ export interface PlannedWrite {
   id: string;
   path: string;
   scope: WriteScope;
-  kind: 'instruction' | 'mcp' | 'hook' | 'claude';
+  kind: 'instruction' | 'mcp' | 'hook' | 'claude' | 'skill';
   /** Short human label for what changes in that file. */
   what: string;
 }
@@ -77,6 +78,7 @@ export function planInit(repo: string, opts: { home?: string; ids?: string[] } =
         instructionTarget(repo, host),
         ...mcpTargets(repo, [host.id], { home }),
         ...(host.id === 'agents' ? hookTargets(home) : []),
+        ...(host.id === 'antigravity' ? antigravitySkillTargets(home) : []),
       ],
     })),
   ];

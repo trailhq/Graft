@@ -43,6 +43,8 @@ export interface GraphRunOptions {
   concurrency?: number;
   /** Replay unchanged files from the extraction cache (default true). */
   reuse?: boolean;
+  /** Opt-in compiler-grade LSP edge enrichment (`graft build --lsp`). */
+  lsp?: boolean;
   onProgress?: GraphBuildOptions["onProgress"];
 }
 
@@ -70,8 +72,9 @@ export class Graft {
     return checkContext(dir, { contextDir: this.cfg.contextDir, extensions: opts.extensions });
   }
 
-  /** Report whether the committed `graph.json` is in sync with the code (Tier-1 diff). */
-  checkGraph(dir: string): GraphCheckResult {
+  /** Report whether the committed `graph.json` is in sync with the code (Tier-1 diff).
+   * Async because the breadth tier warms WASM grammars before re-extraction. */
+  checkGraph(dir: string): Promise<GraphCheckResult> {
     return checkGraph(dir, { contextDir: this.cfg.contextDir });
   }
 
@@ -86,6 +89,7 @@ export class Graft {
       summarizer: opts.llm ? this.cruxSummarizer() : undefined,
       concurrency: opts.concurrency,
       reuse: opts.reuse,
+      lsp: opts.lsp,
       onProgress: opts.onProgress,
     });
   }
@@ -95,13 +99,14 @@ export class Graft {
    * channel. Deterministic and $0: routes structural queries to the wiring
    * edges and everything else to a lexical rank over concepts + symbols.
    */
-  ask(dir: string, query: string, opts: { limit?: number; source?: boolean; full?: boolean; in?: string } = {}): AskResult {
+  ask(dir: string, query: string, opts: { limit?: number; source?: boolean; full?: boolean; in?: string; graphRank?: boolean } = {}): AskResult {
     return ask(dir, query, {
       contextDir: this.cfg.contextDir,
       limit: opts.limit,
       source: opts.source,
       full: opts.full,
       in: opts.in,
+      graphRank: opts.graphRank,
     });
   }
 

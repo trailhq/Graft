@@ -7,7 +7,7 @@
  */
 import { Graft } from "../engine.js";
 import { contextDirFor, ensureGitignored } from "../context/node-file.js";
-import { writeBuildConfig } from "../util/state.js";
+import { patchBuildConfig, type BuildConfig } from "../util/state.js";
 import type { EngineConfig } from "../ai/providers.js";
 import { formatAsk } from "../ask/ask.js";
 import type { Direction } from "./traverse.js";
@@ -36,6 +36,8 @@ export interface WorkspaceBuildOptions {
    * independent repos with their own local settings and can later be rebuilt
    * directly without seeing the parent invocation's flags. */
   includeDirs?: string[];
+  /** An explicit CLI submodule choice to persist into every child repo. */
+  followSubmodules?: boolean;
 }
 
 /** Build every git child into its own committable `graft/`, then replace the
@@ -44,10 +46,16 @@ export interface WorkspaceBuildOptions {
 export async function runWorkspaceBuild(root: string, opts: WorkspaceBuildOptions): Promise<void> {
   const buildChild = async (childDir: string, childName: string): Promise<void> => {
     // Persisted BEFORE the child build itself runs, same as the single-repo
-    // `graft build --include-dir` path in cli.ts — so this child's walks (and
-    // every later no-flag build of it) see the override identically.
+    // path in cli.ts, so this build and every later no-flag child build agree.
+    const childConfigPatch: BuildConfig = {};
     if (opts.includeDirs && opts.includeDirs.length > 0) {
-      writeBuildConfig(childDir, { includeDirs: opts.includeDirs });
+      childConfigPatch.includeDirs = opts.includeDirs;
+    }
+    if (opts.followSubmodules !== undefined) {
+      childConfigPatch.followSubmodules = opts.followSubmodules;
+    }
+    if (Object.keys(childConfigPatch).length > 0) {
+      patchBuildConfig(childDir, childConfigPatch);
     }
     const engine = new Graft({ ...opts.childConfig, contextDir: undefined });
     if (opts.deep) await engine.init(childDir, { extensions: opts.extensions });
@@ -110,8 +118,8 @@ export function runWorkspaceMap(
   process.stdout.write(federateMap(root, override, { maxDirs: opts.maxDirs }));
 }
 
-export function runWorkspaceCheck(root: string, override?: string): void {
-  const { text, ok } = federateCheck(root, override);
+export async function runWorkspaceCheck(root: string, override?: string): Promise<void> {
+  const { text, ok } = await federateCheck(root, override);
   process.stdout.write(text);
   if (!ok) process.exit(1);
 }

@@ -64,16 +64,18 @@ export function readStats(d: string): Stats | null { return readJson<Stats>(stat
 export function writeStats(d: string, s: Stats): void { writeJsonAtomic(statsPath(d), s); }
 
 /**
- * Persisted per-repo build configuration — currently just `graft build
- * --include-dir`'s override. An explicit input like the graph itself: absent
- * or empty `includeDirs` means today's default (every `SKIP_DIRS` name stays
- * skipped), so a repo that never used the flag is entirely unaffected.
+ * Persisted per-repo build configuration. Explicit CLI choices live here so
+ * later no-flag builds and automatic refreshes enumerate the same file set.
+ * Missing fields always retain backwards-compatible defaults.
  */
 export interface BuildConfig {
   /** SKIP_DIRS names to include in this repo's walks, persisted so a LATER
    * no-flag build — and the fingerprint/refresh path, which never sees CLI
    * flags at all — behave identically to the invocation that set it. */
   includeDirs?: string[];
+  /** Whether initialized Git submodules are folded into this repo's graph.
+   * Absent/false keeps the historical boundary at the superproject. */
+  followSubmodules?: boolean;
 }
 
 /** Local, Git-ignored repository configuration. Kept outside generated
@@ -105,6 +107,12 @@ export function writeBuildConfig(d: string, c: BuildConfig): void {
   writeJsonAtomic(buildConfigPath(d), c);
 }
 
+/** Merge explicit CLI choices into the existing local config, so updating one
+ * persisted build option cannot erase another. */
+export function patchBuildConfig(d: string, patch: BuildConfig): void {
+  writeBuildConfig(d, { ...(readBuildConfig(d) ?? {}), ...patch });
+}
+
 /** The persisted `--include-dir` override for repo `d`, as a Set — `undefined`
  * when nothing was ever persisted (or the persisted list is empty), which every
  * `shouldSkipDir`/`walkDir` caller treats as "today's default behavior". Shared
@@ -113,6 +121,11 @@ export function writeBuildConfig(d: string, c: BuildConfig): void {
 export function readIncludeDirs(d: string): Set<string> | undefined {
   const dirs = readBuildConfig(d)?.includeDirs;
   return dirs && dirs.length ? new Set(dirs) : undefined;
+}
+
+/** Missing and explicit false both retain the backwards-compatible default. */
+export function readFollowSubmodules(d: string): boolean {
+  return readBuildConfig(d)?.followSubmodules === true;
 }
 // Best-effort read-modify-write; not atomic across concurrent processes, but acceptable
 // for episodic hook writes (worst case is a lost update, not corruption).

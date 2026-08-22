@@ -146,14 +146,14 @@ test("check federation: OK when all in sync, STALE + not-ok when a child drifts"
   const p = workspaceFx(REPOS);
   await buildWorkspace(p);
 
-  const fresh = federateCheck(p);
+  const fresh = await federateCheck(p);
   assert.equal(fresh.ok, true);
   assert.ok(fresh.text.includes("repoA/: OK"));
   assert.ok(fresh.text.includes("repoB/: OK"));
 
   // Change repoA's code WITHOUT rebuilding → present-and-stale.
   writeFileSync(join(p, "repoA", "a.ts"), "export function alphaHandler() { return 99; }\nexport function newlyAdded() { return 0; }\n");
-  const drifted = federateCheck(p);
+  const drifted = await federateCheck(p);
   assert.equal(drifted.ok, false);
   assert.ok(drifted.text.includes("repoA/: STALE"));
   rmSync(p, { recursive: true, force: true });
