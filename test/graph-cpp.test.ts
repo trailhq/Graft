@@ -282,3 +282,106 @@ test("C++ extraction: contains edges (file -> class -> method nesting)", async (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// C — the same grammar (tree-sitter-cpp parses C as a near-superset) over a
+// header/source split. What C adds beyond the C++ cases above: prototypes,
+// typedefs and unions in a header are the symbols a reader navigates by, so
+// they must be nodes; a prototype must not shadow its definition at a call
+// site; and a same-file forward declaration must not mint a second node.
+// ---------------------------------------------------------------------------
+
+const APP_H = `#pragma once
+
+typedef struct { int x; int y; } Point;
+typedef int Id;
+typedef struct Node { struct Node *next; } Node;
+typedef enum Mode { FAST, SLOW } Mode;
+union Value { int i; float f; };
+enum Color { RED, GREEN };
+
+int run(int argc);
+char *name_of(Id id);
+extern int (*callback)(int);
+`;
+
+const APP_C = `#include "app.h"
+
+static int helper(void);
+
+int run(int argc) { return helper() + argc; }
+
+static int helper(void) { return 1; }
+`;
+
+const MAIN_C = `#include "app.h"
+
+int main(void) { return run(0); }
+`;
+
+function makeCFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), "graft-c-"));
+  writeFileSync(join(dir, "app.h"), APP_H);
+  writeFileSync(join(dir, "app.c"), APP_C);
+  writeFileSync(join(dir, "main.c"), MAIN_C);
+  return dir;
+}
+
+test("C extraction: .c files are indexed by the depth tier", async () => {
+  const dir = makeCFixture();
+  try {
+    const result = await buildGraph(dir);
+    assert.ok(result.languages.includes("c"), `languages should include "c", got ${result.languages}`);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+
+    assert.equal(nodeById(graph, "app.c#run")?.kind, "function");
+    assert.equal(nodeById(graph, "main.c#main")?.kind, "function");
+    // `static int helper(void);` + its definition below: ONE node, the definition.
+    const helpers = graph.nodes.filter((n) => n.path === "app.c" && n.name === "helper");
+    assert.equal(helpers.length, 1, `forward declaration must not mint a second node: ${helpers.map((n) => n.id)}`);
+    assert.equal(helpers[0].span, "L7-L7", "the surviving node is the definition, not the forward declaration");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("C extraction: header prototypes, typedefs and unions become nodes", async () => {
+  const dir = makeCFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+
+    assert.equal(nodeById(graph, "app.h#run")?.kind, "function", "prototype");
+    assert.equal(nodeById(graph, "app.h#name_of")?.kind, "function", "prototype returning a pointer");
+    assert.equal(nodeById(graph, "app.h#callback"), undefined, "a function-pointer VARIABLE is not a prototype");
+
+    assert.equal(nodeById(graph, "app.h#Point")?.kind, "struct", "typedef of an anonymous struct takes the struct's kind");
+    assert.equal(nodeById(graph, "app.h#Id")?.kind, "type", "typedef of a scalar is a type alias");
+    assert.equal(nodeById(graph, "app.h#Node")?.kind, "struct");
+    assert.equal(nodeById(graph, "app.h#Node~2"), undefined, "typedef struct Node {…} Node; is ONE node");
+    assert.equal(nodeById(graph, "app.h#Mode")?.kind, "enum");
+    assert.equal(nodeById(graph, "app.h#Mode~2"), undefined, "typedef enum Mode {…} Mode; is ONE node");
+    assert.equal(nodeById(graph, "app.h#Value")?.kind, "struct", "a union is a nominal aggregate, like a struct");
+    assert.equal(nodeById(graph, "app.h#Color")?.kind, "enum");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("C extraction: a cross-file call resolves to the definition, not the header prototype", async () => {
+  const dir = makeCFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const calls = graph.edges.filter((e) => e.relation === "calls");
+
+    assert.ok(
+      calls.some((e) => e.source === "main.c#main" && e.target === "app.c#run"),
+      `main() -> run() should resolve to the definition; got ${JSON.stringify(calls)}`,
+    );
+    assert.ok(!calls.some((e) => e.source === "main.c#main" && e.target === "app.h#run"), "never to the prototype");
+    assert.ok(calls.some((e) => e.source === "app.c#run" && e.target === "app.c#helper"), "same-file call resolves locally");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

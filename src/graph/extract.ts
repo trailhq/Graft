@@ -60,6 +60,9 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   // One "cpp" grammar for the whole C/C++ family — tree-sitter-cpp parses C as a
   // strict-ish superset, same approach clangd and most polyglot tooling take. No
   // separate C grammar/language for v1 (documented limitation, not an oversight).
+  // `.c` is labelled "c" — that one is unambiguous, and the banner should say so;
+  // a header could be either, so it keeps the family label.
+  { ext: ".c", grammar: "cpp", label: "c" },
   { ext: ".hpp", grammar: "cpp", label: "cpp" },
   { ext: ".hh", grammar: "cpp", label: "cpp" },
   { ext: ".hxx", grammar: "cpp", label: "cpp" },
@@ -290,6 +293,10 @@ export interface WalkCtx {
   // per-node exported check in this file. null outside any class/struct body
   // (top-level definitions default to exported — see cppExported).
   cppAccess: "public" | "private" | "protected" | null;
+  // C/C++: the bare names of every function THIS file defines (pre-pass), so a
+  // prototype or forward declaration of one of them does not mint a second node —
+  // the definition is the node, the declaration is noise. Empty for other languages.
+  cppDefinedFns: ReadonlySet<string>;
 }
 
 /** A definition we're about to emit, normalized across the shapes we handle. */
@@ -306,6 +313,9 @@ interface DefDescriptor {
   owner?: string;
   arity?: number; // declared parameter count — overload disambiguation (Java)
   variadic?: boolean; // last parameter is a vararg, so `arity` is a minimum
+  // C/C++: a prototype — a declaration with no body. Emitted so a header's API is
+  // navigable, flagged so resolution prefers the definition (see resolve.ts).
+  declaration?: boolean;
 }
 
 /** tree-sitter's string `parse()` fails with "Invalid argument" on any input
@@ -356,6 +366,7 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
     goReceiverVar: null,
     importedSymbols,
     cppAccess: null,
+    cppDefinedFns: lang === "cpp" ? collectCppDefinedFunctions(root) : NO_NAMES,
   };
   // Every id minted this file, seeded with the file node's own id (`rel`) so a
   // top-level definition can never collide with it. Threaded as its own
@@ -368,6 +379,24 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
   // residual on the file node so a term outside every symbol still surfaces it.
   nodes[0].body_text = fileResidual(source, nodes.slice(1));
   return { nodes, rawEdges };
+}
+
+const NO_NAMES: ReadonlySet<string> = new Set();
+
+/** Every free function this C/C++ file DEFINES (has a body), by bare name. A
+ * prototype for one of these — `static int helper(void);` ahead of its definition,
+ * or a header's declaration re-stated in the .c that defines it — is then skipped:
+ * the definition is the node, and a second one would be a dedup-suffixed duplicate.
+ * Out-of-line methods (`void Foo::bar() {}`) are not collected: they have no
+ * file-scope prototype form. */
+function collectCppDefinedFunctions(root: Parser.SyntaxNode): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const def of root.descendantsOfType("function_definition")) {
+    const declarator = def.childForFieldName("declarator");
+    const resolved = declarator ? cppDeclaratorName(declarator) : null;
+    if (resolved && resolved.scope === null) names.add(resolved.name);
+  }
+  return names;
 }
 
 /** Mint-time uniqueness: a document-order duplicate (same name reopened, or two
@@ -433,6 +462,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       ...(owner !== undefined ? { owner } : {}),
       ...(desc.arity !== undefined ? { arity: desc.arity } : {}),
       ...(desc.variadic ? { variadic: true } : {}),
+      ...(desc.declaration ? { declaration: true } : {}),
     });
     // structural containment
     edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
@@ -813,17 +843,59 @@ function goExported(name: string): boolean {
   return first !== first.toLowerCase() && first === first.toUpperCase();
 }
 
+// The named aggregates, and the kind each takes. A union is a nominal data carrier
+// like a struct — graft's Kind set has no `union`, and "struct" is what a reader
+// expects to filter by.
+const CPP_SPECIFIER_KINDS: Record<string, Kind> = {
+  class_specifier: "class",
+  struct_specifier: "struct",
+  union_specifier: "struct",
+  enum_specifier: "enum",
+};
+
 /** C++ definition shapes: classes/structs/enums (a direct `name`-field lookup,
  * same as the flat-table languages) and function/method definitions, whose name
  * is buried inside a declarator chain rather than a `name` field — this grammar's
  * analogue of `describeGo`'s special-casing, not the flat-table path C#/TS use. */
 function describeCpp(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
-  if (node.type === "class_specifier" || node.type === "struct_specifier" || node.type === "enum_specifier") {
+  const specKind = CPP_SPECIFIER_KINDS[node.type];
+  if (specKind) {
     const name = node.childForFieldName("name")?.text;
     if (!name) return null;
-    const kind: Kind = node.type === "class_specifier" ? "class" : node.type === "struct_specifier" ? "struct" : "enum";
     const body = node.childForFieldName("body");
-    return { name, kind, headerEnd: body ? body.startIndex : node.endIndex, hashNode: cppHashNode(node) };
+    return { name, kind: specKind, headerEnd: body ? body.startIndex : node.endIndex, hashNode: cppHashNode(node) };
+  }
+
+  // C: `typedef struct {…} Point;` / `typedef int Id;` / `typedef struct Node {…} Node;`.
+  // The typedef NAME is what the rest of the code spells, so it is the node — unless
+  // it merely re-states a named aggregate's own name, in which case the aggregate
+  // (matched above as the walk descends) is the node and the typedef adds nothing.
+  if (node.type === "type_definition") {
+    const name = node.childForFieldName("declarator")?.descendantsOfType("type_identifier")[0]?.text;
+    if (!name) return null;
+    const inner = node.childForFieldName("type");
+    const innerKind = inner ? CPP_SPECIFIER_KINDS[inner.type] : undefined;
+    let kind: Kind = "type";
+    if (inner && innerKind) {
+      const innerName = inner.childForFieldName("name")?.text;
+      if (innerName === name) return null;
+      // An anonymous aggregate has no name of its own, so the typedef IS the struct/enum.
+      if (!innerName && inner.childForFieldName("body")) kind = innerKind;
+    }
+    return { name, kind, headerEnd: node.endIndex, hashNode: node };
+  }
+
+  // A prototype: `int run(int argc);` at file/namespace scope (block-scope externs
+  // and class-body members are other node types and never reach here). Skipped when
+  // this same file defines the function — the definition is the node. Flagged as a
+  // declaration so a call resolves to the definition elsewhere, not to this stub.
+  if (node.type === "declaration") {
+    if (ctx.enclosingKind === "function" || ctx.enclosingKind === "method") return null;
+    const declarator = node.childForFieldName("declarator");
+    const resolved = declarator ? cppDeclaratorName(declarator) : null;
+    if (!resolved || resolved.scope !== null) return null;
+    if (ctx.cppDefinedFns.has(resolved.name)) return null;
+    return { name: resolved.name, kind: "function", headerEnd: node.endIndex, hashNode: cppHashNode(node), declaration: true };
   }
 
   if (node.type === "function_definition") {

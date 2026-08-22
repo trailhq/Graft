@@ -85,6 +85,10 @@ export interface NodeV1 {
   //                 languages that do not emit it — resolution then behaves as before.
   variadic?: boolean; // the last parameter is a vararg (`String... xs`), so the declared
   //                 arity is a MINIMUM, not an equality. Never arity-filtered out.
+  declaration?: true; // a prototype (C/C++: a header's `int run(int);`) — a symbol with
+  //                 no body of its own. Kept as a node so a header's API is navigable;
+  //                 name resolution prefers a same-named DEFINITION over it, so a call
+  //                 lands on the code, not the stub. Absent on every other node.
 
   // meaning (Tier-2, one LLM call)
   summary_state: SummaryState;

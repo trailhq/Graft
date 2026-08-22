@@ -224,10 +224,21 @@ function resolveName(
   globalName: Map<string, NodeV1[]>,
 ): { id: string; confidence: EdgeV1["confidence"] } | null {
   const local = (perFileName.get(file)?.get(name) ?? []).filter((n) => kinds.includes(n.kind));
-  if (local.length) return { id: local[0].id, confidence: "extracted" };
+  if (local.length) return { id: preferDefinition(local)[0].id, confidence: "extracted" };
   const global = (globalName.get(name) ?? []).filter((n) => kinds.includes(n.kind));
-  if (global.length === 1) return { id: global[0].id, confidence: "inferred" };
+  // A header's prototype and the .c/.cpp definition are two nodes with one name:
+  // the definition is the target. Only when no definition is in the repo does the
+  // prototype itself resolve (an external library's header) — still one candidate.
+  const preferred = preferDefinition(global);
+  if (preferred.length === 1) return { id: preferred[0].id, confidence: "inferred" };
   return null;
+}
+
+/** Drop declaration-only nodes (C/C++ prototypes) from a candidate set when at
+ * least one real definition is present; otherwise hand the set back unchanged. */
+function preferDefinition(candidates: NodeV1[]): NodeV1[] {
+  const defs = candidates.filter((n) => !n.declaration);
+  return defs.length ? defs : candidates;
 }
 
 /**
