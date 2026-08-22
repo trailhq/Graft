@@ -4,121 +4,30 @@
 
 ### Added
 
-- **R language support (Phase 1: flat function extraction).** `tree-sitter-r`
-  (`npm:@davisvaughan/tree-sitter-r`, since `tree-sitter-r` on npm is an
-  unrelated squatted placeholder) parses `.R`/`.r` files. Every
-  `name <- function(...) {}` / `name = function(...) {}` /
-  `function(...) {} -> name` becomes a flat `function` node — the same
-  altitude Python support already operates at for module-level `def`s, and no
-  S3/S4/R6 class awareness (that convention-based, ambiguity-prone work is
-  scoped as a separate Phase 2). `function_definition` carries no name field
-  at all in this grammar — the identifier always comes from an enclosing
-  assignment, and R's one generic `binary_operator` node is shared by every
-  binary op, not just assignment, so a filtering pass was needed. Right-assign
-  (`->`/`->>`) needed its own logic rather than mirroring left-assign: its low
-  operator precedence means it's absorbed into the function definition's own
-  `body` field instead of the function sitting inside an outer
-  `binary_operator`, which only empirically dumping the real AST caught.
-  `library()`/`require()`/`source()` calls are recognized as imports by
-  pattern-matching the callee name (R has no import statement at the grammar
-  level); `pkg::fn()` and `obj$method()` calls resolve by bare name, since
-  Phase 1 has no type-binding table to back a typed member-call match yet.
-  Visibility is the leading-dot naming convention only (`.helper` = internal);
-  roxygen `@export` tag detection is left for a follow-up once an
-  extras-comment-scanning helper exists.
+- **R language support.** `tree-sitter-r` (`npm:@davisvaughan/tree-sitter-r`;
+  the unscoped npm name is a squatted placeholder) parses `.R`/`.r` files.
+  Plain functions: every `name <- function(...)` / `name = function(...)` /
+  `function(...) -> name` assignment becomes a `function` node (the grammar's
+  `function_definition` has no name field, so the name comes from the
+  enclosing assignment; right-assign has its own AST shape). Classes — R's
+  class systems are library convention, not syntax, so they are recognised by
+  call idiom: **R6** (`R6::R6Class(...)` — the class node, `public =`/
+  `private =`/`active =` entries as methods, `inherit =` heritage, and `self$`/
+  `private$`/`super$` calls resolving to the class or its parent), **S4**
+  (`setClass()`/`setMethod()` with `contains =` heritage), **S3**
+  (`generic.Class <- function()` only when `generic` is registered locally via
+  `UseMethod()` or is one of a small curated base-R set — false negatives over
+  false positives), and plain-list mixin bundles (`Foo <- list(public =
+  list(...), ...)`) that are spliced across classes instead of inherited. An
+  untyped `obj$method()` resolves by bare name to a uniquely-named method
+  (ambiguous drops). Visibility: a roxygen `#' @export` tag wins; a roxygen
+  block without it means "not exported"; no roxygen falls back to the
+  leading-dot convention; R6 `private =` members are unexported.
+  `library()`/`require()`/`source()` calls are the import edges. Known gaps:
+  S3 generics registered in another file aren't seen (per-file pass); S4
+  `signature()` multiple dispatch isn't handled; R6 active bindings are
+  ordinary methods.
 
-- **R language support, Phase 2: S3/S4/R6 class awareness.** R's class systems
-  are library *convention*, not grammar syntax, so this is the first
-  "pattern-match known call idioms → sometimes a class/method" language in
-  graft rather than "one grammar construct → one kind." **R6**
-  (`Foo <- R6::R6Class("Foo", public = list(...), private = list(...))`) is
-  the highest-value target — this repo's own dominant R OOP style — and gets
-  full support: the class node, `public =`/`private =`/`active =` list
-  entries as methods (private ones unexported), `inherit =` heritage, and
-  `self$`/`private$` calls resolving directly to the enclosing class the same
-  way Python's `self`/TS's `this` already do. **S4** (`setClass()` /
-  `setMethod()`) — both are `call` nodes with side effects, essentially never
-  assigned to a variable — become a class and an owned method respectively,
-  with `contains =` (single or `c(...)`-vector) heritage; `setGeneric()` isn't
-  specially extracted (no natural class/method mapping). **S3**
-  (`generic.Class <- function() {}`) is the genuinely ambiguous one flagged in
-  the plan: `read.csv`/`data.frame` are NOT S3 dispatch, and nothing in the
-  grammar distinguishes them from `print.MyClass`. A `name.Class` assignment
-  only becomes an S3 method when `name` is a generic registered locally via a
-  `UseMethod()` call in the same file, or is one of a small curated set of
-  common base-R generics (`print`, `format`, `summary`, ...) — erring toward
-  false negatives (an unrecognized S3 method just stays a plain function)
-  over false positives. Known gaps: S3 generics registered in a *different*
-  file than their methods aren't recognized (no whole-repo pass exists yet —
-  same per-file limitation Go/C++ bindings already accept); S4's
-  `setMethod()` only handles a single string-literal dispatch class, not
-  `signature()`-based multiple dispatch; R6 active bindings are treated as
-  ordinary (exported) methods with no distinction from regular ones.
-
-- **R language support, Phase 3: roxygen `@export` visibility and R6
-  `super$` dispatch.** Scoped for an R6-plus-roxygen setup specifically (no
-  S3/S4 involved). A `#' @export` roxygen tag now marks its definition
-  exported regardless of the leading-dot naming convention; a definition with
-  *some* roxygen doc block but no `@export` tag is instead treated as an
-  explicit "not exported" (roxygen's own NAMESPACE-generation convention: only
-  `@export`-tagged items are exported, so documented-but-untagged is a real
-  signal, not an absence of evidence) — the naming-convention fallback only
-  kicks in when there's no roxygen block at all. `comment` is a grammar extra
-  (floats as an ordinary sibling rather than attaching to "the next
-  statement"), so this walks backward through a definition's preceding
-  `previousNamedSibling` chain collecting a contiguous roxygen (`#'`) comment
-  run. R6's `super$method()` — its inheritance-dispatch keyword — now resolves
-  directly to the parent class's method (via the same `inherit =` heritage
-  already extracted in Phase 2), rather than falling back to a plain bare-name
-  match that could just as easily match the current class's own same-named
-  override. Also fixed in passing: the `R6Class(...)` call itself no longer
-  generates a spurious (harmless — always unresolved and dropped, but wasted)
-  `calls`-edge intent to a function literally named `"R6Class"`.
-
-- **R language support, Phase 4: untyped R6 composition calls resolve to a
-  uniquely-named method.** `private$other_obj$method()` — one class holding
-  another as a field, then calling into it — was investigated against a real
-  R6-heavy corpus and found to be a real, common pattern (40+ occurrences in
-  one production package) that the field-type-binding table other languages
-  have (C#/Go/TS's "`field <- SomeClass$new()`" pattern match) wouldn't
-  actually have helped with anyway: the dominant real-world field-assignment
-  shape there is constructor-parameter pass-through and `do.call(class_var$new,
-  ...)` dynamic dispatch, neither of which names a class anywhere in the
-  syntax a static pattern-matcher could read. The narrower, real fix: these
-  calls were marked `viaMember: false` (a plain bare-name match, same as any
-  free-function call in every language), but bare-name resolution only ever
-  matched `"function"`-kind nodes — never `"method"` — so since R6 methods are
-  always kind `"method"`, EVERY such call was unconditionally unresolvable,
-  not just occasionally imprecise. Bare-name resolution for this one shape
-  (an untyped `$` call, not `self`/`private`/`super`, which already resolve
-  precisely) now also considers `"method"`-kind nodes, using the exact same
-  "unique match resolves, ambiguous match safely drops" logic already used
-  everywhere else — no new false-positive risk, only new resolutions for
-  method names that happen to be unique across the repo. `pkg::fun()`
-  qualified calls are untouched (never an R6 method target).
-
-- **R language support, Phase 5: plain-list "mixin"/"extension" bundles
-  recognized as classes.** Found dogfooding a full rebuild of the same real
-  R6-heavy corpus (forced with `--no-reuse`, not the extraction cache) used to
-  scope Phase 4: 12 files with substantial content produced zero extracted
-  symbols. 11 of them shared one cause — a real, deliberate convention that
-  codebase calls "Pattern-1 mixin/extension": `Foo <- list(public = list(...),
-  private = list(...))`, sharing a method bundle across classes by splicing
-  (`public = c(Foo$public, list(...))`) rather than `inherit =`-based
-  inheritance, and so never wrapped in `R6::R6Class(...)` at all. 25 files in
-  the corpus use this convention. `Name <- list(...)` is now recognized as a
-  class-like container specifically when the list has a `public =` or
-  `private =` entry whose own value is itself a `list(...)` call — precise
-  enough that an ordinary data/config list is never mistaken for one, since
-  real data never coincidentally shapes itself that way. Nothing else needed
-  to change: every downstream mechanism (the `public=`/`private=` list-walk,
-  method visibility, `self$`/`private$` call resolution) already worked
-  purely off `ctx.enclosingKind === "class"`, indifferent to how the class
-  was spelled. No heritage edge is emitted for these (splicing isn't
-  `inherit =`). Re-running the same corpus rebuild after this fix: all 11
-  previously-empty files now extract correctly (zero unexplained empty files
-  remain — the one exception, `EDI.R`, is a package-doc-only file with no
-  real code), classes 256→277, methods 1764→1916, edges 9089→9415.
 ## 0.12.0
 
 ### Changed
