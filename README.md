@@ -192,11 +192,13 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
 
 - **Full-fidelity** — hand-written extractors with scope-aware, cross-file call
   and import resolution:
-  **TypeScript / JavaScript** (incl. JSX & TSX), **Python**, **Go**, **Java**.
+  **TypeScript / JavaScript** (incl. JSX & TSX), **Python**, **Go**, **Java**,
+  **C++** (`.cpp/.cc/.cxx/.h/.hpp/.hh/.hxx` — headers included, since one grammar
+  parses the whole family).
 
 - **Broad** — symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
-  **Rust, C, C++, C#, Ruby, PHP, Kotlin, Scala, Swift, Elixir, Solidity,
+  **Rust, C** (`.c`)**, C#, Ruby, PHP, Kotlin, Scala, Swift, Elixir, Solidity,
   OCaml, Zig, Dart, Clojure**.
 
 - **Compiler-grade edges (opt-in)** — `graft build --lsp` adds precise
