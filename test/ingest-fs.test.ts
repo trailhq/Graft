@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { shouldSkipDir, walkDir, SKIP_DIRS } from "../src/ingest/fs.js";
@@ -18,8 +18,33 @@ function write(root: string, path: string, content = "export const value = 1;\n"
   writeFileSync(join(root, path), content);
 }
 
-function walked(root: string, includes?: ReadonlySet<string>): string[] {
-  return walkDir(root, includes)
+function runGit(root: string, args: string[]): void {
+  execFileSync("git", args, { cwd: root, stdio: "ignore" });
+}
+
+function commitAll(root: string, message: string, forcePaths: string[] = []): void {
+  runGit(root, ["add", "-A"]);
+  if (forcePaths.length > 0) runGit(root, ["add", "-f", "--", ...forcePaths]);
+  runGit(root, [
+    "-c", "user.name=Graft Tests",
+    "-c", "user.email=graft-tests@example.invalid",
+    "commit", "-qm", message,
+  ]);
+}
+
+function addLocalSubmodule(parent: string, source: string, path: string): void {
+  runGit(parent, [
+    "-c", "protocol.file.allow=always",
+    "submodule", "add", "-q", source.replace(/\\/g, "/"), path,
+  ]);
+}
+
+function walked(
+  root: string,
+  includes?: ReadonlySet<string>,
+  followSubmodules = false,
+): string[] {
+  return walkDir(root, includes, { followSubmodules })
     .map((path) => relative(root, path).replace(/\\/g, "/"))
     .sort();
 }
@@ -58,6 +83,88 @@ test("walkDir keeps tracked files that match an ignore rule and untracked visibl
     assert.deepEqual(walked(dir), ["tracked.generated.ts", "visible.ts"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("walkDir follows initialized submodules only when enabled, with their own Git visibility (#74)", () => {
+  const parent = fixture("submodule-parent");
+  const child = fixture("submodule-child");
+  const nested = fixture("submodule-nested");
+  try {
+    write(nested, ".gitignore", "*.generated.ts\n");
+    write(nested, "src/nested.ts");
+    commitAll(nested, "nested fixture");
+
+    write(child, ".gitignore", "*.generated.ts\n");
+    write(child, "src/tracked.ts");
+    write(child, "src/forced.generated.ts");
+    write(child, "build/handwritten.ts");
+    commitAll(child, "child fixture", ["src/forced.generated.ts"]);
+    addLocalSubmodule(child, nested, "components/nested module");
+    commitAll(child, "add nested submodule");
+
+    write(parent, ".gitignore", "deps/child module/src/untracked.ts\n");
+    write(parent, "src/root.ts");
+    commitAll(parent, "parent fixture");
+    addLocalSubmodule(parent, child, "deps/child module");
+    addLocalSubmodule(parent, child, "vendor/skipped child");
+    commitAll(parent, "add child submodules");
+    runGit(parent, [
+      "-c", "protocol.file.allow=always",
+      "submodule", "update", "--init", "--recursive", "--", "deps/child module",
+    ]);
+
+    const childCheckout = join(parent, "deps", "child module");
+    const nestedCheckout = join(childCheckout, "components", "nested module");
+    write(childCheckout, "src/untracked.ts");
+    write(childCheckout, "src/untracked.generated.ts");
+    write(nestedCheckout, "src/nested-untracked.ts");
+    write(nestedCheckout, "src/nested-untracked.generated.ts");
+
+    assert.deepEqual(
+      walked(parent),
+      ["src/root.ts"],
+      "the backwards-compatible default stops at superproject gitlinks",
+    );
+
+    assert.deepEqual(walked(parent, undefined, true), [
+      "deps/child module/components/nested module/src/nested-untracked.ts",
+      "deps/child module/components/nested module/src/nested.ts",
+      "deps/child module/src/forced.generated.ts",
+      "deps/child module/src/tracked.ts",
+      "deps/child module/src/untracked.ts",
+      "src/root.ts",
+    ]);
+
+    const withVendor = walked(parent, new Set(["vendor"]), true);
+    assert.ok(withVendor.includes("vendor/skipped child/src/tracked.ts"), "an initialized gitlink is included when its mount's built-in skip is lifted");
+    assert.ok(!withVendor.includes("vendor/skipped child/build/handwritten.ts"), "the child's own build/ directory remains skipped");
+    assert.ok(!withVendor.some((path) => path.endsWith("untracked.generated.ts")), "--include-dir never overrides a child's Git ignore rules");
+
+    const withVendorAndBuild = walked(parent, new Set(["vendor", "build"]), true);
+    assert.ok(withVendorAndBuild.includes("vendor/skipped child/build/handwritten.ts"));
+
+    const childGitFile = join(childCheckout, ".git");
+    const childGitBackup = join(childCheckout, "git-pointer.backup");
+    renameSync(childGitFile, childGitBackup);
+    writeFileSync(childGitFile, "gitdir: missing-gitdir\n");
+    assert.ok(
+      walked(parent, undefined, true).includes("deps/child module/src/tracked.ts"),
+      "a child Git failure falls back locally instead of producing a healthy but incomplete graph",
+    );
+    rmSync(childGitFile, { force: true });
+    renameSync(childGitBackup, childGitFile);
+
+    runGit(parent, ["submodule", "deinit", "-f", "--all"]);
+    assert.deepEqual(
+      walked(parent, undefined, true),
+      ["src/root.ts"],
+      "deinitialized gitlinks must not resolve upward and duplicate the parent",
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(child, { recursive: true, force: true });
+    rmSync(nested, { recursive: true, force: true });
   }
 });
 

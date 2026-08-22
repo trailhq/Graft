@@ -2,8 +2,8 @@
  * Filesystem walking used by `init`/`check` to enumerate a repo's source files.
  */
 import { spawnSync } from "node:child_process";
-import { lstatSync, readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, lstatSync, readdirSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 
 /** Directories that are dependency/build output, never source. */
 export const SKIP_DIRS = new Set([
@@ -53,20 +53,133 @@ export function shouldSkipDir(name: string, includes?: ReadonlySet<string>): boo
  * `includes`, and files over 1 MB.
  * In a Git worktree, tracked files plus untracked, non-ignored files come from
  * `git ls-files`; this gives indexing exactly Git's nested `.gitignore`,
- * negation, and global-exclude semantics. Non-Git directories retain the plain
+ * negation, and global-exclude semantics. Initialized submodules are enumerated
+ * recursively only when `followSubmodules` is true; the default preserves the
+ * historical superproject boundary. Each child keeps its own ignore rules, and
+ * uninitialized submodules remain absent. Non-Git directories retain the plain
  * filesystem walk. `includes` lifts only the built-in skip list — it never
  * overrides Git's ignore rules (un-ignore or `git add -f` a directory to
  * index it, the same contract as tracked-but-ignored files).
  */
-export function walkDir(dir: string, includes?: ReadonlySet<string>): string[] {
-  return gitVisibleFiles(dir, includes) ?? walkFilesystem(dir, includes);
+export interface WalkOptions {
+  /** Include initialized Git submodules recursively. Default false. */
+  followSubmodules?: boolean;
+}
+
+export function walkDir(
+  dir: string,
+  includes?: ReadonlySet<string>,
+  opts: WalkOptions = {},
+): string[] {
+  return gitVisibleFiles(dir, includes, opts.followSubmodules === true) ?? walkFilesystem(dir, includes);
 }
 
 /** Git's canonical working-tree file set, relative to `dir`. Tracked files are
  * deliberately included even when a later ignore rule matches them; `.gitignore`
  * only controls untracked files in Git, and graft follows the same contract. */
-function gitVisibleFiles(dir: string, includes?: ReadonlySet<string>): string[] | null {
+function gitVisibleFiles(
+  dir: string,
+  includes?: ReadonlySet<string>,
+  followSubmodules = false,
+  traversal?: { topRoot: string; activeRoots: Set<string> },
+): string[] | null {
   const root = resolve(dir);
+  if (!followSubmodules) return gitVisibleFilesShallow(root, includes);
+
+  const state = traversal ?? { topRoot: root, activeRoots: new Set<string>() };
+  const rootKey = process.platform === "win32" ? root.toLowerCase() : root;
+  if (state.activeRoots.has(rootKey)) return [];
+  state.activeRoots.add(rootKey);
+
+  // Following uses `-t --stage` so one process can distinguish gitlinks from
+  // tracked and untracked files. `-z` keeps either form safe for unusual paths.
+  const result = spawnSync(
+    "git",
+    ["ls-files", "-t", "--stage", "--cached", "--others", "--exclude-standard", "-z", "--"],
+    {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
+  if (result.status !== 0 || result.error || typeof result.stdout !== "string") {
+    state.activeRoots.delete(rootKey);
+    return null;
+  }
+
+  // A path can have multiple stage records during a merge. Collapse those
+  // records and remember if any of them identifies the path as a gitlink.
+  const entries = new Map<string, { gitlink: boolean }>();
+  for (const record of result.stdout.split("\0")) {
+    if (!record) continue;
+    if (record.length < 2 || record[1] !== " ") continue;
+
+    const tag = record[0];
+    const body = record.slice(2);
+    let rel: string;
+    let gitlink = false;
+    if (tag === "?") {
+      rel = body;
+    } else {
+      const tab = body.indexOf("\t");
+      if (tab === -1) continue;
+      gitlink = body.startsWith("160000 ");
+      rel = body.slice(tab + 1);
+    }
+    if (!rel) continue;
+    const prior = entries.get(rel);
+    entries.set(rel, { gitlink: gitlink || prior?.gitlink === true });
+  }
+
+  const out = new Set<string>();
+  for (const [rel, entry] of entries) {
+    const abs = resolve(root, rel);
+    // Filter against the original superproject path. Otherwise a submodule
+    // mounted at vendor/ or build/ would bypass the parent's skip policy when
+    // recursion resets its relative root.
+    if (skippedPath(relative(state.topRoot, abs), includes)) continue;
+
+    if (entry.gitlink) {
+      // A deinitialized gitlink can resolve upward to the superproject when Git
+      // runs inside it. Requiring the child's own .git prevents duplicate,
+      // mis-prefixed parent files and recursive loops.
+      if (!existsSync(join(abs, ".git"))) continue;
+      let childFiles = gitVisibleFiles(abs, includes, true, state);
+      if (childFiles === null) {
+        // Do not let one broken child recreate a "healthy but incomplete"
+        // graph. Match the top-level fail-soft contract locally: fall back to
+        // the filesystem for this child only, preserving the parent repo's Git
+        // visibility and every built-in skip/size guard. Child Git ignore rules
+        // are unavailable in this exceptional path, just as they are when the
+        // top-level Git command fails and walkDir uses its filesystem fallback.
+        // Let an unreadable filesystem fallback surface rather than claiming a
+        // healthy graph that silently omitted the child again.
+        childFiles = walkFilesystem(abs, includes);
+      }
+      for (const file of childFiles) out.add(file);
+      continue;
+    }
+
+    try {
+      const stat = lstatSync(abs);
+      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) continue;
+    } catch {
+      // A tracked file deleted from the working tree is still printed by
+      // `--cached`; absence means it is not part of the current source set.
+      continue;
+    }
+    out.add(abs);
+  }
+
+  state.activeRoots.delete(rootKey);
+  return [...out].sort();
+}
+
+/** The historical, non-recursive Git path. Kept separate so the default does
+ * exactly the same command, filtering, ordering, and duplicate handling as it
+ * did before submodule support existed. */
+function gitVisibleFilesShallow(root: string, includes?: ReadonlySet<string>): string[] | null {
   const result = spawnSync(
     "git",
     ["ls-files", "--cached", "--others", "--exclude-standard", "-z", "--"],

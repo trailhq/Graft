@@ -1,11 +1,14 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
-import { join, basename } from 'node:path';
+import { join, basename, isAbsolute } from 'node:path';
 import { readWiring } from './stats.js';
 import { formatBlastRadius, relevantRetrieval, formatOrientation } from './format.js';
 import { indexFreshness, staleBanner } from '../context/check.js';
 import { patchStats, readStats, acquireLock, readSession, writeSession } from './state.js';
 import { graftCliPath, claudeScriptPath } from './paths.js';
+import { runUpkeep } from '../upkeep-run.js';
+import { runningVersion } from '../upkeep.js';
+import { flushClosedSessions } from '../telemetry/sessions.js';
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
@@ -99,8 +102,31 @@ function emit(eventName: string, additionalContext: string): void {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: eventName, additionalContext } }));
 }
 
+/**
+ * The absolute path of the file a PostToolUse edit touched, across host edit-tool
+ * shapes:
+ *   - Claude Code (`Write`/`Edit`/`MultiEdit`) states it directly as
+ *     `tool_input.file_path` (already absolute).
+ *   - Codex (`apply_patch`) carries the whole patch in `tool_input.command` and
+ *     names the file in the patch header (`*** Add File:` / `*** Update File:`),
+ *     as a repo-relative path — resolved against `dir` here. Take the first
+ *     Add/Update target; that one file is enough to mark the graph dirty and
+ *     draw a blast radius (the sync re-checks the whole tree anyway).
+ * Returns null when neither shape yields a path, so the hook stays a clean no-op.
+ */
+export function editedFilePath(input: any, dir: string): string | null {
+  const direct = input?.tool_input?.file_path;
+  if (typeof direct === 'string' && direct.trim()) return direct;
+  const cmd = input?.tool_input?.command;
+  if (typeof cmd === 'string' && cmd) {
+    const m = /^\*\*\*\s+(?:Add|Update)\s+File:\s+(.+?)\s*$/m.exec(cmd);
+    if (m) return isAbsolute(m[1]) ? m[1] : join(dir, m[1]);
+  }
+  return null;
+}
+
 async function handlePostEdit(input: any, dir: string): Promise<void> {
-  const file: string | undefined = input?.tool_input?.file_path;
+  const file = editedFilePath(input, dir);
   if (!file || underGraft(dir, file)) return;
   // No `graft check` here (was: staleCount via checkStaleCount()). `check` walks
   // the whole graph, so on a large repo it can run well past this hook's timeout
@@ -194,11 +220,23 @@ export async function main(event: string): Promise<void> {
   const dir = projectDir(input);
 
   if (event === 'session-start') {
+    // Before anything is emitted: refresh this repo's wiring if it was written by
+    // an older graft, and pick up any cached "newer version on npm" answer.
+    // background:false — a hook must never touch the network; the CLI and the MCP
+    // server fill that cache, this only reads it.
+    const upkeep = runUpkeep(dir, runningVersion(), { background: false }).lines;
+    // Roll up any session that ended since we were last here. Queue-only — the
+    // hook still touches no network; the CLI or the MCP server sends it later.
+    flushClosedSessions(dir);
     try {
       const idx = readFileSync(join(dir, 'graft', 'INDEX.md'), 'utf8');
       const banner = staleBanner(indexFreshness(dir)) ?? undefined;
-      emit('SessionStart', formatOrientation(idx, undefined, banner));
-    } catch { /* no INDEX.md — skip */ }
+      const orientation = formatOrientation(idx, undefined, banner);
+      emit('SessionStart', upkeep.length ? `${upkeep.join('\n')}\n\n${orientation}` : orientation);
+    } catch {
+      // No INDEX.md (never built here). An upgrade nudge is still worth saying.
+      if (upkeep.length) emit('SessionStart', upkeep.join('\n'));
+    }
     return;
   }
 

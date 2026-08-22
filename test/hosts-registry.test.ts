@@ -15,7 +15,7 @@ function probeFor(home: string, repo: string): DetectProbe {
 function fresh(): string { return mkdtempSync(join(tmpdir(), 'graft-registry-')); }
 
 test('registry exposes the known hosts', () => {
-  assert.deepEqual(hostIds().sort(), ['adal', 'agents', 'copilot', 'cursor', 'gemini', 'kiro', 'windsurf']);
+  assert.deepEqual(hostIds().sort(), ['adal', 'agents', 'antigravity', 'copilot', 'cursor', 'gemini', 'kiro', 'windsurf']);
   for (const h of HOSTS) {
     assert.ok(h.relPath.length > 0);
     assert.ok(h.content().length > 0);

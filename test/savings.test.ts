@@ -1,10 +1,10 @@
 /**
  * Tests for the shared "tokens saved" estimate ({@link savingsFor} +
- * {@link savingsFooter}) that every retrieval-style command routes through.
+ * {@link withSavings}) that every retrieval-style command routes through.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { savingsFor, savingsFooter, toTokens } from '../src/context/savings.js';
+import { savingsFor, savingsLine, withSavings, toTokens } from '../src/context/savings.js';
 import type { GraphV1, NodeV1 } from '../src/graph/types.js';
 
 function fileNode(path: string, chars?: number): NodeV1 {
@@ -42,9 +42,9 @@ test('savingsFor: skips files with no known size, returns undefined when none ar
   assert.equal(savingsFor(g, ['missing.ts']), undefined);
 });
 
-test('savingsFooter: reports saved tokens and percent when the output is smaller', () => {
+test('savingsLine: reports saved tokens and percent when the output is smaller', () => {
   const body = 'x'.repeat(40); // ≈ 10 tok
-  const footer = savingsFooter(body, { files: 2, baselineChars: 8000 }); // baseline ≈ 2000 tok
+  const footer = savingsLine(body, { files: 2, baselineChars: 8000 }); // baseline ≈ 2000 tok
   assert.match(footer, /tokens saved ≈ [\d,]+ \(\d+%\)/);
   assert.match(footer, /2 file\(s\)/);
   const base = toTokens(8000);
@@ -57,9 +57,24 @@ test('savingsFooter: reports saved tokens and percent when the output is smaller
   assert.equal((footer.match(/\[graft\] tokens saved ≈ [\d,]+/g) ?? []).length, 1);
 });
 
-test('savingsFooter: stays silent when there is nothing honest to claim', () => {
-  assert.equal(savingsFooter('anything', undefined), '');
-  assert.equal(savingsFooter('anything', { files: 1, baselineChars: 0 }), '');
+test('savingsLine: stays silent when there is nothing honest to claim', () => {
+  assert.equal(savingsLine('anything', undefined), '');
+  assert.equal(savingsLine('anything', { files: 1, baselineChars: 0 }), '');
   // Baseline no bigger than the output itself (tiny file) → no claim.
-  assert.equal(savingsFooter('x'.repeat(1000), { files: 1, baselineChars: 40 }), '');
+  assert.equal(savingsLine('x'.repeat(1000), { files: 1, baselineChars: 40 }), '');
+});
+
+test('withSavings: puts the line on top so `head -N` and host truncation keep it', () => {
+  const body = 'line1\nline2\nline3';
+  const out = withSavings(body, { files: 2, baselineChars: 8000 });
+  const first = out.split('\n')[0];
+  assert.match(first, /^\[graft\] tokens saved ≈ [\d,]+/);
+  assert.ok(out.endsWith(body), 'body follows the header verbatim');
+  // Exactly one number in the whole output — a second copy would be
+  // double-counted by the PostToolUse accumulator's matchAll.
+  assert.equal((out.match(/\[graft\] tokens saved ≈ [\d,]+/g) ?? []).length, 1);
+});
+
+test('withSavings: returns the body untouched when there is nothing to claim', () => {
+  assert.equal(withSavings('body', undefined), 'body');
 });

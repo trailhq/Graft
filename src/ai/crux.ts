@@ -45,13 +45,13 @@ export interface CruxSummarizer {
 
 const SYSTEM_PROMPT = `You explain code definitions for a code graph that helps engineers navigate a codebase.
 
-You are given ONE source file with 1-based line numbers, and a list of TARGET definitions in it. For every target, record its purpose and the line range of its core logic via the record_symbols tool.
+You are given ONE source file with 1-based line numbers, and a list of TARGET definitions in it. Describe EVERY target via the record_symbols tool.
 
 Rules:
-- Emit exactly one entry per target id given, using that id verbatim.
-- summary: ONE sentence — what the symbol is FOR at the business-logic level. Say what problem it solves or rule it enforces, not what its signature already says.
-- crux_start / crux_end: FILE line numbers (as shown), inside that symbol's own line range. Pick the SINGLE most important contiguous span — the core branch, formula, guard, or state change. Keep it TIGHT: at most ~8 lines, and NEVER the whole function. If you can't narrow it below that, the symbol has no distinct crux — use 0/0.
-- Skip boilerplate, logging, and plumbing. If a symbol has no meaningful crux (trivial getter, data holder, one-line delegation, or logic spread evenly with no focal point), use "crux_start": 0 and "crux_end": 0.`;
+- Return EXACTLY ONE entry for EVERY target id, using that id verbatim. The number of entries you return MUST equal the number of targets. Never omit a target: a reply missing any id is invalid and will be re-requested.
+- A trivial symbol is NOT an exception. You still return it — with a one-sentence summary and crux 0/0 (see below). "Skip" means "give it no crux span", NEVER "leave it out".
+- summary: ONE sentence — what the symbol is FOR at the business-logic level (the problem it solves or the rule it enforces), not a restatement of its signature.
+- crux_start / crux_end: FILE line numbers (as shown), inside that symbol's own line range. Pick the SINGLE most important contiguous span — the core branch, formula, guard, or state change — at most ~8 lines, and NEVER the whole function. When there is no single focal span (a trivial getter, a plain data holder, a one-line delegation, or logic spread evenly), use crux_start: 0 and crux_end: 0. That 0/0 IS the answer — do not drop the entry.`;
 
 const RECORD_TOOL = "record_symbols";
 
@@ -95,7 +95,8 @@ function userContent(input: FileCruxInput): string {
         (n.signature ? ` | ${n.signature}` : ""),
     )
     .join("\n");
-  return `FILE: ${input.path}\n\n${numberLines(input.source)}\n\nTARGETS:\n${targets}`;
+  const n = input.nodes.length;
+  return `FILE: ${input.path}\n\n${numberLines(input.source)}\n\nTARGETS (${n} — return all ${n}, one entry per id):\n${targets}`;
 }
 
 /** Normalize the tool's parsed argument object into a {@link NodeCrux} list. */

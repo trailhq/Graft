@@ -10,6 +10,7 @@ import { HOSTS, detectHosts, type DetectProbe, type HostTarget } from './registr
 import { upsertSection } from './sections.js';
 import { registerMcpConfigs, type McpWrite } from './mcp-config.js';
 import { installCodexHooks, type HookWrite } from './codex-hooks.js';
+import { installAntigravitySkill } from './antigravity.js';
 
 export interface HostsInitResult {
   written: { id: string; path: string; action: string }[];
@@ -80,5 +81,10 @@ export function runHostsInit(
     opts.hooks === false || opts.global === false || !selected.some((h) => h.id === 'agents')
       ? []
       : installCodexHooks(home);
-  return { written, skipped, unknown, mcp, hooks };
+  // Antigravity's skill is a global write too, so --no-global suppresses it as well.
+  const antigravitySkill =
+    opts.global === false || !selected.some((h) => h.id === 'antigravity')
+      ? []
+      : installAntigravitySkill(home);
+  return { written, skipped, unknown, mcp, hooks: [...hooks, ...antigravitySkill] };
 }

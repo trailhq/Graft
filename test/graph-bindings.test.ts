@@ -43,6 +43,33 @@ test("ts: new-expression + type annotation + this", () => {
   assert.equal(edges.find((e) => e.name === "use")?.recvType, "Router");
 });
 
+test("ts: constructor parameter property binds this.<name> (#76 — the NestJS/Angular DI idiom)", () => {
+  // `private readonly svc: Svc` is a parameter AND a class field; `this.svc.m()` must
+  // resolve. Before the fix its recvType was undefined and the call edge was dropped.
+  const src = "class C {\n  constructor(private readonly svc: Svc) {}\n  run() { this.svc.m(); }\n}\n";
+  assert.equal(callEdges(src, "typescript").find((e) => e.name === "m")?.recvType, "Svc");
+  // every parameter-property modifier form: public / protected / bare readonly / override
+  const forms = [
+    "constructor(public svc: Svc) {}",
+    "constructor(protected svc: Svc) {}",
+    "constructor(readonly svc: Svc) {}",
+    "constructor(private override svc: Svc) {}",
+  ];
+  for (const ctor of forms) {
+    const s = `class C {\n  ${ctor}\n  run() { this.svc.m(); }\n}\n`;
+    assert.equal(callEdges(s, "typescript").find((e) => e.name === "m")?.recvType, "Svc", ctor);
+  }
+});
+
+test("ts: a PLAIN constructor parameter creates no this.<name> binding (no over-reach)", () => {
+  // bare-name use of an ordinary parameter still binds (unchanged)
+  const bare = "class C {\n  constructor(svc: Svc) { svc.m(); }\n}\n";
+  assert.equal(callEdges(bare, "typescript").find((e) => e.name === "m")?.recvType, "Svc");
+  // but with no modifier it is NOT a field, so `this.svc` must stay unresolved (drop, not guess)
+  const viaThis = "class C {\n  constructor(svc: Svc) {}\n  run() { this.svc.m(); }\n}\n";
+  assert.equal(callEdges(viaThis, "typescript").find((e) => e.name === "m")?.recvType, undefined);
+});
+
 test("go: composite literal, var decl, NewX convention, receiver var", () => {
   const src = "package m\nfunc f() {\n  u := User{}\n  var d *DB\n  s := NewServer()\n  u.Save()\n  d.Query()\n  s.Start()\n}\nfunc (w *Worker) run() { w.stop() }\n";
   const edges = callEdges(src, "go", "x.go");

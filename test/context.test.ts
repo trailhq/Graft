@@ -290,7 +290,9 @@ test("ensureGitignored: creates .gitignore with the graft/ entry when none exist
   try {
     ensureGitignored(dir, contextDirFor(dir));
     const gi = readFileSync(join(dir, ".gitignore"), "utf8");
-    assert.match(gi, /^graft\/$/m);
+    // root-ANCHORED (#79): an unanchored `graft/` also matched `.claude/skills/graft/`
+    assert.match(gi, /^\/graft\/$/m);
+    assert.doesNotMatch(gi, /^graft\/$/m, "must not write the unanchored form");
     assert.match(gi, /regenerable, not committed/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -305,7 +307,7 @@ test("ensureGitignored: appends to an existing .gitignore without clobbering it"
     const gi = readFileSync(join(dir, ".gitignore"), "utf8");
     assert.match(gi, /node_modules\//);
     assert.match(gi, /dist\//);
-    assert.match(gi, /^graft\/$/m);
+    assert.match(gi, /^\/graft\/$/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -319,7 +321,35 @@ test("ensureGitignored: idempotent — a second build adds nothing", () => {
     ensureGitignored(dir, contextDirFor(dir));
     const twice = readFileSync(join(dir, ".gitignore"), "utf8");
     assert.equal(once, twice);
-    assert.equal((twice.match(/^graft\/$/gm) ?? []).length, 1);
+    assert.equal((twice.match(/^\/graft\/$/gm) ?? []).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensureGitignored: an existing unanchored `graft/` or hand-anchored `/graft/` is NOT re-appended (#79)", () => {
+  for (const existing of ["graft/", "graft", "/graft/"]) {
+    const dir = mkdtempSync(join(tmpdir(), "ctxgi-"));
+    try {
+      writeFileSync(join(dir, ".gitignore"), `node_modules/\n${existing}\n`);
+      ensureGitignored(dir, contextDirFor(dir));
+      const gi = readFileSync(join(dir, ".gitignore"), "utf8");
+      // the presence check recognizes all three spellings → no duplicate graft line added
+      const graftLines = gi.split("\n").filter((l) => /^\/?graft\/?$/.test(l.trim()));
+      assert.equal(graftLines.length, 1, `existing "${existing}" must not be double-appended (got ${graftLines.length})`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("ensureGitignored: a `--dir` subpath is root-anchored too (#79)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxgi-"));
+  try {
+    // a graft dir nested under the repo (e.g. --dir tools/ctx) still gets a repo-root anchor
+    ensureGitignored(dir, join(dir, "tools", "ctx"));
+    const gi = readFileSync(join(dir, ".gitignore"), "utf8");
+    assert.match(gi, /^\/tools\/ctx\/$/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

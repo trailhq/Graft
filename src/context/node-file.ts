@@ -117,13 +117,20 @@ export function contextDirFor(root: string, override?: string): string {
 export function ensureGitignored(root: string, contextDir: string): void {
   const rel = relPosix(root, contextDir);
   if (rel === "" || rel.startsWith("..")) return; // dir is at/above the repo root — nothing sane to ignore
-  const entry = `${stripTrailingSlashes(rel)}/`;
+  const bare = stripTrailingSlashes(rel); // "graft" (or a `--dir` subpath like "tools/ctx")
+  // Root-ANCHORED, so it ignores exactly this repo's `graft/` and not a directory named
+  // `graft` at any depth. An unanchored `graft/` also matched `.claude/skills/graft/`, so
+  // committing the skill graft just wrote was silently dropped (#79). `rel` is always
+  // repo-relative here, so a leading `/` is always safe (incl. a `--dir` subpath).
+  const entry = `/${bare}/`;
   const path = join(root, ".gitignore");
   let current = "";
   try { current = readFileSync(path, "utf8"); } catch { /* no .gitignore yet — we create one */ }
+  // Accept the anchored form AND the older unanchored `graft/` / `graft`, so existing
+  // repos aren't double-appended and a hand-anchored entry survives the next build.
   const present = current.split("\n").some((l) => {
     const t = l.trim();
-    return t === entry || t === rel;
+    return t === entry || t === `${bare}/` || t === bare;
   });
   if (present) return;
   const gap = current === "" ? "" : current.endsWith("\n") ? "\n" : "\n\n";

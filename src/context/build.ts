@@ -11,14 +11,15 @@
  *      source files so staleness stays exact.
  *   5. Write one markdown file per node (preserving human notes) + a manifest.
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
-import { readIncludeDirs } from "../util/state.js";
+import { readFollowSubmodules, readIncludeDirs } from "../util/state.js";
 import type { Summarizer } from "../ai/summarize.js";
+import { LlmFailureGate } from "../ai/failure.js";
 import type { FileSummary, SynthNode, Synthesizer } from "../ai/synthesize.js";
 import {
   CACHE_DIR,
@@ -63,6 +64,8 @@ export interface BuildOptions {
   model: string;
   summarizer: Summarizer;
   synthesizer: Synthesizer;
+  /** Files summarized in parallel during phase 1. Default 8. Raised via `graft build -j`. */
+  concurrency?: number;
   onProgress?: (info: BuildProgress) => void;
 }
 
@@ -75,6 +78,12 @@ export interface BuildResult {
   nodes: number;
   links: number;
   errors: string[];
+  /** Files whose summary call failed, and files never attempted once the pass gave
+   * up — reported as data so the CLI can exit non-zero without reading messages (#127). */
+  failedFiles: number;
+  skippedFiles: number;
+  /** Why the summarize phase stopped early, when it did. */
+  fatal?: string;
 }
 
 /** The gitignored LLM-call cache: per-file summaries + per-batch synthesis. */
@@ -103,14 +112,27 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
   const root = resolve(dir);
   const outDir = contextDirFor(root, opts.contextDir);
   const exts = opts.extensions ?? CODE_EXTENSIONS;
-  // Read root's persisted `--include-dir` override (same lookup source-files.ts
-  // does for the Tier-1 wiring graph) so an included dir like `build/` isn't
-  // invisible to the Tier-2 concept pipeline while the wiring graph sees it.
-  const files = walkDir(root, readIncludeDirs(root))
+  // Read the same persisted walk choices as the Tier-1 wiring graph, so the
+  // Tier-2 concept pipeline sees exactly the same directories and submodules.
+  const files = walkDir(root, readIncludeDirs(root), {
+    followSubmodules: readFollowSubmodules(root),
+  })
     .filter((f) => exts.some((e) => f.toLowerCase().endsWith(e)))
     .filter((f) => !f.startsWith(outDir));
 
   const cache = loadCache(outDir);
+  // Flush the summary cache to disk during phase 1 so a build interrupted
+  // partway (session/rate limit, crash, Ctrl-C) resumes without re-summarizing
+  // the files it already did. Throttled to keep disk churn negligible; on the
+  // next run every already-summarized file is a content-hash cache hit ($0).
+  let lastFlush = Date.now();
+  const flushEveryMs = summaryCheckpointMs();
+  const maybeFlush = (): void => {
+    const now = Date.now();
+    if (now - lastFlush < flushEveryMs) return;
+    lastFlush = now;
+    saveCache(outDir, cache);
+  };
   const result: BuildResult = {
     contextDir: outDir,
     files: 0,
@@ -120,10 +142,18 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
     nodes: 0,
     links: 0,
     errors: [],
+    failedFiles: 0,
+    skippedFiles: 0,
   };
 
   // Phase 1: summarize each file, concurrent, content-hash cached.
-  const work = await mapWithConcurrency(files, 8, async (file, i): Promise<FileWork | undefined> => {
+  //
+  // The gate is shared with the crux pass (`graph/enrich.ts`): once the provider has
+  // clearly stopped serving — a spent quota, a rejected key — the remaining files are
+  // not attempted. This pass is where #127's 1,617 doomed calls were spent, one per
+  // file, before the build exited 0.
+  const gate = new LlmFailureGate();
+  const work = await mapWithConcurrency(files, Math.max(1, opts.concurrency ?? 8), async (file, i): Promise<FileWork | undefined> => {
     const rel = relPosix(root, file);
     opts.onProgress?.({ phase: "summarize", index: i, total: files.length, file: rel });
     let code: string;
@@ -141,16 +171,33 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
       result.cached++;
       return { rel, hash, summary: hit.summary };
     }
+    // A cache hit is still served after the gate closes (it costs nothing) — only
+    // the call is skipped.
+    if (gate.stopped) {
+      gate.skip();
+      return { rel, hash };
+    }
     try {
       const summary = await opts.summarizer.summarize(code, { path: rel });
       cache.summaries[rel] = { hash, summary };
       result.summarized++;
+      maybeFlush();
+      gate.succeeded();
       return { rel, hash, summary };
     } catch (err) {
-      result.errors.push(`${rel}: ${errMsg(err)}`);
+      const message = errMsg(err);
+      result.errors.push(`${rel}: ${message}`);
+      gate.record(message);
       return { rel, hash }; // covered (counts against staleness) but not summarized
     }
   });
+  result.failedFiles = gate.failed;
+  result.skippedFiles = gate.skipped;
+  result.fatal = gate.fatal;
+
+  // Phase 1 done: persist every summary before the (also LLM-backed) synthesis
+  // phase, so an interruption there never discards phase-1 work.
+  saveCache(outDir, cache);
 
   const processed = work.filter((w): w is FileWork => w !== undefined);
   result.files = processed.length;
@@ -335,7 +382,17 @@ function loadCache(outDir: string): BuildCache {
 function saveCache(outDir: string, cache: BuildCache): void {
   const path = cachePath(outDir);
   mkdirSync(join(outDir, CACHE_DIR), { recursive: true });
-  writeFileSync(path, JSON.stringify(cache, null, 2));
+  // Atomic: a kill mid-write can't leave a truncated (unparseable) cache that
+  // would throw away every prior summary on the next load.
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(cache, null, 2));
+  renameSync(tmp, path);
+}
+
+/** Min interval between phase-1 cache flushes. Env seam for tests. */
+function summaryCheckpointMs(): number {
+  const raw = Number(process.env.GRAFT_SUMMARY_CHECKPOINT_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 15_000;
 }
 
 /** Run `fn` over `items` with at most `limit` in flight, preserving order. */

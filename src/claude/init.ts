@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { mergeGraftSettings } from './settings-merge.js';
@@ -6,6 +6,7 @@ import { statuslineShim, hooksShim } from './shim-template.js';
 import { skillTemplate } from './skill-template.js';
 import { claudeDistDir } from './paths.js';
 import { mergeJsonKey, serverEntry, type McpWrite } from '../hosts/mcp-config.js';
+import { hasGraftIndex } from '../graph/root.js';
 import type { PlannedWrite } from '../hosts/plan.js';
 
 /**
@@ -33,8 +34,10 @@ export function claudeTargets(dir: string): PlannedWrite[] {
  * Best-effort; the user can always run `graft build` (the epilogue says so).
  */
 export function buildGraphIfMissing(dir: string, opts: { build?: boolean; cliPath?: string }): boolean {
-  const wiring = join(dir, 'graft', '.graph', 'wiring.json');
-  if (opts.build === false || !opts.cliPath || existsSync(wiring)) return false;
+  // `hasGraftIndex`, not just wiring.json: a workspace parent's graph IS its
+  // `workspace.json` (nodes live in the children), so testing for wiring.json
+  // alone would call it unbuilt and rebuild every child on each init.
+  if (opts.build === false || !opts.cliPath || hasGraftIndex(dir)) return false;
   try {
     execFileSync(process.execPath, [opts.cliPath, 'build', '.'], { cwd: dir, stdio: 'inherit', timeout: 300000 });
     return true;

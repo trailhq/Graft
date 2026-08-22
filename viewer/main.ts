@@ -149,10 +149,16 @@ function setTab(tab: Tab): void {
     }
   } else {
     const graph = activeGraph();
-    if (!graph) {
-      showEmpty(tab === "code"
+    if (!graph || graph.nodes.length === 0) {
+      // A graph that exists but holds no nodes used to fall through to the canvas
+      // and render nothing at all — worst on an exported page, where the reader
+      // arrived from a link that promised a diagram.
+      // The note names changed FILES, and a path on a fork's branch is written by
+      // whoever opened the pull request — it reaches a published page, so it is
+      // escaped rather than trusted.
+      showEmpty(graph?.meta.emptyNote ? escapeText(graph.meta.emptyNote) : (tab === "code"
         ? "No code graph yet — run <code>graft graph</code> to generate <span class=\"mono\">graph.json</span>."
-        : "No context graph — run <code>graft init</code> first.");
+        : "No context graph — run <code>graft init</code> first."));
     } else {
       empty.hidden = true;
       view.resetView();
@@ -164,6 +170,10 @@ function setTab(tab: Tab): void {
   renderLegend();
   updateShownCount();
   updateCounts();
+}
+
+function escapeText(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 }
 
 function showEmpty(html: string): void {
@@ -212,14 +222,76 @@ $("themeBtn").addEventListener("click", () => {
   showDetail(view.selected);
 });
 
+/* ---------- resizable detail panel ---------- */
+const DETAIL_W_KEY = "graft-viz-detail-w";
+const MIN_DETAIL = 220;
+const rootEl = document.documentElement;
+const clampDetail = (px: number): number =>
+  Math.min(Math.max(MIN_DETAIL, Math.round(window.innerWidth * 0.6)), Math.max(MIN_DETAIL, Math.round(px)));
+function setDetailWidth(px: number, persist = true): void {
+  const w = clampDetail(px);
+  rootEl.style.setProperty("--detail-w", `${w}px`);
+  if (persist) localStorage.setItem(DETAIL_W_KEY, String(w));
+}
+const savedDetailW = Number(localStorage.getItem(DETAIL_W_KEY));
+if (Number.isFinite(savedDetailW) && savedDetailW >= MIN_DETAIL) setDetailWidth(savedDetailW, false);
+
+const resizer = $("detailResizer");
+let draggingDetail = false;
+resizer.addEventListener("pointerdown", (ev) => {
+  const pe = ev as PointerEvent;
+  draggingDetail = true;
+  resizer.setPointerCapture(pe.pointerId);
+  document.body.style.cursor = "col-resize";
+  ev.preventDefault();
+});
+resizer.addEventListener("pointermove", (ev) => {
+  if (!draggingDetail) return;
+  // panel is flush to the window's right edge: width = distance from cursor to that edge.
+  setDetailWidth(window.innerWidth - (ev as PointerEvent).clientX);
+});
+const endDetailDrag = (ev: Event): void => {
+  if (!draggingDetail) return;
+  draggingDetail = false;
+  document.body.style.cursor = "";
+  try { resizer.releasePointerCapture((ev as PointerEvent).pointerId); } catch { /* not captured */ }
+  view.reheat();
+};
+resizer.addEventListener("pointerup", endDetailDrag);
+resizer.addEventListener("pointercancel", endDetailDrag);
+resizer.addEventListener("keydown", (ev) => {
+  const ke = ev as KeyboardEvent;
+  if (ke.key !== "ArrowLeft" && ke.key !== "ArrowRight") return;
+  const step = ke.shiftKey ? 40 : 16;
+  const cur = $("detail").getBoundingClientRect().width;
+  setDetailWidth(cur + (ke.key === "ArrowLeft" ? step : -step));
+  view.reheat();
+  ev.preventDefault();
+});
+
 /* ---------- data loading + live reload ---------- */
 async function loadAll(): Promise<void> {
   const [context, code] = await Promise.all([loadContextGraph(), loadCodeGraph()]);
   state.context = context;
   state.code = code;
-  $("repoName").textContent = context.meta.repoName ?? "";
-  document.title = `graft viz — ${context.meta.repoName ?? ""}`;
-  setTab(state.tab);
+  // The subtitle only exists on an exported page (`graft viz --export --title`),
+  // where the same file is published per pull request and the reader needs to know
+  // WHICH one they opened.
+  const where = [context.meta.repoName, context.meta.subtitle].filter(Boolean).join(" · ");
+  $("repoName").textContent = where;
+  document.title = `graft viz — ${where}`;
+  // A blast export ships one tab: its Code tab would be the repo's whole wiring
+  // graph, which answers nothing about the pull request the page is about.
+  const tabs = context.meta.tabs;
+  if (tabs) {
+    document.querySelectorAll<HTMLButtonElement>(".tab").forEach((b) => {
+      b.hidden = !tabs.includes(b.dataset.tab as Tab);
+    });
+  }
+  // An exported page says which tab holds its content: a structural build has no
+  // concept nodes, so the default Context tab would open on an empty canvas.
+  const wanted = context.meta.defaultTab;
+  setTab(wanted && wanted !== state.tab ? wanted : state.tab);
 }
 
 onServerChange(() => {

@@ -18,7 +18,7 @@ import { walkDir } from "../ingest/fs.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
-import { readIncludeDirs } from "../util/state.js";
+import { readFollowSubmodules, readIncludeDirs } from "../util/state.js";
 import { CODE_EXTENSIONS } from "./build.js";
 import { contextDirFor, readManifest, readNodes } from "./node-file.js";
 
@@ -57,12 +57,13 @@ export function checkContext(dir: string, opts: CheckOptions = {}): CheckResult 
     return result;
   }
 
-  // Current code files on disk (same rules `init` used) — including root's
-  // persisted `--include-dir` override, so this freshness check never
-  // disagrees with buildContext about what "current" means (an included
-  // build/ must not silently vanish from one side and not the other).
+  // Current code files on disk (same persisted directory/submodule choices
+  // `init` used), so this freshness check never disagrees with buildContext
+  // about what "current" means.
   const current = new Map<string, string>(); // rel → hash
-  for (const file of walkDir(root, readIncludeDirs(root))) {
+  for (const file of walkDir(root, readIncludeDirs(root), {
+    followSubmodules: readFollowSubmodules(root),
+  })) {
     if (file.startsWith(outDir)) continue;
     if (!exts.some((e) => file.toLowerCase().endsWith(e))) continue;
     try {
