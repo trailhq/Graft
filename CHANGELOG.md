@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **C/C++ language support.** One `"cpp"` grammar (`tree-sitter-cpp`) parses the
+  whole family — `.c/.h/.cpp/.hpp/.cc/.cxx/.hh/.hxx` — uniformly, the same
+  approach clangd and most polyglot tooling take; there's no separate `.c`-only
+  language for v1. Classes, structs, enums, and template classes/functions are
+  extracted, along with the two genuinely new pieces of design work this
+  grammar needs beyond every other supported language: (1) a `function_definition`
+  carries no `name` field — it's buried in a declarator chain that can be a
+  plain identifier, an out-of-class `Class::method` qualifier, a destructor
+  (`~Class`), or an operator overload (`operator==`), so a header-declared
+  prototype and its `.cpp` out-of-line definition resolve to exactly one node,
+  not two or zero; and (2) C++ visibility is stateful — an `access_specifier`
+  token applies to every subsequent class member until the next one (default
+  `private` for `class`, `public` for `struct`), unlike every other supported
+  language's per-node exported check. Heritage (`: public Base`) always emits
+  `extends` (C++ has no `interface` keyword), and `#include` edges capture both
+  `"local.h"` and `<system>` forms (a local include resolves relative to the
+  including file, then by unique path suffix — never guessed). C gets the three
+  shapes its headers are made of: prototypes (`int run(int);`), typedefs
+  (`typedef struct {…} Point;` takes the struct's kind, `typedef int Id;` is a
+  type, `typedef struct Node {…} Node;` is one node) and unions (kind struct).
+  A prototype is a node so a header's API is navigable, but it is flagged
+  `declaration: true` and a same-named definition wins at call resolution, so
+  `main.c: run()` lands on `app.c#run`, not the header's stub; a prototype of a
+  function the same file defines is not a node at all. Known limitations:
+  macros that expand to declarations aren't understood, and template
+  specializations are treated as ordinary functions/methods by name (no
+  specialization identity).
+
 ## 0.12.0
 
 ### Changed

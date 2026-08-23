@@ -98,11 +98,6 @@ function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_
     return null;
   }
 }
-function checkStaleCount(dir: string): number {
-  const r = graftJson(dir, ['check', '.', '--json']);
-  const g = r?.graph ?? {};
-  return (g.changed?.length ?? 0) + (g.added?.length ?? 0) + (g.removed?.length ?? 0);
-}
 function emit(eventName: string, additionalContext: string): void {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: eventName, additionalContext } }));
 }
@@ -133,7 +128,13 @@ export function editedFilePath(input: any, dir: string): string | null {
 async function handlePostEdit(input: any, dir: string): Promise<void> {
   const file = editedFilePath(input, dir);
   if (!file || underGraft(dir, file)) return;
-  patchStats(dir, { dirty: true, staleCount: checkStaleCount(dir), lastFile: basename(file) });
+  // No `graft check` here (was: staleCount via checkStaleCount()). `check` walks
+  // the whole graph, so on a large repo it can run well past this hook's timeout
+  // budget — costing seconds on every single edit for a count that gets
+  // overwritten anyway the moment Stop's async rebuild clears `dirty`.
+  // freshnessSegment() already degrades to a plain "⚠ stale" when staleCount
+  // isn't populated, so this is a silent, correct drop, not a display bug.
+  patchStats(dir, { dirty: true, lastFile: basename(file) });
   const w = readWiring(dir);
   if (w) { const br = formatBlastRadius(w, file); if (br) emit('PostToolUse', br); }
 }

@@ -27,6 +27,7 @@ const INDEXED = [
   "a.tsx", "a.jsx",
   "a.py", "a.pyi",
   "a.go",
+  "a.c", "a.h", "a.hpp", "a.hh", "a.hxx", "a.cpp", "a.cc", "a.cxx",
   "a.java",
   "a.php",
 ];
@@ -55,6 +56,12 @@ test("labels name the language, not the grammar that parses it", () => {
   assert.equal(languageLabelOf("api/main.py"), "python");
   assert.equal(languageLabelOf("api/main.pyi"), "python");
   assert.equal(languageLabelOf("cmd/main.go"), "go");
+  // One "cpp" label for the whole C/C++ family — see extract.ts's EXTENSIONS doc.
+  assert.equal(languageLabelOf("src/thing.cpp"), "cpp");
+  assert.equal(languageLabelOf("src/thing.h"), "cpp");
+  assert.equal(languageLabelOf("src/thing.hpp"), "cpp");
+  // ...except `.c`, which is unambiguously C — the banner should say so.
+  assert.equal(languageLabelOf("src/thing.c"), "c");
   assert.equal(languageLabelOf("src/main/java/com/acme/App.java"), "java");
   assert.equal(languageLabelOf("app/Models/User.php"), "php");
 

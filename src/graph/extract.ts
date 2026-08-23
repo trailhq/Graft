@@ -10,14 +10,23 @@ import Parser from "tree-sitter";
 import TypeScript from "tree-sitter-typescript";
 import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
+import Cpp from "tree-sitter-cpp";
 import Java from "tree-sitter-java";
 import PHP from "tree-sitter-php";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
-import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
+import {
+  collectBindings,
+  goReceiverVarOf,
+  resolveRecvType,
+  cppDeclaratorName,
+  resolveCppQualified,
+  stripCppTemplateArgs,
+  type FileBindings,
+} from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "php";
+export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "php" | "cpp";
 
 /**
  * Extension → the tree-sitter grammar that parses it, and the label a human expects
@@ -48,6 +57,19 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".go", grammar: "go", label: "go" },
   { ext: ".java", grammar: "java", label: "java" },
   { ext: ".php", grammar: "php", label: "php" },
+  // One "cpp" grammar for the whole C/C++ family — tree-sitter-cpp parses C as a
+  // strict-ish superset, same approach clangd and most polyglot tooling take. No
+  // separate C grammar/language for v1 (documented limitation, not an oversight).
+  // `.c` is labelled "c" — that one is unambiguous, and the banner should say so;
+  // a header could be either, so it keeps the family label.
+  { ext: ".c", grammar: "cpp", label: "c" },
+  { ext: ".hpp", grammar: "cpp", label: "cpp" },
+  { ext: ".hh", grammar: "cpp", label: "cpp" },
+  { ext: ".hxx", grammar: "cpp", label: "cpp" },
+  { ext: ".cpp", grammar: "cpp", label: "cpp" },
+  { ext: ".cc", grammar: "cpp", label: "cpp" },
+  { ext: ".cxx", grammar: "cpp", label: "cpp" },
+  { ext: ".h", grammar: "cpp", label: "cpp" },
 ];
 
 function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
@@ -163,6 +185,14 @@ const GO_KINDS: Record<string, Kind> = {
   method_declaration: "method",
 };
 
+// C++: no flat kind-map lookup — function_definition carries no `name` field
+// (it's buried inside a declarator chain), so describeCpp() handles it directly.
+const CPP_KINDS: Record<string, Kind> = {
+  class_specifier: "class",
+  struct_specifier: "struct",
+  enum_specifier: "enum",
+};
+
 // Java: a record is a nominal data carrier, so it takes "struct" — the same role
 // Go's struct plays — rather than "class", which would make a service and a DTO
 // indistinguishable in a repo where DTOs are most of the type surface.
@@ -199,6 +229,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   tsx: TS_KINDS,
   python: PY_KINDS,
   go: GO_KINDS,
+  cpp: CPP_KINDS,
   java: JAVA_KINDS,
   php: PHP_KINDS,
 };
@@ -224,6 +255,7 @@ const CALL_TYPES: Record<Language, ReadonlySet<string>> = {
     "nullsafe_member_call_expression",
     "scoped_call_expression",
   ]),
+  cpp: new Set(["call_expression"]),
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -239,6 +271,7 @@ const GRAMMARS: Record<Language, unknown> = {
   tsx: TypeScript.tsx,
   python: Python,
   go: Go,
+  cpp: Cpp,
   java: Java,
   php: PHP.php,
 };
@@ -255,6 +288,15 @@ export interface WalkCtx {
   enclosingClass: string | null; // nearest enclosing class (py/ts `self`/`this`)
   goReceiverVar: string | null; // Go receiver var, e.g. `w` in `func (w *Worker)`
   importedSymbols: ReadonlyMap<string, { name: string; specifier: string }>;
+  // C++ visibility is stateful (an `access_specifier` token applies to every
+  // subsequent sibling in a `field_declaration_list`), unlike every other
+  // per-node exported check in this file. null outside any class/struct body
+  // (top-level definitions default to exported — see cppExported).
+  cppAccess: "public" | "private" | "protected" | null;
+  // C/C++: the bare names of every function THIS file defines (pre-pass), so a
+  // prototype or forward declaration of one of them does not mint a second node —
+  // the definition is the node, the declaration is noise. Empty for other languages.
+  cppDefinedFns: ReadonlySet<string>;
 }
 
 /** A definition we're about to emit, normalized across the shapes we handle. */
@@ -264,8 +306,16 @@ interface DefDescriptor {
   kind: Kind;
   headerEnd: number; // char index where the signature ends (body starts)
   hashNode: Parser.SyntaxNode; // node whose text forms body_hash / span
+  // C++ out-of-line definitions (`void Foo::bar() {}`) carry their owner here —
+  // ctx.enclosingClass is null at that point (the definition sits at file/namespace
+  // scope, not nested inside the class), so it can't be derived the way every other
+  // language's method owner is. Mirrors Go's receiver-type special-case in walk().
+  owner?: string;
   arity?: number; // declared parameter count — overload disambiguation (Java)
   variadic?: boolean; // last parameter is a vararg, so `arity` is a minimum
+  // C/C++: a prototype — a declaration with no body. Emitted so a header's API is
+  // navigable, flagged so resolution prefers the definition (see resolve.ts).
+  declaration?: boolean;
 }
 
 /** tree-sitter's string `parse()` fails with "Invalid argument" on any input
@@ -315,6 +365,8 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
     enclosingClass: null,
     goReceiverVar: null,
     importedSymbols,
+    cppAccess: null,
+    cppDefinedFns: lang === "cpp" ? collectCppDefinedFunctions(root) : NO_NAMES,
   };
   // Every id minted this file, seeded with the file node's own id (`rel`) so a
   // top-level definition can never collide with it. Threaded as its own
@@ -327,6 +379,24 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
   // residual on the file node so a term outside every symbol still surfaces it.
   nodes[0].body_text = fileResidual(source, nodes.slice(1));
   return { nodes, rawEdges };
+}
+
+const NO_NAMES: ReadonlySet<string> = new Set();
+
+/** Every free function this C/C++ file DEFINES (has a body), by bare name. A
+ * prototype for one of these — `static int helper(void);` ahead of its definition,
+ * or a header's declaration re-stated in the .c that defines it — is then skipped:
+ * the definition is the node, and a second one would be a dedup-suffixed duplicate.
+ * Out-of-line methods (`void Foo::bar() {}`) are not collected: they have no
+ * file-scope prototype form. */
+function collectCppDefinedFunctions(root: Parser.SyntaxNode): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const def of root.descendantsOfType("function_definition")) {
+    const declarator = def.childForFieldName("declarator");
+    const resolved = declarator ? cppDeclaratorName(declarator) : null;
+    if (resolved && resolved.scope === null) names.add(resolved.name);
+  }
+  return names;
 }
 
 /** Mint-time uniqueness: a document-order duplicate (same name reopened, or two
@@ -354,11 +424,16 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     const isGoMethod = ctx.lang === "go" && node.type === "method_declaration";
     // The bare name of this node's OWN immediate enclosing class/receiver — for a
     // Go method that's its receiver type (methods aren't nested, so ctx.enclosingClass
-    // wouldn't see it); for every other method it's simply what the nearest ancestor
-    // class already set as ctx.enclosingClass. Only method nodes carry it — resolve.ts's
+    // wouldn't see it); for a C++ out-of-line definition (`Foo::bar() {}`) it's the
+    // qualifier describeCpp already resolved (desc.owner — ctx.enclosingClass is null
+    // there too, since the definition sits at file/namespace scope, not nested inside
+    // the class); for every other method it's simply what the nearest ancestor class
+    // already set as ctx.enclosingClass. Only method nodes carry it — resolve.ts's
     // ownerMethod index is the sole consumer (see NodeV1.owner's doc comment).
     const owner: string | undefined =
-      desc.kind === "method" ? (isGoMethod ? (goReceiverType(node) ?? undefined) : (ctx.enclosingClass ?? undefined)) : undefined;
+      desc.kind === "method"
+        ? (isGoMethod ? (goReceiverType(node) ?? undefined) : (desc.owner ?? ctx.enclosingClass ?? undefined))
+        : undefined;
     out.push({
       id,
       name: desc.name,
@@ -371,11 +446,13 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
           ? !desc.name.startsWith("_")
           : ctx.lang === "go"
             ? goExported(desc.name)
-            : ctx.lang === "java"
-              ? javaExported(node)
-              : ctx.lang === "php"
-                ? phpExported(node)
-                : tsExported(node),
+            : ctx.lang === "cpp"
+              ? cppExported(ctx)
+              : ctx.lang === "java"
+                ? javaExported(node)
+                : ctx.lang === "php"
+                  ? phpExported(node)
+                  : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -385,20 +462,25 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       ...(owner !== undefined ? { owner } : {}),
       ...(desc.arity !== undefined ? { arity: desc.arity } : {}),
       ...(desc.variadic ? { variadic: true } : {}),
+      ...(desc.declaration ? { declaration: true } : {}),
     });
     // structural containment
     edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
     // class heritage — in Java an interface may also `extends`, and a record/enum
     // may `implements`, so every type declaration is a heritage site, not just a class.
+    // A C++ `struct` is a class with a different default access, so it is one as well.
     const javaTypeDecl = ctx.lang === "java" && JAVA_TYPE_KINDS.has(desc.kind);
-    if (desc.kind === "class" || javaTypeDecl) edges.push(...heritageEdges(node, id, ctx));
+    const cppStruct = ctx.lang === "cpp" && desc.kind === "struct";
+    const typeDecl = desc.kind === "class" || javaTypeDecl || cppStruct;
+    if (typeDecl) edges.push(...heritageEdges(node, id, ctx));
 
-    const enclosingClass =
-      desc.kind === "class" || javaTypeDecl
-        ? desc.name
-        : isGoMethod
-          ? goReceiverType(node)
-          : ctx.enclosingClass;
+    // C++ out-of-line definitions carry their owner on the descriptor (see
+    // DefDescriptor.owner) — the definition sits outside the class body.
+    const enclosingClass = typeDecl
+      ? desc.name
+      : isGoMethod
+        ? goReceiverType(node)
+        : (desc.owner ?? ctx.enclosingClass);
     const childCtx: WalkCtx = {
       ...ctx,
       scope: [...ctx.scope, idPart],
@@ -410,8 +492,28 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         desc.kind === "function" || desc.kind === "method"
           ? withoutShadowedImports(ctx.importedSymbols, node)
           : ctx.importedSymbols,
+      cppAccess:
+        ctx.lang === "cpp" && (desc.kind === "class" || desc.kind === "struct")
+          ? (desc.kind === "class" ? "private" : "public")
+          : ctx.cppAccess,
     };
     for (const child of node.namedChildren) walk(child, childCtx, out, edges, minted);
+    return;
+  }
+
+  // C++ visibility is stateful: an `access_specifier` token inside a class/struct
+  // body applies to every subsequent sibling until the next one, so this walks
+  // `field_declaration_list`'s children by hand, tracking the current level, rather
+  // than letting the generic recursion below hand every child the same ctx.
+  if (ctx.lang === "cpp" && node.type === "field_declaration_list") {
+    let access = ctx.cppAccess;
+    for (const child of node.namedChildren) {
+      if (child.type === "access_specifier") {
+        access = child.text as "public" | "private" | "protected";
+        continue;
+      }
+      walk(child, { ...ctx, cppAccess: access }, out, edges, minted);
+    }
     return;
   }
 
@@ -430,7 +532,8 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       // Java only: the call site's argument count, to pick the right overload.
       const argCount = ctx.lang === "java" ? javaArgCount(node) : undefined;
       if (argCount !== undefined) callEdge.argCount = argCount;
-      const recvType = resolveRecvType(callee.receiver, ctx);
+      // C++ can name the receiver's type from the callee shape alone (`Foo::bar()`).
+      const recvType = callee.recvType ?? resolveRecvType(callee.receiver, ctx);
       edges.push(recvType ? { ...callEdge, recvType } : callEdge);
     }
   } else if (isImport(node, ctx.lang)) {
@@ -592,6 +695,7 @@ function isDeclarationName(node: Parser.SyntaxNode): boolean {
  * TS arrow-consts. */
 function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "go") return describeGo(node, ctx);
+  if (ctx.lang === "cpp") return describeCpp(node, ctx);
   if (ctx.lang === "java") return describeJava(node, ctx);
 
   // PHP closures: `$h = function () {…}` / `fn() => …`, and bare callbacks
@@ -739,6 +843,110 @@ function goExported(name: string): boolean {
   return first !== first.toLowerCase() && first === first.toUpperCase();
 }
 
+// The named aggregates, and the kind each takes. A union is a nominal data carrier
+// like a struct — graft's Kind set has no `union`, and "struct" is what a reader
+// expects to filter by.
+const CPP_SPECIFIER_KINDS: Record<string, Kind> = {
+  class_specifier: "class",
+  struct_specifier: "struct",
+  union_specifier: "struct",
+  enum_specifier: "enum",
+};
+
+/** C++ definition shapes: classes/structs/enums (a direct `name`-field lookup,
+ * same as the flat-table languages) and function/method definitions, whose name
+ * is buried inside a declarator chain rather than a `name` field — this grammar's
+ * analogue of `describeGo`'s special-casing, not the flat-table path C#/TS use. */
+function describeCpp(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
+  const specKind = CPP_SPECIFIER_KINDS[node.type];
+  if (specKind) {
+    const name = node.childForFieldName("name")?.text;
+    if (!name) return null;
+    const body = node.childForFieldName("body");
+    return { name, kind: specKind, headerEnd: body ? body.startIndex : node.endIndex, hashNode: cppHashNode(node) };
+  }
+
+  // C: `typedef struct {…} Point;` / `typedef int Id;` / `typedef struct Node {…} Node;`.
+  // The typedef NAME is what the rest of the code spells, so it is the node — unless
+  // it merely re-states a named aggregate's own name, in which case the aggregate
+  // (matched above as the walk descends) is the node and the typedef adds nothing.
+  if (node.type === "type_definition") {
+    const name = node.childForFieldName("declarator")?.descendantsOfType("type_identifier")[0]?.text;
+    if (!name) return null;
+    const inner = node.childForFieldName("type");
+    const innerKind = inner ? CPP_SPECIFIER_KINDS[inner.type] : undefined;
+    let kind: Kind = "type";
+    if (inner && innerKind) {
+      const innerName = inner.childForFieldName("name")?.text;
+      if (innerName === name) return null;
+      // An anonymous aggregate has no name of its own, so the typedef IS the struct/enum.
+      if (!innerName && inner.childForFieldName("body")) kind = innerKind;
+    }
+    return { name, kind, headerEnd: node.endIndex, hashNode: node };
+  }
+
+  // A prototype: `int run(int argc);` at file/namespace scope (block-scope externs
+  // and class-body members are other node types and never reach here). Skipped when
+  // this same file defines the function — the definition is the node. Flagged as a
+  // declaration so a call resolves to the definition elsewhere, not to this stub.
+  if (node.type === "declaration") {
+    if (ctx.enclosingKind === "function" || ctx.enclosingKind === "method") return null;
+    const declarator = node.childForFieldName("declarator");
+    const resolved = declarator ? cppDeclaratorName(declarator) : null;
+    if (!resolved || resolved.scope !== null) return null;
+    if (ctx.cppDefinedFns.has(resolved.name)) return null;
+    return { name: resolved.name, kind: "function", headerEnd: node.endIndex, hashNode: cppHashNode(node), declaration: true };
+  }
+
+  if (node.type === "function_definition") {
+    const declarator = node.childForFieldName("declarator");
+    const resolved = declarator ? cppDeclaratorName(declarator) : null;
+    if (!resolved) return null;
+    const body = node.childForFieldName("body");
+    const headerEnd = body ? body.startIndex : node.endIndex;
+    const hashNode = cppHashNode(node);
+    if (resolved.scope !== null) {
+      // Out-of-class definition (`void Foo::bar() {}`): the owner comes from the
+      // qualifier, not ctx.enclosingClass — the definition sits at file/namespace
+      // scope, not nested inside the class. This is the single most important case
+      // to get right for a header/source-split codebase: miss it and every
+      // out-of-line method silently disappears from the graph.
+      return {
+        name: resolved.name,
+        idName: `${resolved.scope}.${resolved.name}`,
+        kind: "method",
+        headerEnd,
+        hashNode,
+        owner: resolved.scope,
+      };
+    }
+    const kind: Kind = ctx.enclosingKind === "class" || ctx.enclosingKind === "struct" ? "method" : "function";
+    return { name: resolved.name, kind, headerEnd, hashNode };
+  }
+
+  return null;
+}
+
+/** `template_declaration` wraps a `class_specifier`/`struct_specifier`/
+ * `function_definition` as a child, not a field — so when the templated
+ * declaration's immediate parent is a template, the wider template node becomes
+ * the span/hash/signature source instead, attributing the `template<typename T>`
+ * line to the header so the card doesn't cut it off. `headerEnd` (a char offset
+ * into the shared source string) stays valid regardless of which node is used. */
+function cppHashNode(node: Parser.SyntaxNode): Parser.SyntaxNode {
+  return node.parent?.type === "template_declaration" ? node.parent : node;
+}
+
+/** C++ visibility: a class member is exported iff its section is `public` — the
+ * only place the language has "exported"-style semantics. Non-members (free
+ * functions, classes/structs/enums, and out-of-line method definitions — the
+ * last because ctx.cppAccess is unset at the file/namespace scope where the
+ * definition itself sits) default to exported: v1 doesn't model `static`/
+ * anonymous-namespace internal linkage. */
+function cppExported(ctx: WalkCtx): boolean {
+  return ctx.cppAccess == null || ctx.cppAccess === "public";
+}
+
 /** PHP visibility: a class member is "exported" unless it is `private`/`protected`.
  * Top-level functions/classes carry no visibility modifier and are always visible. */
 function phpExported(node: Parser.SyntaxNode): boolean {
@@ -794,6 +1002,19 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
     }
     return edges;
   }
+  if (ctx.lang === "cpp") {
+    // Unlike C#, every base-list entry here is a true base class (C++ has no
+    // `interface` keyword), so every one emits `extends` — no "first = extends,
+    // rest = implements" heuristic needed. `access_specifier` tokens (`public`/
+    // `private`/`protected`) are plain siblings in the clause, not fields.
+    const clause = node.namedChildren.find((c) => c.type === "base_class_clause");
+    for (const t of clause?.namedChildren ?? []) {
+      if (t.type === "type_identifier" || t.type === "qualified_identifier" || t.type === "template_type") {
+        edges.push({ source: classId, relation: "extends", name: stripCppTemplateArgs(t.text), file: ctx.rel });
+      }
+    }
+    return edges;
+  }
   if (ctx.lang === "php") {
     // `class C extends B implements I, J` → base_clause (extends) +
     // class_interface_clause (implements); names may be namespace-qualified.
@@ -842,7 +1063,7 @@ function typeIdentifiersIn(node: Parser.SyntaxNode): string[] {
 function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
-): { name: string; viaMember: boolean; receiver?: string } | null {
+): { name: string; viaMember: boolean; receiver?: string; recvType?: string } | null {
   // Java first: `method_invocation` has NO `function` field (it splits the callee
   // into `object` + `name`), so the shared lookup below would return null for every
   // Java call site and the language would extract nodes with no call edges at all.
@@ -885,6 +1106,21 @@ function calleeName(
   if ((lang === "typescript" || lang === "tsx") && fn.type === "member_expression") {
     const p = fn.childForFieldName("property") ?? fn.namedChildren.at(-1);
     return p ? { name: p.text, viaMember: true, receiver: tsReceiver(fn) } : null;
+  }
+  if (lang === "cpp" && fn.type === "field_expression") {
+    // `obj.method()` / `ptr->method()` — member call, receiver resolved via the
+    // normal bindings-lookup path (same as ts/py), not a direct recvType.
+    const field = fn.childForFieldName("field");
+    if (field?.type !== "field_identifier" && field?.type !== "destructor_name") return null;
+    return { name: field.text, viaMember: true, receiver: cppReceiver(fn.childForFieldName("argument")) };
+  }
+  if (lang === "cpp" && fn.type === "qualified_identifier") {
+    // `Foo::bar()` / `std::max()` — static/namespaced call. The scope IS the
+    // type name already (not a variable to look up), so it's supplied directly
+    // as recvType, bypassing resolveRecvType's bindings-lookup path entirely.
+    const { scope, nameNode } = resolveCppQualified(fn);
+    if (!nameNode.text) return null;
+    return scope ? { name: nameNode.text, viaMember: true, recvType: scope } : { name: nameNode.text, viaMember: false };
   }
   return null;
 }
@@ -1021,10 +1257,25 @@ function tsReceiver(fn: Parser.SyntaxNode): string | undefined {
   return undefined;
 }
 
+/** cpp `field_expression`'s `argument` (the object before `.`/`->`) receiver text:
+ * `this`, `this.x` (a `this->x.y()` chain), or a bare identifier. Mirrors `tsReceiver`. */
+function cppReceiver(argument: Parser.SyntaxNode | null | undefined): string | undefined {
+  if (!argument) return undefined;
+  if (argument.type === "this") return "this";
+  if (argument.type === "identifier") return argument.text;
+  if (argument.type === "field_expression") {
+    const innerArg = argument.childForFieldName("argument");
+    const innerField = argument.childForFieldName("field");
+    if (innerArg?.type === "this" && innerField) return `this.${innerField.text}`;
+  }
+  return undefined;
+}
+
 function isImport(node: Parser.SyntaxNode, lang: Language): boolean {
   // Go: match the per-import leaf, so single (`import "fmt"`) and grouped
   // (`import ( … )`) forms each yield one edge as the walk recurses into the list.
   if (lang === "go") return node.type === "import_spec";
+  if (lang === "cpp") return node.type === "preproc_include";
   if (lang === "java") return node.type === "import_declaration";
   // PHP: one edge per imported symbol — the clause leaf inside a (possibly
   // grouped) `use A\B, C\D;` / `use A\{B, C};` declaration.
@@ -1048,6 +1299,15 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
     // import_spec's `path` is an interpreted_string_literal, e.g. `"mymod/pkg/util"`.
     const path = node.childForFieldName("path") ?? node.namedChildren.at(-1);
     return path ? path.text.replace(/^["`]|["`]$/g, "") : null;
+  }
+  if (lang === "cpp") {
+    // `path` is a `string_literal` for `"foo.h"` or a `system_lib_string` for
+    // `<foo.h>` — cleaner than C#'s `using_directive`, which has no field at all.
+    const path = node.childForFieldName("path");
+    if (!path) return null;
+    if (path.type === "system_lib_string") return path.text.replace(/^<|>$/g, "");
+    const content = path.namedChildren.find((c) => c.type === "string_content");
+    return content?.text ?? path.text.replace(/^"|"$/g, "");
   }
   if (lang === "java") {
     // `import a.b.C;` / `import static a.b.C.d;` / `import a.b.*;` — the fully
