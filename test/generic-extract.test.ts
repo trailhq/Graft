@@ -338,3 +338,46 @@ test("Dart file-level skeleton lists the API, not function-body locals (#134)", 
     "skeleton has no bogus class int",
   );
 });
+
+// #197: Zig is registered in GENERIC_LANGS but had no tags.scm, so the walker
+// minted `const Point = struct` as a variable and emitted no call edges.
+const ZIG = `const Point = struct {
+    x: i32,
+};
+
+fn helper(n: i32) i32 {
+    return n;
+}
+
+pub fn run(n: i32) i32 {
+    return helper(n);
+}
+
+test "calls helper" {
+    _ = helper(1);
+}
+
+test {
+    _ = helper(2);
+}
+`;
+
+test("genericLangOf routes .zig to the breadth tier", () => {
+  assert.equal(genericLangOf("src/main.zig")?.name, "zig");
+});
+
+test("Zig fn/const struct/named test become symbols; call edges resolve; unnamed tests stay out (#197)", async () => {
+  await warmGenericGrammars(["zig"]);
+  assert.ok(isWarm("zig"), "zig grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("src/main.zig", ZIG, "zig");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const kinds = symbols.map((n) => `${n.kind}:${n.name}`).sort();
+  assert.deepEqual(kinds, ["function:calls helper", "function:helper", "function:run", "struct:Point"]);
+
+  const edges = resolveEdges(nodes, rawEdges);
+  const calls = edges
+    .filter((e) => e.relation === "calls")
+    .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
+  assert.ok(calls.includes("run→helper"), `run → helper (got ${calls.join(", ")})`);
+  assert.ok(calls.includes("calls helper→helper"), `named test → helper (got ${calls.join(", ")})`);
+});
