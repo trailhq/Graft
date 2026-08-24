@@ -16,6 +16,7 @@ import { formatGraphCheckReport } from "./graph/check.js";
 import { buildGraphIfMissing, runInit } from "./claude/init.js";
 import { runHostsInit } from "./hosts/init.js";
 import { hostIds } from "./hosts/registry.js";
+import { isPackageRunner, type PackageRunner } from "./hosts/mcp-config.js";
 import { contextDirFor } from "./context/node-file.js";
 import { loadGraphCached } from "./graph/load.js";
 import { ensureFreshChildren, ensureFreshGraph, refreshNote } from "./graph/refresh.js";
@@ -838,11 +839,17 @@ program
   .option("--dry-run", "print every file init would touch, then exit without writing")
   .option("-y, --yes", "skip the picker and wire every detected agent (the pre-0.8 default)")
   .option("--no-global", "skip writes outside this repo (the ~/.codex/ config + hooks)")
-  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean }) => {
+  .option("--runner <npx|bunx|pnpm|yarn>", "package runner written into generated MCP configs (default: detect from the lockfile)")
+  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; runner?: string }) => {
     if (opts.listAgents) {
       for (const id of [...hostIds(), "claude"]) console.log(id);
       return;
     }
+    if (opts.runner !== undefined && !isPackageRunner(opts.runner)) {
+      console.error(`✗ unknown --runner ${opts.runner} — valid: npx, bunx, pnpm, yarn`);
+      process.exit(1);
+    }
+    const runner: PackageRunner | undefined = opts.runner !== undefined && isPackageRunner(opts.runner) ? opts.runner : undefined;
     const repo = resolve(dir);
     const explicit = Array.isArray(opts.agents) ? opts.agents : undefined;
 
@@ -926,7 +933,7 @@ program
 
     for (const target of targets) {
       if (target !== repo) console.error(`\n— ${relative(repo, target)}/`);
-      wireTarget(target, ids, { home, cliPath, plan, opts, wantClaude });
+      wireTarget(target, ids, { home, cliPath, plan, opts: { ...opts, runner }, wantClaude });
     }
 
     // One epilogue for the whole run. A workspace parent holds no nodes of its
@@ -960,13 +967,13 @@ function wireTarget(
     cliPath: string;
     plan: ReturnType<typeof planInit>;
     wantClaude: boolean;
-    opts: { build?: boolean; mcp?: boolean; hooks?: boolean; global?: boolean };
+    opts: { build?: boolean; mcp?: boolean; hooks?: boolean; global?: boolean; runner?: PackageRunner };
   },
 ): void {
     const { home, cliPath, plan, wantClaude, opts } = ctx;
 
     if (wantClaude) {
-      const res = runInit(repo, { build: opts.build, cliPath });
+      const res = runInit(repo, { build: opts.build, cliPath, runner: opts.runner });
       console.error(`✓ wrote ${res.settingsPath}`);
       for (const s of res.shims) console.error(`✓ wrote ${s}`);
       console.error(`✓ wrote ${res.skill}`);
@@ -990,6 +997,7 @@ function wireTarget(
         mcp: opts.mcp,
         hooks: opts.hooks,
         global: opts.global,
+        runner: opts.runner,
       });
       for (const w of r.written) console.error(`✓ ${w.id}: ${w.path} (${w.action})`);
       for (const m of r.mcp) console.error(`✓ mcp ${m.id}: ${m.path} (${m.action})`);
@@ -1008,6 +1016,7 @@ function wireTarget(
       global: opts.global !== false,
       mcp: opts.mcp !== false,
       hooks: opts.hooks !== false,
+      ...(opts.runner ? { runner: opts.runner } : {}),
     });
 
     // Every host's wiring points at graft/, so the graph is built whatever was

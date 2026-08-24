@@ -5,7 +5,7 @@ import { mergeGraftSettings } from './settings-merge.js';
 import { statuslineShim, hooksShim } from './shim-template.js';
 import { skillTemplate } from './skill-template.js';
 import { claudeDistDir } from './paths.js';
-import { mergeJsonKey, serverEntry, type McpWrite } from '../hosts/mcp-config.js';
+import { mergeJsonKey, serverEntry, type McpWrite, type PackageRunner } from '../hosts/mcp-config.js';
 import { hasGraftIndex } from '../graph/root.js';
 import type { PlannedWrite } from '../hosts/plan.js';
 
@@ -56,7 +56,7 @@ export interface InitResult {
   built: boolean;
 }
 
-export function runInit(dir: string, opts: { build?: boolean; cliPath?: string } = {}): InitResult {
+export function runInit(dir: string, opts: { build?: boolean; cliPath?: string; runner?: PackageRunner } = {}): InitResult {
   // Same list `--dry-run` and the picker report, so the two can't drift apart.
   const [settings, statusline, hooks, skill, mcpTarget] = claudeTargets(dir).map((t) => t.path);
 
@@ -83,7 +83,7 @@ export function runInit(dir: string, opts: { build?: boolean; cliPath?: string }
   // Register the graft MCP server in the project's .mcp.json so Claude Code
   // exposes graft_find_code/graft_trace_calls/etc. as tools — the same keyed merge the
   // other hosts use (existing servers preserved; unparseable files skipped).
-  const mcp = mergeJsonKey('claude', mcpTarget, 'mcpServers', serverEntry());
+  const mcp = mergeJsonKey('claude', mcpTarget, 'mcpServers', serverEntry({ runner: opts.runner, cwd: dir }));
 
   const built = buildGraphIfMissing(dir, opts);
   return { settingsPath, shims: [sl, hk], skill: skillPath, mcp, warnings, built };

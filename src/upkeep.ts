@@ -33,6 +33,7 @@ import { HOSTS } from './hosts/registry.js';
 import { START } from './hosts/sections.js';
 import { getNpmViewVersion, readCurrentVersion } from './cli-meta.js';
 import { graftCliPath } from './claude/paths.js';
+import type { PackageRunner } from './hosts/mcp-config.js';
 
 /**
  * The version of the graft package this code was loaded from.
@@ -169,6 +170,8 @@ export interface WiringOpts {
   mcp: boolean;
   /** false → skip hook installation (`--no-hooks`). */
   hooks: boolean;
+  /** Set when the user passed `--runner`; absent → re-detect from the lockfile. */
+  runner?: PackageRunner;
 }
 
 export const DEFAULT_WIRING_OPTS: WiringOpts = { global: true, mcp: true, hooks: true };

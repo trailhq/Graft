@@ -7,7 +7,7 @@ process.env.GRAFT_MCP_NPX = '1';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { registerMcpConfigs, serverEntry } from '../src/hosts/mcp-config.js';
+import { registerMcpConfigs, serverEntry, detectPackageRunner, launchForRunner } from '../src/hosts/mcp-config.js';
 
 function fresh(): string { return mkdtempSync(join(tmpdir(), 'graft-mcpcfg-')); }
 
@@ -109,4 +109,89 @@ test('serverEntry prefers the installed binary and falls back to npx', () => {
 test('GRAFT_MCP_NPX overrides an installed binary', () => {
   process.env.GRAFT_MCP_NPX = '1';
   assert.equal(serverEntry({ onPath: true }).command, 'npx', 'the escape hatch wins');
+});
+
+function withoutNpxPin(fn: () => void): void {
+  const saved = process.env.GRAFT_MCP_NPX;
+  delete process.env.GRAFT_MCP_NPX;
+  try { fn(); } finally {
+    if (saved !== undefined) process.env.GRAFT_MCP_NPX = saved;
+    else delete process.env.GRAFT_MCP_NPX;
+  }
+}
+
+function lockfileRepo(name: string): string {
+  const repo = fresh();
+  writeFileSync(join(repo, name), '');
+  return repo;
+}
+
+test('detectPackageRunner reads lockfiles in bun > pnpm > yarn > npx order', () => {
+  assert.equal(detectPackageRunner(lockfileRepo('bun.lock')), 'bunx');
+  assert.equal(detectPackageRunner(lockfileRepo('bun.lockb')), 'bunx');
+  assert.equal(detectPackageRunner(lockfileRepo('pnpm-lock.yaml')), 'pnpm');
+  assert.equal(detectPackageRunner(lockfileRepo('yarn.lock')), 'yarn');
+  assert.equal(detectPackageRunner(fresh()), 'npx', 'no lockfile');
+  assert.equal(detectPackageRunner(lockfileRepo('package-lock.json')), 'npx', 'npm lockfile is the default');
+  const both = fresh();
+  writeFileSync(join(both, 'bun.lock'), '');
+  writeFileSync(join(both, 'pnpm-lock.yaml'), '');
+  assert.equal(detectPackageRunner(both), 'bunx', 'bun wins when several lockfiles exist');
+});
+
+test('launchForRunner matches each package manager\'s documented dlx shape', () => {
+  assert.deepEqual(launchForRunner('npx'), { command: 'npx', args: ['-y', '@nanonets/graft', 'mcp'] });
+  assert.deepEqual(launchForRunner('bunx'), { command: 'bunx', args: ['@nanonets/graft', 'mcp'] });
+  assert.deepEqual(launchForRunner('pnpm'), { command: 'pnpm', args: ['dlx', '@nanonets/graft', 'mcp'] });
+  assert.deepEqual(launchForRunner('yarn'), { command: 'yarn', args: ['dlx', '@nanonets/graft', 'mcp'] });
+});
+
+test('serverEntry uses the lockfile runner when graft is not on PATH', () => {
+  withoutNpxPin(() => {
+    assert.deepEqual(serverEntry({ onPath: false, cwd: lockfileRepo('bun.lock') }), { command: 'bunx', args: ['@nanonets/graft', 'mcp'] });
+    assert.deepEqual(serverEntry({ onPath: false, cwd: lockfileRepo('pnpm-lock.yaml') }), { command: 'pnpm', args: ['dlx', '@nanonets/graft', 'mcp'] });
+    assert.deepEqual(serverEntry({ onPath: false, cwd: lockfileRepo('yarn.lock') }), { command: 'yarn', args: ['dlx', '@nanonets/graft', 'mcp'] });
+    assert.deepEqual(serverEntry({ onPath: false, cwd: fresh() }), { command: 'npx', args: ['-y', '@nanonets/graft', 'mcp'] });
+  });
+});
+
+test('a bun/pnpm/yarn lockfile wins over an installed binary so committed configs stay portable', () => {
+  withoutNpxPin(() => {
+    assert.equal(serverEntry({ onPath: true, cwd: lockfileRepo('bun.lock') }).command, 'bunx');
+    assert.equal(serverEntry({ onPath: true, cwd: lockfileRepo('pnpm-lock.yaml') }).command, 'pnpm');
+    assert.equal(serverEntry({ onPath: true, cwd: fresh() }).command, 'graft', 'no lockfile → still prefer PATH');
+  });
+});
+
+test('--runner wins over lockfile, PATH, and GRAFT_MCP_NPX', () => {
+  process.env.GRAFT_MCP_NPX = '1';
+  const bun = lockfileRepo('bun.lock');
+  assert.deepEqual(serverEntry({ runner: 'pnpm', onPath: true, cwd: bun }), { command: 'pnpm', args: ['dlx', '@nanonets/graft', 'mcp'] });
+  assert.deepEqual(serverEntry({ runner: 'bunx' }), { command: 'bunx', args: ['@nanonets/graft', 'mcp'] });
+  assert.deepEqual(serverEntry({ runner: 'yarn' }), { command: 'yarn', args: ['dlx', '@nanonets/graft', 'mcp'] });
+  assert.deepEqual(serverEntry({ runner: 'npx' }), { command: 'npx', args: ['-y', '@nanonets/graft', 'mcp'] });
+});
+
+test('re-running init updates an existing JSON graft entry to the new runner', () => {
+  const repo = fresh(); const home = fresh();
+  registerMcpConfigs(repo, ['cursor'], { home, runner: 'npx' });
+  const first = JSON.parse(readFileSync(join(repo, '.cursor', 'mcp.json'), 'utf8'));
+  assert.equal(first.mcpServers.graft.command, 'npx');
+  const w = registerMcpConfigs(repo, ['cursor'], { home, runner: 'bunx' });
+  assert.deepEqual(w.map((x) => x.action), ['updated']);
+  const cfg = JSON.parse(readFileSync(join(repo, '.cursor', 'mcp.json'), 'utf8'));
+  assert.deepEqual(cfg.mcpServers.graft, { command: 'bunx', args: ['@nanonets/graft', 'mcp'] });
+});
+
+test('re-running init updates an existing TOML graft section to the new runner', () => {
+  const repo = fresh(); const home = fresh();
+  const w1 = registerMcpConfigs(repo, ['grok'], { home, runner: 'npx' });
+  assert.deepEqual(w1.map((x) => x.action), ['created']);
+  const w2 = registerMcpConfigs(repo, ['grok'], { home, runner: 'pnpm' });
+  assert.deepEqual(w2.map((x) => x.action), ['updated']);
+  const toml = readFileSync(join(repo, '.grok', 'config.toml'), 'utf8');
+  assert.match(toml, /command = "pnpm"/);
+  assert.match(toml, /"dlx"/);
+  const w3 = registerMcpConfigs(repo, ['grok'], { home, runner: 'pnpm' });
+  assert.deepEqual(w3.map((x) => x.action), ['unchanged']);
 });
