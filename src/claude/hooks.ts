@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { join, basename, isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
 import { readWiring } from './stats.js';
 import { formatBlastRadius, relevantRetrieval, formatOrientation } from './format.js';
 import { indexFreshness, staleBanner } from '../context/check.js';
@@ -59,11 +60,26 @@ export function promptAskTimeout(dir: string): number {
   return Math.max(MIN_CHILD_TIMEOUT_MS, installed - HOOK_OVERHEAD_MS);
 }
 
-/** The timeout on this repo's graft hook entry for `event`, or null if it can't be
- * read (no settings file, hand-edited shape, unparseable JSON). */
-function installedHookTimeout(dir: string, event: string): number | null {
+/**
+ * Every settings file Claude Code merges hook definitions from, for a session
+ * rooted at `dir`. The per-repo file is not the only place graft's hooks can be
+ * installed: declaring them once at the user level wires every repo on the
+ * machine at once, and such a repo has no `.claude/settings.json` at all.
+ */
+function hookSettingsFiles(dir: string): string[] {
+  const user = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+  return [
+    join(dir, '.claude', 'settings.json'),
+    join(dir, '.claude', 'settings.local.json'),
+    join(user, 'settings.json'),
+  ];
+}
+
+/** The timeout on one settings file's graft hook entry for `event`, or null if it
+ * can't be read (no settings file, hand-edited shape, unparseable JSON). */
+function hookTimeoutIn(file: string, event: string): number | null {
   try {
-    const settings = JSON.parse(readFileSync(join(dir, '.claude', 'settings.json'), 'utf8')) as any;
+    const settings = JSON.parse(readFileSync(file, 'utf8')) as any;
     const blocks = settings?.hooks?.[event];
     if (!Array.isArray(blocks)) return null;
     for (const block of blocks) {
@@ -77,6 +93,27 @@ function installedHookTimeout(dir: string, event: string): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The budget this hook is actually running under, or null when no settings file
+ * declares one.
+ *
+ * The smallest declared timeout wins rather than the nearest, because when more
+ * than one file declares the hook Claude Code runs every matching entry and this
+ * process cannot tell which one launched it. Guessing high is the expensive
+ * mistake: an overrunning child gets the whole hook SIGKILLed, so `emit()` and
+ * `writeSession()` never run and the turn silently gets no retrieval at all.
+ * Guessing low only shortens one query.
+ */
+function installedHookTimeout(dir: string, event: string): number | null {
+  let smallest: number | null = null;
+  for (const file of hookSettingsFiles(dir)) {
+    const timeout = hookTimeoutIn(file, event);
+    if (timeout === null) continue;
+    if (smallest === null || timeout < smallest) smallest = timeout;
+  }
+  return smallest;
 }
 
 function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_MS): any | null {
