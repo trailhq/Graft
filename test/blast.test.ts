@@ -17,6 +17,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { runCli, tmpRepo } from "./helpers.js";
+import { changedFiles } from "../src/blast/diff.js";
 
 const MATH = `export function add(a: number, b: number): number {
   return a + b;
@@ -228,4 +229,31 @@ test("blast: a clean tree reports the last commit rather than nothing at all", (
   const report = blastJson([d]);
   assert.equal(report.basis, "HEAD~1...HEAD");
   assert.ok(report.impacted.some((i) => i.name === "total"));
+});
+
+test("diff: hunks carry their text, and the next file's header is not read as a deleted line", () => {
+  const d = builtRepo();
+  // A `--` line of SQL is the trap: `--- a/x.sql` is a header, `-- comment` is
+  // content, and both start with a dash in the patch.
+  writeFileSync(join(d, "src", "math.ts"), MATH_EDITED);
+  writeFileSync(join(d, "query.sql"), "-- report\n");
+  git(d, "add", "-A");
+  git(d, "commit", "-m", "edit");
+
+  const res = changedFiles(d, "HEAD~1");
+  assert.ok(res);
+  const math = res.files.find((f) => f.path === "src/math.ts");
+  assert.ok(math);
+  assert.deepEqual(math.hunks.map((h) => h.lines), [[
+    { n: null, sign: "-", text: "  return a + b;" },
+    { n: 2, sign: "+", text: "  return b + a;" },
+  ]], "both sides of the edit, with post-image numbering");
+  assert.deepEqual(math.ranges, math.hunks.map((h) => ({ start: h.start, end: h.end })), "ranges mirror hunks");
+  assert.ok(
+    !math.hunks.some((h) => h.lines.some((l) => l.text.includes("query.sql"))),
+    "the next file's --- header stayed out of this file's hunk",
+  );
+
+  const sql = res.files.find((f) => f.path === "query.sql");
+  assert.deepEqual(sql?.hunks[0].lines, [{ n: 1, sign: "+", text: "-- report" }], "a real -- line survives");
 });

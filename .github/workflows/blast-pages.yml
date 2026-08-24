@@ -11,16 +11,26 @@ name: Blast viewer
 # PR's files as data — never runs a script from the PR (no `npm ci` on the PR's
 # package.json, no postinstall). The graph is built from the PR's source text by a
 # tree-sitter parser, which executes none of it.
+#
+# A dispatch by PR number is the second entry point. It exists because a fork PR's
+# comment job cannot post the link itself (a `pull_request` job on a fork gets a
+# read-only token), so publishing that page has to be startable by hand.
 on:
   pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, closed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number to publish the page for."
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: blast-pages-${{ github.event.pull_request.number }}
+  group: blast-pages-${{ github.event.pull_request.number || inputs.pr }}
   cancel-in-progress: true
 
 jobs:
@@ -31,6 +41,25 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      # 0. Which pull request. An event carries it; a dispatch names it by number,
+      # and everything below reads these outputs so the two entry points cannot
+      # drift apart.
+      - name: Resolve the pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+        run: |
+          set -euo pipefail
+          # This number becomes a path under pr/ and a git ref. Digits only, so a
+          # dispatch cannot write outside its own directory.
+          case "$NUMBER" in
+            "" | *[!0-9]*) echo "not a pull request number: $NUMBER" >&2; exit 1 ;;
+          esac
+          gh api "repos/$REPO/pulls/$NUMBER" --jq \
+            '"number=\(.number)", "base_ref=\(.base.ref)", "base_sha=\(.base.sha)"' >> "$GITHUB_OUTPUT"
+
       # 1. The tooling, from the base branch — never from the PR.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -48,7 +77,7 @@ jobs:
       # 2. The PR's code, as data only.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: refs/pull/${{ steps.pr.outputs.number }}/merge
           path: pr
           fetch-depth: 0
           persist-credentials: false
@@ -60,15 +89,15 @@ jobs:
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: pr/graft
-          key: graft-${{ github.event.pull_request.base.sha }}
+          key: graft-${{ steps.pr.outputs.base_sha }}
           restore-keys: |
             graft-
 
       - name: Build the graph and export the radius
         working-directory: pr
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
           # `--name` reads a key, so the page gets the same concept names the comment
           # shows instead of hub-symbol fallbacks. The PR's code is never executed
           # here (see the header) — naming only sends its source text to the model,
@@ -93,7 +122,7 @@ jobs:
       - name: Publish to gh-pages
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -133,7 +162,7 @@ jobs:
       - name: Remove this PR's page
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail

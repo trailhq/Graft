@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.12.0
+
+### Changed
+
+- **graft now collects anonymous usage stats, and the README no longer says it
+  doesn't.** We had no way to tell whether a repo ever got past `graft build`,
+  or whether an agent reaches for graft over grep once it has — npm downloads
+  answer neither. Six events, all buckets and fixed enums: `first_run`,
+  `init_completed`, `build_completed`, `build_failed`, `query`,
+  `session_summary`. Never your code, file paths, repo name, symbols, queries,
+  prompts, or error messages — [`TELEMETRY.md`](TELEMETRY.md) is the complete
+  contract and `src/telemetry/contract.ts` enforces it as a hard allowlist, so
+  a property that is not in the document cannot be sent even by accident.
+
+  Identity is two random UUIDs (one per machine, one per checkout), derived from
+  nothing; events are anonymous in PostHog with no person profile. Nothing is
+  sent from a command you run — events queue locally and a detached process
+  posts them at most once a day, so no query ever waits on the network.
+
+  Off if you uncheck the box in `graft init`, run `graft telemetry disable`, set
+  `DO_NOT_TRACK`, are in CI, or built from source (the key is stamped in only at
+  publish time, so forks never send). `graft telemetry debug` prints the exact
+  batch your machine would send, and sends nothing.
+
 ## 0.11.0
 
 ### Fixed

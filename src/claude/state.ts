@@ -35,6 +35,11 @@ export interface SessionState {
   /** Weak-match nudges spent this session, capped so the line stays signal.
    * Optional for the same backwards-compatibility reason as above. */
   nudges?: number;
+  /** Set once this session has been rolled up into a `session_summary`
+   * telemetry event, so a resumed or long-lived session is counted once.
+   * A flag rather than deleting the file: the file still holds `lastQuery` and
+   * `injectedPointers`, which a resumed session needs. */
+  summarized?: boolean;
 }
 
 function emptySession(): SessionState {

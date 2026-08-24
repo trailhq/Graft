@@ -33,6 +33,16 @@ export interface VizExportOptions {
    * PR gets a Context tab worth opening without a `--deep` build.
    */
   contextGraph?: VizGraph;
+  /**
+   * Tabs the page offers. Default: all three.
+   *
+   * A blast page passes `["context"]`. The Code tab there is the repo's whole
+   * wiring graph — 1,377 nodes on graft itself, a hairball that answers nothing
+   * about the pull request, and ~95% of the exported megabyte — and Outline is the
+   * repo's file tree. Dropping them makes the page a tenth of the size and removes
+   * two tabs a reviewer has no reason to open.
+   */
+  tabs?: Array<"context" | "code" | "outline">;
 }
 
 export interface VizExportResult {
@@ -42,6 +52,8 @@ export interface VizExportResult {
   codeNodes: number;
   /** Tab the exported page opens on — see the reasoning in {@link exportViz}. */
   defaultTab: "context" | "code";
+  /** Tabs written into the page. */
+  tabs: Array<"context" | "code" | "outline">;
 }
 
 /** The wiring graph as the viewer's endpoint would have served it, or null. */
@@ -90,7 +102,11 @@ export function exportViz(opts: VizExportOptions): VizExportResult {
   const js = readFileSync(join(opts.viewerDir, "app.js"), "utf8");
 
   const context = opts.contextGraph ?? assembleContextGraph(opts.contextDir);
-  const code = codeGraph(opts.contextDir);
+  const tabs = opts.tabs ?? ["context", "code", "outline"];
+  // Both remaining tabs read the wiring graph, so dropping them drops the payload
+  // as well — the point of the option, not a side effect of it.
+  const wanted = tabs.includes("code") || tabs.includes("outline");
+  const code = wanted ? codeGraph(opts.contextDir) : null;
 
   // Which tab to open on. The viewer starts on Context, which only a `--deep` build
   // fills: a structural build writes wiring cards (no frontmatter, so nothing to
@@ -102,7 +118,7 @@ export function exportViz(opts: VizExportOptions): VizExportResult {
   const defaultTab = opts.contextGraph || context.nodes.length > 1 || codeNodes === 0 ? "context" : "code";
   const contextGraph = {
     ...context,
-    meta: { ...context.meta, repoName: opts.repoName, subtitle: opts.subtitle, defaultTab },
+    meta: { ...context.meta, repoName: opts.repoName, subtitle: opts.subtitle, defaultTab, tabs },
   };
 
   const data = [
@@ -123,5 +139,5 @@ export function exportViz(opts: VizExportOptions): VizExportResult {
   mkdirSync(opts.outDir, { recursive: true });
   const file = join(opts.outDir, "index.html");
   writeFileSync(file, page);
-  return { file, bytes: Buffer.byteLength(page), contextNodes: contextGraph.nodes.length, codeNodes, defaultTab };
+  return { file, bytes: Buffer.byteLength(page), contextNodes: contextGraph.nodes.length, codeNodes, defaultTab, tabs };
 }
