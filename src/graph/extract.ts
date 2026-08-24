@@ -12,13 +12,14 @@ import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
 import R from "tree-sitter-r";
 import Java from "tree-sitter-java";
+import Kotlin from "tree-sitter-kotlin";
 import PHP from "tree-sitter-php";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "php" | "r";
+export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "kotlin" | "php" | "r";
 
 /**
  * Extension → the tree-sitter grammar that parses it, and the label a human expects
@@ -48,6 +49,8 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".py", grammar: "python", label: "python" },
   { ext: ".go", grammar: "go", label: "go" },
   { ext: ".java", grammar: "java", label: "java" },
+  { ext: ".kt", grammar: "kotlin", label: "kotlin" },
+  { ext: ".kts", grammar: "kotlin", label: "kotlin" },
   { ext: ".php", grammar: "php", label: "php" },
   // `entryFor` lower-cases the path before matching, so this one entry covers
   // both `.R` (the conventional case in real R codebases) and `.r`.
@@ -200,6 +203,20 @@ const JAVA_KINDS: Record<string, Kind> = {
  * which "class"-only logic would miss for a record's or interface's members. */
 const JAVA_TYPE_KINDS: ReadonlySet<Kind> = new Set<Kind>(["class", "interface", "enum", "struct"]);
 
+const KOTLIN_KINDS: Record<string, Kind> = {
+  class_declaration: "class", // → "interface" / "enum" / "interface" (annotation) in describeKotlin
+  object_declaration: "class", // a singleton object is class-like (companion objects included)
+  function_declaration: "function", // → "method" inside a type (resolved in the walk)
+  secondary_constructor: "method", // the class's own secondary constructor
+  type_alias: "type",
+  property_declaration: "variable", // top-level `val`/`var` only (fields resolved in the walk)
+};
+
+/** Kotlin type declarations: they set `enclosingClass` for the members nested in them.
+ * "class" also covers object_declaration (it maps to "class"); interface/enum are the
+ * same class_declaration node rekinded in describeKotlin, so all three land in the set. */
+const KOTLIN_TYPE_KINDS: ReadonlySet<Kind> = new Set<Kind>(["class", "interface", "enum"]);
+
 // PHP: definition node types are all distinct (no py-style function→method
 // promotion needed — a class body uses `method_declaration`, not
 // `function_definition`). `trait_declaration` maps to the PHP-only `trait` kind.
@@ -212,7 +229,6 @@ const PHP_KINDS: Record<string, Kind> = {
   enum_declaration: "enum",
 };
 
-
 const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   typescript: TS_KINDS,
   tsx: TS_KINDS,
@@ -220,6 +236,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   go: GO_KINDS,
   r: R_KINDS,
   java: JAVA_KINDS,
+  kotlin: KOTLIN_KINDS,
   php: PHP_KINDS,
 };
 
@@ -238,6 +255,7 @@ const CALL_TYPES: Record<Language, ReadonlySet<string>> = {
   python: new Set(["call"]),
   go: new Set(["call_expression"]),
   java: new Set(["method_invocation", "object_creation_expression"]),
+  kotlin: new Set(["call_expression"]),
   php: new Set([
     "function_call_expression",
     "member_call_expression",
@@ -264,6 +282,7 @@ const GRAMMARS: Record<Language, unknown> = {
   go: Go,
   r: R,
   java: Java,
+  kotlin: Kotlin,
   php: PHP.php,
 };
 
@@ -376,7 +395,7 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
   // childCtx, so a by-ref Set there would read as ordinary inherited context
   // when it's actually accidental shared mutable state across the whole walk.
   const minted = new Set<string>([rel]);
-  for (const child of root.namedChildren) walk(child, ctx, nodes, rawEdges, minted);
+  walkNamedChildren(root.namedChildren, ctx, nodes, rawEdges, minted);
   // nodes[0] is the file node; the rest are its symbols. Index the module-level
   // residual on the file node so a term outside every symbol still surfaces it.
   nodes[0].body_text = fileResidual(source, nodes.slice(1));
@@ -395,6 +414,113 @@ export function mintId(base: string, minted: Set<string>): string {
   while (minted.has(id)) id = `${base}~${k++}`;
   minted.add(id);
   return id;
+}
+
+/**
+ * tree-sitter-php 0.23.x cannot parse a `const` inside an enum body (#145). An
+ * array initializer collapses the whole `enum_declaration` into ERROR; the
+ * method is recovered as a sibling `function_definition`. 0.24.2 parses this
+ * natively but is ABI 15 and cannot load on Graft's tree-sitter 0.21.1.
+ *
+ * Bound: only an ERROR that already contains `enum_case` + `name` is treated as
+ * a collapsed enum. Only `const_declaration` / `function_definition` /
+ * `method_declaration` / ERROR siblings are absorbed, stopping at a `}` ERROR.
+ * Unknown ERROR nodes are still walked, never mapped to a type. Clean
+ * class/enum trees are `class_declaration` / `enum_declaration` and skip this.
+ */
+function phpCollapsedEnumName(node: Parser.SyntaxNode): string | null {
+  if (node.type !== "ERROR") return null;
+  if (!node.namedChildren.some((c) => c.type === "enum_case")) return null;
+  return node.namedChildren.find((c) => c.type === "name")?.text ?? null;
+}
+
+function phpCollapsedEnumHold(node: Parser.SyntaxNode): boolean {
+  return (
+    node.type === "const_declaration" ||
+    node.type === "function_definition" ||
+    node.type === "method_declaration" ||
+    node.type === "ERROR"
+  );
+}
+
+function phpCollapsedEnumClose(node: Parser.SyntaxNode): boolean {
+  return node.type === "ERROR" && node.text.trim() === "}";
+}
+
+function walkNamedChildren(
+  children: Parser.SyntaxNode[],
+  ctx: WalkCtx,
+  out: NodeV1[],
+  edges: RawEdge[],
+  minted: Set<string>,
+): void {
+  if (ctx.lang !== "php") {
+    for (const child of children) walk(child, ctx, out, edges, minted);
+    return;
+  }
+  for (let i = 0; i < children.length; ) {
+    const n = children[i]!;
+    const enumName = phpCollapsedEnumName(n);
+    if (enumName) {
+      const group: Parser.SyntaxNode[] = [n];
+      let j = i + 1;
+      while (j < children.length && phpCollapsedEnumHold(children[j]!)) {
+        const next = children[j]!;
+        group.push(next);
+        j++;
+        if (phpCollapsedEnumClose(next)) break;
+      }
+      emitPhpCollapsedEnum(enumName, n, group, ctx, out, edges, minted);
+      i = j;
+      continue;
+    }
+    walk(n, ctx, out, edges, minted);
+    i++;
+  }
+}
+
+function emitPhpCollapsedEnum(
+  name: string,
+  errorNode: Parser.SyntaxNode,
+  group: Parser.SyntaxNode[],
+  ctx: WalkCtx,
+  out: NodeV1[],
+  edges: RawEdge[],
+  minted: Set<string>,
+): void {
+  const last = group[group.length - 1]!;
+  const id = mintId(`${ctx.rel}#${[...ctx.scope, name].join(".")}`, minted);
+  const body = ctx.source.slice(errorNode.startIndex, last.endIndex);
+  out.push({
+    id,
+    name,
+    kind: "enum",
+    path: ctx.rel,
+    span: `L${errorNode.startPosition.row + 1}-L${last.endPosition.row + 1}`,
+    signature: `enum ${name}`,
+    exported: true,
+    origin: "ast",
+    body_hash: contentHash(body),
+    body_text: searchBody(body),
+    summary_state: "pending",
+    summary: null,
+    crux: null,
+  });
+  edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
+  const childCtx: WalkCtx = {
+    ...ctx,
+    scope: [...ctx.scope, name],
+    enclosingKind: "enum",
+    parentId: id,
+  };
+  for (const g of group) {
+    if (phpCollapsedEnumClose(g)) continue;
+    if (phpCollapsedEnumName(g)) {
+      walkNamedChildren(g.namedChildren, childCtx, out, edges, minted);
+      continue;
+    }
+    walk(g, childCtx, out, edges, minted);
+  }
 }
 
 function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEdge[], minted: Set<string>): void {
@@ -433,9 +559,11 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
               ? rExported(desc.name, ctx, node)
               : ctx.lang === "java"
                 ? javaExported(node)
-                : ctx.lang === "php"
-                  ? phpExported(node)
-                  : tsExported(node),
+                : ctx.lang === "kotlin"
+                  ? kotlinExported(node)
+                  : ctx.lang === "php"
+                    ? phpExported(node)
+                    : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -451,10 +579,13 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     // class heritage — in Java an interface may also `extends`, and a record/enum
     // may `implements`, so every type declaration is a heritage site, not just a class.
     const javaTypeDecl = ctx.lang === "java" && JAVA_TYPE_KINDS.has(desc.kind);
-    if (desc.kind === "class" || javaTypeDecl) edges.push(...heritageEdges(node, id, ctx));
+    const kotlinTypeDecl = ctx.lang === "kotlin" && KOTLIN_TYPE_KINDS.has(desc.kind);
+    if (desc.kind === "class" || javaTypeDecl || kotlinTypeDecl)
+      edges.push(...heritageEdges(node, id, ctx));
+    if (ctx.lang === "php") edges.push(...phpAttributeReferenceEdges(node, id, ctx));
 
     const enclosingClass =
-      desc.kind === "class" || javaTypeDecl
+      desc.kind === "class" || javaTypeDecl || kotlinTypeDecl
         ? desc.name
         : isGoMethod
           ? goReceiverType(node)
@@ -481,7 +612,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       // happen) — inherited unchanged for every other definition kind.
       rSuperClass: desc.kind === "class" ? (ctx.lang === "r" ? rR6ParentClass(node) : null) : ctx.rSuperClass,
     };
-    for (const child of node.namedChildren) walk(child, childCtx, out, edges, minted);
+    walkNamedChildren(node.namedChildren, childCtx, out, edges, minted);
     return;
   }
 
@@ -582,6 +713,55 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     }
   }
 
+  // Java anonymous class (`new Type() { … }`): tree-sitter-java has no
+  // `anonymous_class` node (unlike PHP) — the body is an optional `class_body`
+  // on `object_creation_expression`. Mint `{anonymous}` (mirroring PHP #144 /
+  // `{closure}`) so nested methods take that owner instead of the enclosing
+  // type's, which otherwise pollutes `ownerMethod` and steals real call edges
+  // (#161). The constructor call edge above still fires for `new Type()`.
+  if (ctx.lang === "java" && node.type === "object_creation_expression") {
+    const body = node.namedChildren.find((c) => c.type === "class_body");
+    if (body) {
+      const idPart = "{anonymous}";
+      const base = `${ctx.rel}#${[...ctx.scope, idPart].join(".")}`;
+      const id = mintId(base, minted);
+      out.push({
+        id,
+        name: "{anonymous}",
+        kind: "class",
+        path: ctx.rel,
+        span: `L${node.startPosition.row + 1}-L${node.endPosition.row + 1}`,
+        signature: clean(ctx.source.slice(node.startIndex, body.startIndex)),
+        exported: false,
+        origin: "ast",
+        body_hash: contentHash(node.text),
+        body_text: searchBody(node.text),
+        summary_state: "pending",
+        summary: null,
+        crux: null,
+      });
+      edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
+      // Single supertype from `new Type()`: emit `implements` so an interface
+      // target resolves (adapters are the common case; a class target drops
+      // under resolve's implements kind filter — drop-not-guess).
+      const superName = javaConstructedTypeName(node.childForFieldName("type"));
+      if (superName) {
+        edges.push({ source: id, relation: "implements", name: superName, file: ctx.rel });
+      }
+      const anonCtx: WalkCtx = {
+        ...ctx,
+        scope: [...ctx.scope, idPart],
+        enclosingKind: "class",
+        parentId: id,
+        enclosingClass: "{anonymous}",
+      };
+      for (const child of node.namedChildren) {
+        walk(child, child.type === "class_body" ? anonCtx : ctx, out, edges, minted);
+      }
+      return;
+    }
+  }
+
   for (const child of node.namedChildren) walk(child, ctx, out, edges, minted);
 }
 
@@ -594,20 +774,126 @@ function collectImportedSymbols(
   root: Parser.SyntaxNode,
   lang: Language,
 ): Map<string, { name: string; specifier: string }> {
-  const out = new Map<string, { name: string; specifier: string }>();
-  if (lang !== "typescript" && lang !== "tsx") return out;
+  if (lang === "typescript" || lang === "tsx") {
+    const out = new Map<string, { name: string; specifier: string }>();
+    const visit = (node: Parser.SyntaxNode): void => {
+      if (node.type === "import_statement") {
+        const specifier = importSpecifier(node, lang);
+        if (!specifier) return;
+        collectTsImportBindings(node, specifier, out);
+        return;
+      }
+      for (const child of node.namedChildren) visit(child);
+    };
+    visit(root);
+    return out;
+  }
+  if (lang === "php") return collectPhpImportedSymbols(root);
+  return new Map();
+}
 
+/** PHP `use` bindings: local alias → { exported name, FQN specifier }. */
+function collectPhpImportedSymbols(root: Parser.SyntaxNode): Map<string, { name: string; specifier: string }> {
+  const out = new Map<string, { name: string; specifier: string }>();
   const visit = (node: Parser.SyntaxNode): void => {
-    if (node.type === "import_statement") {
-      const specifier = importSpecifier(node, lang);
-      if (!specifier) return;
-      collectTsImportBindings(node, specifier, out);
+    if (node.type === "namespace_use_declaration") {
+      collectPhpUseDeclaration(node, out);
       return;
     }
     for (const child of node.namedChildren) visit(child);
   };
   visit(root);
   return out;
+}
+
+function collectPhpUseDeclaration(
+  decl: Parser.SyntaxNode,
+  out: Map<string, { name: string; specifier: string }>,
+): void {
+  const prefix = decl.namedChildren.find((c) => c.type === "namespace_name")?.text.replace(/\\$/, "") ?? "";
+  const clauses: Parser.SyntaxNode[] = [];
+  for (const child of decl.namedChildren) {
+    if (child.type === "namespace_use_clause") clauses.push(child);
+    if (child.type === "namespace_use_group") {
+      for (const c of child.namedChildren) {
+        if (c.type === "namespace_use_clause") clauses.push(c);
+      }
+    }
+  }
+  for (const clause of clauses) {
+    const binding = phpUseClauseBinding(clause, prefix);
+    if (binding) out.set(binding.local, { name: binding.name, specifier: binding.specifier });
+  }
+}
+
+function phpUseClauseBinding(
+  clause: Parser.SyntaxNode,
+  prefix: string,
+): { local: string; name: string; specifier: string } | null {
+  const names = clause.namedChildren.filter((c) => c.type === "name");
+  const qualified = clause.namedChildren.find((c) => c.type === "qualified_name");
+  let fqn: string;
+  let importedName: string;
+  if (qualified) {
+    fqn = qualified.text.replace(/^\\/, "");
+    importedName = fqn.replace(/^.*\\/, "");
+  } else if (names[0]) {
+    importedName = names[0].text;
+    fqn = prefix ? `${prefix}\\${importedName}` : importedName;
+  } else {
+    return null;
+  }
+  const alias =
+    qualified && names.length >= 1
+      ? names[names.length - 1].text
+      : names.length >= 2
+        ? names[1].text
+        : undefined;
+  const local = alias ?? importedName;
+  return { local, name: importedName, specifier: fqn };
+}
+
+/** PHP 8 attributes on a definition → `references` edges to the attribute class. */
+function phpAttributeReferenceEdges(node: Parser.SyntaxNode, sourceId: string, ctx: WalkCtx): RawEdge[] {
+  const edges: RawEdge[] = [];
+  for (const child of node.namedChildren) {
+    if (child.type !== "attribute_list") continue;
+    for (const group of child.namedChildren) {
+      if (group.type !== "attribute_group") continue;
+      for (const attr of group.namedChildren) {
+        if (attr.type !== "attribute") continue;
+        const ref = phpAttributeClassRef(attr, ctx);
+        if (ref) {
+          edges.push({
+            source: sourceId,
+            relation: "references",
+            name: ref.name,
+            ...(ref.specifier ? { specifier: ref.specifier } : {}),
+            file: ctx.rel,
+          });
+        }
+      }
+    }
+  }
+  return edges;
+}
+
+function phpAttributeClassRef(
+  attr: Parser.SyntaxNode,
+  ctx: WalkCtx,
+): { name: string; specifier?: string } | null {
+  const nameNode =
+    attr.childForFieldName("name") ??
+    attr.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name");
+  if (!nameNode) return null;
+  if (nameNode.type === "qualified_name") {
+    const fqn = nameNode.text.replace(/^\\/, "");
+    return { name: fqn.replace(/^.*\\/, ""), specifier: fqn };
+  }
+  const bare = nameNode.text;
+  const imported = ctx.importedSymbols.get(bare);
+  if (imported) return { name: imported.name, specifier: imported.specifier };
+  return { name: bare };
 }
 
 function collectTsImportBindings(
@@ -710,6 +996,7 @@ function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "go") return describeGo(node, ctx);
   if (ctx.lang === "r") return describeR(node, ctx);
   if (ctx.lang === "java") return describeJava(node, ctx);
+  if (ctx.lang === "kotlin") return describeKotlin(node, ctx);
 
   // PHP closures: `$h = function () {…}` / `fn() => …`, and bare callbacks
   // (`$routes->get('/x', function () {…})`). Captured as function nodes so a
@@ -725,12 +1012,34 @@ function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
     };
   }
 
+  // PHP anonymous classes (`new class implements I {…}`): minted as a class
+  // node named `{anonymous}` (mirroring `{closure}`, deduplicated per file by
+  // mintId). Without this the type vanished — no node, no heritage edge — and
+  // its methods mis-attributed to the enclosing function (issue #144). The
+  // class kind makes the walk emit heritageEdges (base_clause /
+  // class_interface_clause are direct children) and own the nested methods.
+  if (ctx.lang === "php" && node.type === "anonymous_class") {
+    const body = node.childForFieldName("body");
+    return {
+      name: "{anonymous}",
+      kind: "class",
+      headerEnd: body ? body.startIndex : node.endIndex,
+      hashNode: node,
+    };
+  }
+
   const mapped = ctx.kinds[node.type];
   if (mapped) {
     const name = node.childForFieldName("name")?.text;
     if (!name) return null;
     let kind = mapped;
     if (ctx.lang === "python" && mapped === "function" && ctx.enclosingKind === "class") {
+      kind = "method";
+    }
+    // tree-sitter-php 0.23.x recovers a collapsed enum method as function_definition
+    // at program scope; walkNamedChildren reparents it under the enum, and this
+    // promotion is what keeps the kind `method` rather than a leaked `function`.
+    if (ctx.lang === "php" && mapped === "function" && ctx.enclosingKind === "enum") {
       kind = "method";
     }
     const body = node.childForFieldName("body");
@@ -1257,6 +1566,90 @@ function describeJava(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | nu
   return desc;
 }
 
+/** Kotlin definition shapes. Unlike Java's, tree-sitter-kotlin exposes no `name`
+ * or `body` fields: a definition's name is an unnamed `simple_identifier` (functions)
+ * or `type_identifier` (types) child, and its body is a `class_body` / `function_body`
+ * / `statements` child. `class_declaration` also folds classes, interfaces, and enum
+ * classes into one node type — the kind is read off the declaration's own keywords. */
+function describeKotlin(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
+  // The first direct `type_identifier` is the declared name (type parameters, primary
+  // constructor parameters and delegation specifiers are all nested beneath it).
+  const typeName = (): string | null =>
+    node.namedChildren.find((c) => c.type === "type_identifier")?.text ?? null;
+  // The first direct `simple_identifier` is the function name (receiver type, params
+  // and type parameters are all nested beneath other child nodes).
+  const funcName = (): string | null =>
+    node.namedChildren.find((c) => c.type === "simple_identifier")?.text ?? null;
+  // `class X : A, B()` heritage lives in `delegation_specifier` children; a nested
+  // type parameter's identifier is one of the same node type, so only direct children
+  // count as the declared name.
+  const headEnd = (type: string): number => {
+    const body = node.namedChildren.find((c) => c.type === type);
+    return body ? body.startIndex : node.endIndex;
+  };
+
+  if (node.type === "class_declaration") {
+    const name = typeName();
+    if (!name) return null;
+    let kind: Kind = "class";
+    if (node.namedChildren.some((c) => c.type === "enum_class_body")) kind = "enum";
+    else if (node.children.some((c) => c.type === "interface")) kind = "interface";
+    else {
+      const mods = node.namedChildren.find((c) => c.type === "modifiers");
+      // `annotation class` → the interface role Java's annotation_type_declaration plays.
+      if (mods?.namedChildren.some((c) => c.type === "class_modifier" && c.text === "annotation"))
+        kind = "interface";
+    }
+    const body = node.namedChildren.find(
+      (c) => c.type === "class_body" || c.type === "enum_class_body",
+    );
+    return { name, kind, headerEnd: body ? body.startIndex : node.endIndex, hashNode: node };
+  }
+
+  if (node.type === "object_declaration") {
+    const name = typeName();
+    if (!name) return null;
+    return { name, kind: "class", headerEnd: headEnd("class_body"), hashNode: node };
+  }
+
+  if (node.type === "function_declaration") {
+    const name = funcName();
+    if (!name) return null;
+    const kind: Kind = KOTLIN_TYPE_KINDS.has(ctx.enclosingKind ?? "file") ? "method" : "function";
+    return { name, kind, headerEnd: headEnd("function_body"), hashNode: node };
+  }
+
+  if (node.type === "secondary_constructor") {
+    // Constructors carry no name of their own — they are the class's own, so scope the
+    // node under the enclosing class the same way Java's constructor_declaration does.
+    if (!ctx.enclosingClass) return null;
+    return {
+      name: ctx.enclosingClass,
+      kind: "method",
+      headerEnd: headEnd("statements"),
+      hashNode: node,
+    };
+  }
+
+  if (node.type === "type_alias") {
+    const name = typeName();
+    if (!name) return null;
+    return { name, kind: "type", headerEnd: node.endIndex, hashNode: node };
+  }
+
+  if (node.type === "property_declaration") {
+    // Top-level `val`/`var` only — a class property is a field, not a definition node
+    // (no depth tier emits fields), so it must not become one.
+    if (ctx.enclosingKind !== null) return null;
+    const decl = node.namedChildren.find((c) => c.type === "variable_declaration");
+    const name = decl?.namedChildren.find((c) => c.type === "simple_identifier")?.text;
+    if (!name) return null;
+    return { name, kind: "variable", headerEnd: node.endIndex, hashNode: node };
+  }
+
+  return null;
+}
+
 /** Java visibility: `public` (or `protected`) on the declaration's own modifier list.
  * A package-private or private member is not part of the API surface. Read off the
  * `modifiers` child's tokens, ignoring annotations, which live in the same node. */
@@ -1264,6 +1657,15 @@ function javaExported(node: Parser.SyntaxNode): boolean {
   const mods = node.namedChildren.find((c) => c.type === "modifiers");
   if (!mods) return false;
   return mods.children.some((c) => c.type === "public" || c.type === "protected");
+}
+
+/** Kotlin visibility: exported by default (`public` is implicit); only an explicit
+ * `internal` / `private` / `protected` visibility modifier hides a definition. */
+function kotlinExported(node: Parser.SyntaxNode): boolean {
+  const mods = node.namedChildren.find((c) => c.type === "modifiers");
+  if (!mods) return true;
+  const vis = mods.namedChildren.find((c) => c.type === "visibility_modifier");
+  return !vis || vis.text === "public";
 }
 
 /** The receiver's base type name for a Go method, unwrapping a pointer receiver
@@ -1316,6 +1718,7 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
     // `superclass` holds `extends X`; `super_interfaces` holds `implements A, B`
     // (and, on an interface declaration, `extends A, B` — which tree-sitter-java
     // still spells `extends_interfaces`).
+    const typeParams = javaTypeParameterNames(node);
     for (const child of node.namedChildren) {
       const relation: Relation | null =
         child.type === "superclass"
@@ -1324,9 +1727,31 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
             ? "implements"
             : null;
       if (!relation) continue;
-      for (const t of typeIdentifiersIn(child)) {
-        edges.push({ source: classId, relation, name: t, file: ctx.rel });
+      for (const entry of javaSupertypeEntries(child)) {
+        const name = javaSupertypeName(entry);
+        // Belt-and-braces. A type VARIABLE is never a supertype, and erasing the
+        // arguments already removes every case measured on gson and spring-petclinic
+        // (identical output with this filter removed) — Java cannot extend or implement
+        // a type variable, so a surviving `T` would have to come from a shape neither
+        // repo contains. Kept because a wrong supertype is not a cosmetic edge: it
+        // feeds `classParents` and from there call resolution.
+        if (!name || typeParams.has(name)) continue;
+        edges.push({ source: classId, relation, name, file: ctx.rel });
       }
+    }
+    return edges;
+  }
+  if (ctx.lang === "kotlin") {
+    // The `:` clause is a list of `delegation_specifier`s — a superclass construction
+    // (`class A : B()`), an interface, or `by` delegation. The first `type_identifier`
+    // under each names the type; everything else (type args, delegation target) is not
+    // the heritage target, so only the head type counts.
+    for (const child of node.namedChildren) {
+      if (child.type !== "delegation_specifier") continue;
+      const t = child.namedChildren.find((c) => c.type === "user_type")?.namedChildren.find(
+        (c) => c.type === "type_identifier",
+      );
+      if (t) edges.push({ source: classId, relation: "extends", name: t.text, file: ctx.rel });
     }
     return edges;
   }
@@ -1395,15 +1820,54 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
   return edges;
 }
 
-/** Every `type_identifier` under a heritage clause, so `implements A, B<C>` yields
- * each named type rather than the clause's raw text. */
-function typeIdentifiersIn(node: Parser.SyntaxNode): string[] {
-  const out: string[] = [];
+/**
+ * The supertypes a heritage clause names, one node each — NOT every `type_identifier`
+ * beneath it.
+ *
+ * `superclass` wraps a single type; `super_interfaces`/`extends_interfaces` wrap a
+ * `type_list` of them. Descending blindly instead walked into `type_arguments`, so
+ * `implements Comparable<Item>` reported `Item` as a supertype too.
+ */
+function javaSupertypeEntries(clause: Parser.SyntaxNode): Parser.SyntaxNode[] {
+  const list = clause.namedChildren.find((c) => c.type === "type_list");
+  return list ? [...list.namedChildren] : [...clause.namedChildren];
+}
+
+/**
+ * What a supertype entry is CALLED, or null when this pass cannot say.
+ *
+ * Type arguments are erased, because they are not part of the supertype's identity:
+ *
+ *     Base           |  Base<Item>          -> Base
+ *
+ * A qualified name is kept WHOLE rather than reduced to its final segment:
+ *
+ *     Outer.Inner    |  Outer.Inner<K>      -> Outer.Inner
+ *
+ * Heritage keeps an unresolved base as the edge target by design ("usually an
+ * external/imported type — keep the name"), so the full string is both truthful and
+ * unable to false-match a node id, where a bare `Inner` could collide with an
+ * unrelated in-repo type. That differs from construction (#103), which drops a
+ * qualified name instead — construction has no keep-the-name contract to fall back on.
+ */
+function javaSupertypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "generic_type") return javaSupertypeName(node.namedChildren[0]);
+  if (node.type === "scoped_type_identifier") return node.text;
+  return node.type === "type_identifier" ? node.text : null;
+}
+
+/** The names a declaration binds as its own type parameters (`class C<T, U>` → T, U),
+ * so they can never be mistaken for supertypes. */
+function javaTypeParameterNames(decl: Parser.SyntaxNode): ReadonlySet<string> {
+  const params = decl.childForFieldName("type_parameters");
+  if (!params) return new Set();
+  const out = new Set<string>();
   const visit = (n: Parser.SyntaxNode): void => {
-    if (n.type === "type_identifier") out.push(n.text);
+    if (n.type === "type_identifier") out.add(n.text);
     for (const c of n.namedChildren) visit(c);
   };
-  visit(node);
+  visit(params);
   return out;
 }
 
@@ -1432,6 +1896,25 @@ function calleeName(
     // conservative: an unmatched name (e.g. a static import) resolves to nothing.
     if (!obj) return { name: nameNode.text, viaMember: true, receiver: "this" };
     return { name: nameNode.text, viaMember: true, receiver: javaReceiver(obj) };
+  }
+
+if (lang === "kotlin") {
+    // `call_expression` = callee expression + `call_suffix`. A bare `foo()` names a
+    // plain call; `obj.foo()` is a `navigation_expression` whose trailing
+    // `navigation_suffix` holds the method name and whose object is the receiver.
+    const target = node.namedChildren[0];
+    if (target?.type === "simple_identifier") return { name: target.text, viaMember: false };
+    if (target?.type === "navigation_expression") {
+      const suffix = target.namedChildren.find((c) => c.type === "navigation_suffix");
+      const name = suffix?.namedChildren.find((c) => c.type === "simple_identifier");
+      const receiver = target.namedChildren[0];
+      if (!name) return null;
+      if (receiver?.type === "simple_identifier")
+        return { name: name.text, viaMember: true, receiver: receiver.text };
+      if (receiver?.type === "this_expression" || receiver?.type === "super_expression")
+        return { name: name.text, viaMember: true, receiver: receiver.type === "this_expression" ? "this" : "super" };
+    }
+    return null;
   }
 
   if (lang === "php") return phpCallee(node);
@@ -1647,6 +2130,7 @@ function isImport(node: Parser.SyntaxNode, lang: Language): boolean {
     return fn?.type === "identifier" && R_IMPORT_CALLS.has(fn.text);
   }
   if (lang === "java") return node.type === "import_declaration";
+if (lang === "kotlin") return node.type === "import_header";
   // PHP: one edge per imported symbol — the clause leaf inside a (possibly
   // grouped) `use A\B, C\D;` / `use A\{B, C};` declaration.
   if (lang === "php") return node.type === "namespace_use_clause";
@@ -1685,6 +2169,12 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
       (c) => c.type === "scoped_identifier" || c.type === "identifier",
     );
     return id?.text ?? null;
+  }
+  if (lang === "kotlin") {
+    // `import com.example.Foo` — the dotted path is the `identifier` child. A
+    // wildcard (`import a.b.*`) and an `as` alias are separate children, so the
+    // identifier text is already the module path (wildcards dropped, like Java).
+    return node.namedChildren.find((c) => c.type === "identifier")?.text ?? null;
   }
   const str = node.namedChildren.find((c) => c.type === "string");
   if (!str) return null;

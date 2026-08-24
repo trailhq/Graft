@@ -17,6 +17,7 @@ export {
   patchStats,
   readStats,
   releaseLock,
+  resolveContextDir,
   writeJsonAtomic,
   writeStats,
 } from '../util/state.js';

@@ -30,6 +30,22 @@
 
 ## 0.12.0
 
+### Added
+
+- **Kotlin moves to full-fidelity extraction.** `.kt` and `.kts` files are now
+  parsed by a hand-written tree-sitter extractor — the same tier as TypeScript,
+  Python, Go, and Java — instead of the generic breadth grammar, so Kotlin
+  symbols, call edges, heritage, and imports resolve with scope awareness. The
+  kind mapping now matches tree-sitter-kotlin's real node types (the earlier
+  attempt reused Java's, which do not exist in the Kotlin grammar and emitted no
+  symbols at all): `class_declaration` is re-read off its own keyword into
+  class / interface / enum / annotation, `object` and `companion object` become
+  classes, secondary constructors and member functions become methods,
+  `typealias` becomes a type, and top-level `val`/`var` become variables.
+- **Kotlin edges.** Calls resolve through `call_expression` (member calls via
+  `navigation_expression`, with `this`/`super` receivers), the `:` heritage
+  clause yields `extends` edges, `import_header` yields import edges, and
+  `internal`/`private`/`protected` visibility maps to the exported flag.
 ### Changed
 
 - **graft now collects anonymous usage stats, and the README no longer says it

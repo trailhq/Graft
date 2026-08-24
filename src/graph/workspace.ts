@@ -38,6 +38,7 @@ import { edgeWalk, resolveSymbol, type Direction } from "./traverse.js";
 import { wiringPath } from "./write.js";
 import type { GraphV1 } from "./types.js";
 import { ask, type AskHit, type AskResult } from "../ask/ask.js";
+import { fileFirstRoundRobin } from "../ask/file-selection.js";
 import { fuseScopes, STRONG_FLOOR, HIGH_FLOOR, type ScopedDoc } from "../ask/fuse.js";
 import { grepGraph, type GrepGroup, type GrepResult } from "../search/grep.js";
 import { formatGrepResult, zeroHitNote } from "../search/grep-cli.js";
@@ -168,6 +169,12 @@ function prefixPointer(child: string, pointer: string): string {
     .join(", ");
 }
 
+/** The exact child-relative file owning a lexical symbol hit. File nodes use a
+ * bare path; definition hits append `:Lx-Ly`. */
+function hitFile(pointer: string): string {
+  return pointer.match(/^(.*):L\d+-L\d+$/)?.[1] ?? pointer;
+}
+
 export interface FederateAskOptions {
   limit?: number;
   source?: boolean;
@@ -253,6 +260,9 @@ export function federateAsk(
         full: opts.full,
         graphRank: opts.graphRank,
         in: childIn,
+        // The parent owns the final cross-repo ranking. Selecting inside each
+        // child would be undone by fusion and could truncate a hybrid list.
+        fileFirst: false,
       });
     } catch {
       continue; // corrupt child, or a sub-scope --in matching nothing here
@@ -298,10 +308,25 @@ export function federateAsk(
   }
 
   const fused = fuseScopes(docs);
-  const hits: AskHit[] = fused.ranked.slice(0, limit).map((rd) => {
+  const rankedHits = fused.ranked.map((rd) => {
     const { child, hit } = back.get(rd.id)!;
-    return { ...hit, score: rd.score, scope: rd.scope, pointer: prefixPointer(child, hit.pointer) };
+    const value: AskHit = {
+      ...hit,
+      score: rd.score,
+      scope: rd.scope,
+      pointer: prefixPointer(child, hit.pointer),
+    };
+    return {
+      // Lexical symbols share a file queue. Concepts and structural neighbours
+      // remain singleton partitions, so this lexical selection layer cannot
+      // reorder `who calls` / `dependencies of` answers.
+      group: hit.kind === "symbol"
+        ? `file:${child}/${hitFile(hit.pointer)}`
+        : `singleton:${child}:${rd.id}`,
+      value,
+    };
   });
+  const hits = fileFirstRoundRobin(rankedHits, limit);
 
   const alsoMatched = [...fused.alsoMatched, ...gatedOut];
   const note = coverageNote(wg);

@@ -203,6 +203,45 @@ test("ask reports coverage: 1.0 when every query term hits, low on mostly-off-co
   }
 });
 
+test("ask file-first selection preserves baseline file order and delays sibling spans", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-ask-file-first-"));
+  try {
+    writeFileSync(
+      join(dir, "a.ts"),
+      `export function quartzAlpha(): string { return "quartz"; }\n` +
+        `export function quartzBeta(): string { return "quartz"; }\n` +
+        `export function quartzGamma(): string { return "quartz"; }\n`,
+    );
+    writeFileSync(join(dir, "b.ts"), `export function quartzDelta(): string { return "quartz"; }\n`);
+    writeFileSync(join(dir, "c.ts"), `export function quartzEpsilon(): string { return "quartz"; }\n`);
+    await buildGraph(dir);
+
+    const baseline = ask(dir, "quartz", { graphRank: false, limit: 20, fileFirst: false });
+    const pathOf = (pointer: string) => pointer.split(":")[0];
+    const baselineFiles = baseline.hits.map((hit) => pathOf(hit.pointer));
+    const baselineFileOrder = [...new Set(baselineFiles)];
+    assert.ok(baselineFileOrder.length >= 3, "fixture produces at least three ranked files");
+    assert.ok(new Set(baselineFiles.slice(0, 3)).size < 3, "baseline prefix contains sibling spans");
+
+    const selected = ask(dir, "quartz", { graphRank: false, limit: 20 });
+    const selectedFiles = selected.hits.map((hit) => pathOf(hit.pointer));
+    assert.deepEqual(
+      selectedFiles.slice(0, baselineFileOrder.length),
+      baselineFileOrder,
+      "the first pass is the exact baseline first-occurrence file order",
+    );
+    assert.equal(selected.hits[0].pointer, baseline.hits[0].pointer, "top hit is frozen by construction");
+    assert.equal(selected.coverage, baseline.coverage, "top-hit relevance coverage is unchanged");
+    assert.equal(selected.coverageStrong, baseline.coverageStrong, "top-hit strength coverage is unchanged");
+    assert.ok(
+      selectedFiles.slice(baselineFileOrder.length).includes("a.ts"),
+      "later rounds retain additional exact spans instead of imposing quota one",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ask finds a symbol by a term that appears only in its body (body-indexing)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft-ask-body-"));
   try {
@@ -407,6 +446,27 @@ test("ask on a multi-scope repo: top hits federate both scopes, labeled, with a 
     assert.match(out, /\[backend\/\] /, "backend hits carry a scope label");
     assert.match(out, /matched in: .*frontend\/ \(\d+\)/, "footer reports frontend's hit count");
     assert.match(out, /matched in: .*backend\/ \(\d+\)/, "footer reports backend's hit count");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-first selection preserves a multi-scope result's top relevance and file order", async () => {
+  const dir = multiScopeFixture();
+  try {
+    await buildGraph(dir);
+    const baseline = ask(dir, "how are errors handled", { limit: 30, fileFirst: false });
+
+    const selected = ask(dir, "how are errors handled", { limit: 30 });
+    const pathOf = (pointer: string) => pointer.split(":")[0];
+    const baselineFileOrder = [...new Set(baseline.hits.map((hit) => pathOf(hit.pointer)))];
+    const selectedFiles = selected.hits.map((hit) => pathOf(hit.pointer));
+
+    assert.deepEqual(selectedFiles.slice(0, baselineFileOrder.length), baselineFileOrder);
+    assert.equal(selected.hits[0].pointer, baseline.hits[0].pointer);
+    assert.equal(selected.coverage, baseline.coverage);
+    assert.equal(selected.coverageStrong, baseline.coverageStrong);
+    assert.deepEqual(selected.scopes, baseline.scopes, "selection does not alter scope participation metadata");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
