@@ -71,6 +71,19 @@ export const HOSTS: HostTarget[] = [
     detect: (p) => p.dirExists(join(p.home, '.grok')) || p.dirExists(join(p.repo, '.grok')),
   },
   {
+    id: 'hermes',
+    name: 'Hermes Agent (Nous Research)',
+    kind: 'section',
+    relPath: 'AGENTS.md',
+    content: instructionBody,
+    // Hermes is repo-aware: it reads AGENTS.md at the repo root (and the
+    // Graft-for-Hermes plugin keeps the graph fresh on every session start).
+    detect: (p) =>
+      p.dirExists(join(p.home, '.hermes')) ||
+      p.dirExists(join(p.home, 'AppData', 'Local', 'hermes')) ||
+      p.dirExists(join(p.repo, '.hermes')),
+  },
+  {
     id: 'antigravity',
     name: 'Google Antigravity',
     kind: 'section',

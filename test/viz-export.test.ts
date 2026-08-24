@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { exportViz } from "../src/viz/export.js";
 
 const VIEWER_HTML = `<!doctype html>
@@ -179,4 +180,21 @@ test("viz export: tabs can be trimmed, and the payload goes with them", () => {
   assert.equal(one.codeNodes, 0, "no code graph is read");
   assert.match(readFileSync(one.file, "utf8"), /codeGraph: null/);
   assert.ok(all.codeNodes > 0 && readFileSync(all.file, "utf8").length > readFileSync(one.file, "utf8").length);
+});
+
+test("viz --tabs: a bad tab name fails loudly rather than exporting a page missing a tab", () => {
+  const run = (args: string[]): { status: number; stderr: string } => {
+    try {
+      execFileSync(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], { encoding: "utf8", stdio: "pipe" });
+      return { status: 0, stderr: "" };
+    } catch (err) {
+      const e = err as { status?: number; stderr?: string };
+      return { status: e.status ?? 1, stderr: e.stderr ?? "" };
+    }
+  };
+
+  const bad = run(["viz", ".", "--export", out(), "--tabs", "context,graph"]);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /--tabs takes a comma-separated subset of context, code, outline — got "graph"/);
+  assert.equal(run(["viz", ".", "--export", out(), "--tabs", ""]).status, 1, "an empty list is a mistake too");
 });

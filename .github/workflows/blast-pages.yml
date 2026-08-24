@@ -75,12 +75,19 @@ jobs:
         run: npm ci && npm run build
 
       # 2. The PR's code, as data only.
+      #
+      # actions/checkout refuses a fork's PR ref under `pull_request_target` unless
+      # the workflow opts in — the review that opt-in asks for is the header of this
+      # file: the checkout is credential-less, lands in its own directory, and
+      # nothing below executes anything from it (the CLI that reads it was built
+      # from the base commit above). Without the flag every fork PR fails here.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: refs/pull/${{ steps.pr.outputs.number }}/merge
           path: pr
           fetch-depth: 0
           persist-credentials: false
+          allow-unsafe-pr-checkout: true
 
       # Same cache the comment job reads (see blast-cache.yml). Both jobs name the
       # same clusters, so sharing the cache is what keeps the page's bubbles worded

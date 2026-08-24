@@ -100,7 +100,7 @@ export async function runBlastCommand(dir: string, opts: BlastCliOptions): Promi
     console.log(diagram ?? "%% no dependents to draw");
     return;
   }
-  process.stdout.write(format === "markdown" ? markdownReport(report) : textReport(report));
+  process.stdout.write(format === "markdown" ? markdownReport(report, { root }) : textReport(report));
 }
 
 /**

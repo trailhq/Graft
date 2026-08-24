@@ -168,6 +168,28 @@ async function refreshBefore(dir: string, opts: { refresh?: boolean }): Promise<
  * as it is on disk, no rebuild. */
 const NO_REFRESH_FLAG = ["--no-refresh", "skip the freshness check — answer from the graph as-is"] as const;
 
+const VIZ_TABS = ["context", "code", "outline"] as const;
+type VizTab = (typeof VIZ_TABS)[number];
+
+/**
+ * `--tabs context,code` → the tabs to write into an exported page.
+ *
+ * An unknown name is a caller mistake worth failing on rather than silently
+ * dropping: a page exported with a typo'd tab list would be missing a tab and
+ * nothing would say why. Undefined means "all of them", which is the default the
+ * exporter already applies.
+ */
+function parseTabs(raw: string | undefined): VizTab[] | undefined {
+  if (raw === undefined) return undefined;
+  const want = raw.split(",").map((t) => t.trim()).filter(Boolean);
+  const bad = want.filter((t) => !VIZ_TABS.includes(t as VizTab));
+  if (bad.length > 0 || want.length === 0) {
+    console.error(`✗ --tabs takes a comma-separated subset of ${VIZ_TABS.join(", ")}${bad.length ? ` — got "${bad.join('", "')}"` : ""}`);
+    process.exit(1);
+  }
+  return want as VizTab[];
+}
+
 /**
  * Commands that own the upgrade story themselves (`version`, `upgrade`) or must
  * not editorialize on stderr at startup (`mcp` runs its own upkeep at boot, and
@@ -591,7 +613,8 @@ program
   .option("--no-open", "don't open the browser")
   .option("--export <dir>", "write one self-contained index.html instead of serving (for CI, GitHub Pages, or a build artifact)")
   .option("--title <text>", "subtitle shown beside the repo name in an exported page (e.g. \"PR #151\")")
-  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; export?: string; title?: string }) => {
+  .option("--tabs <list>", "tabs the exported page offers, comma separated: context,code,outline (default: all three)")
+  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; export?: string; title?: string; tabs?: string }) => {
     const dir = noteQuery(queryRoot(dirArg));
     const { existsSync } = await import("node:fs");
     const { resolve, basename } = await import("node:path");
@@ -617,6 +640,7 @@ program
         outDir: resolve(opts.export),
         repoName: basename(root),
         subtitle: opts.title,
+        tabs: parseTabs(opts.tabs),
       });
       const kb = Math.round(out.bytes / 1024);
       console.log(

@@ -16,9 +16,9 @@ import { supportedExtensions, unsupportedExtensions } from "../src/graph/source-
 test("supportedExtensions covers both tiers, sorted and de-duped", () => {
   const exts = supportedExtensions();
   // depth tier
-  for (const e of [".ts", ".tsx", ".py", ".go", ".java", ".js"]) assert.ok(exts.includes(e), `depth ${e}`);
+  for (const e of [".ts", ".tsx", ".py", ".go", ".java", ".js", ".php", ".kt", ".kts"]) assert.ok(exts.includes(e), `depth ${e}`);
   // breadth tier
-  for (const e of [".rs", ".rb", ".php", ".c", ".cpp", ".kt", ".swift"]) assert.ok(exts.includes(e), `breadth ${e}`);
+  for (const e of [".rs", ".rb", ".c", ".cpp", ".swift"]) assert.ok(exts.includes(e), `breadth ${e}`);
   // container tier
   assert.ok(exts.includes(".vue"), "container .vue");
   // de-duped (.java is in BOTH tiers but must appear once) and sorted
