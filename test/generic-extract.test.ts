@@ -9,7 +9,15 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { warmGenericGrammars, extractGeneric, genericLangOf, isWarm } from "../src/graph/generic.js";
+import {
+  warmGenericGrammars,
+  extractGeneric,
+  genericLangOf,
+  isWarm,
+  loadWasmLanguage,
+  parseWasm,
+  type TsNode,
+} from "../src/graph/generic.js";
 import { resolveEdges } from "../src/graph/resolve.js";
 import { buildGraph } from "../src/graph/build.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
@@ -337,4 +345,70 @@ test("Dart file-level skeleton lists the API, not function-body locals (#134)", 
     !r.entries.some((e) => e.kind === "class" && e.name === "int"),
     "skeleton has no bogus class int",
   );
+});
+
+// #139: tree-sitter-wasm 1.1.4's PHP grammar throws `memory access out of bounds`
+// on heredoc/nowdoc, and extractGeneric swallows that into a file-only result.
+// PHP is depth-tier now (.php is not claimed by the breadth registry), so this
+// loads the wasm grammar directly — the same parse the breadth path used when
+// the issue landed.
+// v1.1.6 is the first release that parses these without crashing.
+const PHP_HEREDOC = `<?php
+namespace App;
+class WithHeredoc {
+    public function sql(): string {
+        return <<<SQL
+            SELECT 1
+            SQL;
+    }
+    public function other(): int { return 2; }
+}
+`;
+
+const PHP_NOWDOC = `<?php
+namespace App;
+class WithNowdoc {
+    public function sql(): string {
+        return <<<'SQL'
+            SELECT 1
+            SQL;
+    }
+    public function other(): int { return 2; }
+}
+`;
+
+function namedOfType(root: TsNode, type: string): string[] {
+  const names: string[] = [];
+  const visit = (n: TsNode): void => {
+    if (n.type === type) {
+      const name = n.childForFieldName?.("name")?.text;
+      if (name) names.push(name);
+    }
+    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
+      const c = n.namedChild?.(i);
+      if (c) visit(c);
+    }
+  };
+  visit(root);
+  return names;
+}
+
+async function assertPhpWasmExtractsClassAndMethods(source: string, className: string, label: string): Promise<void> {
+  const language = await loadWasmLanguage("php");
+  assert.ok(language, "tree-sitter-wasm must ship a php grammar");
+  const root = parseWasm(language, source);
+  assert.ok(root, `${label}: PHP wasm parse must not crash (1.1.4 threw on heredoc/nowdoc)`);
+  const classes = namedOfType(root, "class_declaration");
+  const methods = namedOfType(root, "method_declaration");
+  assert.ok(classes.includes(className), `${label}: expected class ${className}, got: ${classes.join(", ") || "(none)"}`);
+  assert.ok(methods.includes("sql"), `${label}: expected method sql, got: ${methods.join(", ") || "(none)"}`);
+  assert.ok(methods.includes("other"), `${label}: expected method other, got: ${methods.join(", ") || "(none)"}`);
+}
+
+test("PHP wasm grammar extracts class + methods from a heredoc file (#139)", async () => {
+  await assertPhpWasmExtractsClassAndMethods(PHP_HEREDOC, "WithHeredoc", "heredoc");
+});
+
+test("PHP wasm grammar extracts class + methods from a nowdoc file (#139)", async () => {
+  await assertPhpWasmExtractsClassAndMethods(PHP_NOWDOC, "WithNowdoc", "nowdoc");
 });
