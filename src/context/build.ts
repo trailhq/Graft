@@ -19,6 +19,7 @@ import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
 import { readFollowSubmodules, readIncludeDirs } from "../util/state.js";
 import type { Summarizer } from "../ai/summarize.js";
+import { LlmFailureGate } from "../ai/failure.js";
 import type { FileSummary, SynthNode, Synthesizer } from "../ai/synthesize.js";
 import {
   CACHE_DIR,
@@ -77,6 +78,12 @@ export interface BuildResult {
   nodes: number;
   links: number;
   errors: string[];
+  /** Files whose summary call failed, and files never attempted once the pass gave
+   * up — reported as data so the CLI can exit non-zero without reading messages (#127). */
+  failedFiles: number;
+  skippedFiles: number;
+  /** Why the summarize phase stopped early, when it did. */
+  fatal?: string;
 }
 
 /** The gitignored LLM-call cache: per-file summaries + per-batch synthesis. */
@@ -135,9 +142,17 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
     nodes: 0,
     links: 0,
     errors: [],
+    failedFiles: 0,
+    skippedFiles: 0,
   };
 
   // Phase 1: summarize each file, concurrent, content-hash cached.
+  //
+  // The gate is shared with the crux pass (`graph/enrich.ts`): once the provider has
+  // clearly stopped serving — a spent quota, a rejected key — the remaining files are
+  // not attempted. This pass is where #127's 1,617 doomed calls were spent, one per
+  // file, before the build exited 0.
+  const gate = new LlmFailureGate();
   const work = await mapWithConcurrency(files, Math.max(1, opts.concurrency ?? 8), async (file, i): Promise<FileWork | undefined> => {
     const rel = relPosix(root, file);
     opts.onProgress?.({ phase: "summarize", index: i, total: files.length, file: rel });
@@ -156,17 +171,29 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
       result.cached++;
       return { rel, hash, summary: hit.summary };
     }
+    // A cache hit is still served after the gate closes (it costs nothing) — only
+    // the call is skipped.
+    if (gate.stopped) {
+      gate.skip();
+      return { rel, hash };
+    }
     try {
       const summary = await opts.summarizer.summarize(code, { path: rel });
       cache.summaries[rel] = { hash, summary };
       result.summarized++;
       maybeFlush();
+      gate.succeeded();
       return { rel, hash, summary };
     } catch (err) {
-      result.errors.push(`${rel}: ${errMsg(err)}`);
+      const message = errMsg(err);
+      result.errors.push(`${rel}: ${message}`);
+      gate.record(message);
       return { rel, hash }; // covered (counts against staleness) but not summarized
     }
   });
+  result.failedFiles = gate.failed;
+  result.skippedFiles = gate.skipped;
+  result.fatal = gate.fatal;
 
   // Phase 1 done: persist every summary before the (also LLM-backed) synthesis
   // phase, so an interruption there never discards phase-1 work.

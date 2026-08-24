@@ -121,3 +121,20 @@ svg.graph:active{cursor:grabbing}
 
 @media (prefers-reduced-motion:reduce){ .tree-row .chev{transition:none} }
 @media (max-width:760px){ .detail,.resizer{display:none} .searchbox input{width:120px} .counts{display:none} }
+/* Evidence blocks: a snippet under a node, so a panel shows the change rather
+   than a line number the reader has to go and look up. */
+.ev{margin:7px 0 11px;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.ev-h{font-size:11px;padding:5px 8px;background:var(--chip);color:var(--fg);border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.ev-note{color:var(--muted);font-style:italic}
+.ev-b{font-size:11.5px;padding:4px 0;overflow-x:auto}
+.ev-l{display:flex;gap:8px;padding:1px 8px}
+.ev-n{color:var(--muted);opacity:.65;min-width:2.6em;text-align:right;user-select:none;flex:none}
+.ev-s{width:.7em;user-select:none;flex:none}
+/* Wrapped, not scrolled: the panel is ~280px and a diff line is longer than
+   that, so a horizontal scrollbar per hunk would hide the half that matters. */
+.ev-t{flex:1;white-space:pre-wrap;overflow-wrap:anywhere}
+.ev-l.add{background:color-mix(in srgb,var(--ok,#2E9E6B) 11%,transparent)}
+.ev-l.del{background:color-mix(in srgb,var(--warn,#D9534F) 10%,transparent)}
+.ev-l.add .ev-s{color:var(--ok,#2E9E6B)}
+.ev-l.del .ev-s{color:var(--warn,#D9534F)}
+.ev-more{font-size:11px;color:var(--muted);padding:3px 9px 5px}

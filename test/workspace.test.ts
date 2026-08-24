@@ -108,6 +108,42 @@ test("ask at the parent federates hits from both children, labeled <child>/", as
   rmSync(p, { recursive: true, force: true });
 });
 
+test("workspace ask applies file-first selection after cross-repo fusion", async () => {
+  const p = workspaceFx({
+    repoA: {
+      "a.ts":
+        `export function quartzAlphaA() { return "quartz"; }\n` +
+        `export function quartzBetaA() { return "quartz"; }\n` +
+        `export function quartzGammaA() { return "quartz"; }\n`,
+      "b.ts": `export function quartzOmegaB() { return "quartz"; }\n`,
+    },
+    repoB: {
+      // Same basename as repoA proves child identity is part of the group key.
+      "a.ts":
+        `export function quartzAlphaC() { return "quartz"; }\n` +
+        `export function quartzBetaC() { return "quartz"; }\n`,
+      "d.ts": `export function quartzOmegaD() { return "quartz"; }\n`,
+    },
+  });
+  try {
+    await buildWorkspace(p);
+    const r = federateAsk(p, undefined, "quartz", { limit: 8, graphRank: false });
+    const files = r.hits.map((hit) => hit.pointer.replace(/:L\d+-L\d+$/, ""));
+    const firstPass = [...new Set(files)];
+
+    assert.deepEqual(files.slice(0, firstPass.length), [
+      "repoA/a.ts",
+      "repoB/a.ts",
+      "repoB/d.ts",
+      "repoA/b.ts",
+    ], "selection runs after raw child results have established the fused file order");
+    assert.ok(files.slice(firstPass.length).includes("repoA/a.ts"), "later rounds retain sibling spans");
+    assert.ok(files.slice(firstPass.length).includes("repoB/a.ts"), "same-path files in different children stay distinct");
+  } finally {
+    rmSync(p, { recursive: true, force: true });
+  }
+});
+
 test("ask inside a single child = standalone (no federation scopes)", async () => {
   const p = workspaceFx(REPOS);
   await buildWorkspace(p);

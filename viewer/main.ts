@@ -149,10 +149,16 @@ function setTab(tab: Tab): void {
     }
   } else {
     const graph = activeGraph();
-    if (!graph) {
-      showEmpty(tab === "code"
+    if (!graph || graph.nodes.length === 0) {
+      // A graph that exists but holds no nodes used to fall through to the canvas
+      // and render nothing at all — worst on an exported page, where the reader
+      // arrived from a link that promised a diagram.
+      // The note names changed FILES, and a path on a fork's branch is written by
+      // whoever opened the pull request — it reaches a published page, so it is
+      // escaped rather than trusted.
+      showEmpty(graph?.meta.emptyNote ? escapeText(graph.meta.emptyNote) : (tab === "code"
         ? "No code graph yet — run <code>graft graph</code> to generate <span class=\"mono\">graph.json</span>."
-        : "No context graph — run <code>graft init</code> first.");
+        : "No context graph — run <code>graft init</code> first."));
     } else {
       empty.hidden = true;
       view.resetView();
@@ -164,6 +170,10 @@ function setTab(tab: Tab): void {
   renderLegend();
   updateShownCount();
   updateCounts();
+}
+
+function escapeText(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 }
 
 function showEmpty(html: string): void {
@@ -264,9 +274,24 @@ async function loadAll(): Promise<void> {
   const [context, code] = await Promise.all([loadContextGraph(), loadCodeGraph()]);
   state.context = context;
   state.code = code;
-  $("repoName").textContent = context.meta.repoName ?? "";
-  document.title = `graft viz — ${context.meta.repoName ?? ""}`;
-  setTab(state.tab);
+  // The subtitle only exists on an exported page (`graft viz --export --title`),
+  // where the same file is published per pull request and the reader needs to know
+  // WHICH one they opened.
+  const where = [context.meta.repoName, context.meta.subtitle].filter(Boolean).join(" · ");
+  $("repoName").textContent = where;
+  document.title = `graft viz — ${where}`;
+  // A blast export ships one tab: its Code tab would be the repo's whole wiring
+  // graph, which answers nothing about the pull request the page is about.
+  const tabs = context.meta.tabs;
+  if (tabs) {
+    document.querySelectorAll<HTMLButtonElement>(".tab").forEach((b) => {
+      b.hidden = !tabs.includes(b.dataset.tab as Tab);
+    });
+  }
+  // An exported page says which tab holds its content: a structural build has no
+  // concept nodes, so the default Context tab would open on an empty canvas.
+  const wanted = context.meta.defaultTab;
+  setTab(wanted && wanted !== state.tab ? wanted : state.tab);
 }
 
 onServerChange(() => {

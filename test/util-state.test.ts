@@ -12,10 +12,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildConfigPath,
+  cacheDir,
   patchBuildConfig,
   readBuildConfig,
   readFollowSubmodules,
   readIncludeDirs,
+  resolveContextDir,
   writeBuildConfig,
 } from "../src/util/state.js";
 
@@ -77,5 +79,44 @@ test("patchBuildConfig preserves unrelated persisted build choices", () => {
   assert.deepEqual(readBuildConfig(d), {
     includeDirs: ["vendor"],
     followSubmodules: false,
+  });
+});
+
+// ── resolveContextDir / GRAFT_DIR ──────────────────────────────────────────
+//
+// Everything in this module keyed only by a project dir (stats cache, sync
+// lock, session state, the upkeep stamp) resolves its `graft/` subpath
+// through resolveContextDir, so hooks/sync-run/statusline honor GRAFT_DIR
+// the same way a direct `--dir` CLI call already does via contextDirFor.
+
+function withGraftDir<T>(value: string | undefined, fn: () => T): T {
+  const prev = process.env.GRAFT_DIR;
+  if (value === undefined) delete process.env.GRAFT_DIR; else process.env.GRAFT_DIR = value;
+  try { return fn(); }
+  finally { if (prev === undefined) delete process.env.GRAFT_DIR; else process.env.GRAFT_DIR = prev; }
+}
+
+test("resolveContextDir defaults to <projectDir>/graft when GRAFT_DIR is unset", () => {
+  const d = fresh();
+  withGraftDir(undefined, () => {
+    assert.equal(resolveContextDir(d), join(d, "graft"));
+    assert.equal(cacheDir(d), join(d, "graft", ".cache"));
+  });
+});
+
+test("resolveContextDir resolves a relative GRAFT_DIR against projectDir", () => {
+  const d = fresh();
+  withGraftDir(".repo-docs/graft", () => {
+    assert.equal(resolveContextDir(d), join(d, ".repo-docs", "graft"));
+    assert.equal(cacheDir(d), join(d, ".repo-docs", "graft", ".cache"));
+  });
+});
+
+test("resolveContextDir takes an absolute GRAFT_DIR verbatim", () => {
+  const d = fresh();
+  const abs = join(tmpdir(), "graft-context-elsewhere");
+  withGraftDir(abs, () => {
+    assert.equal(resolveContextDir(d), abs);
+    assert.equal(cacheDir(d), join(abs, ".cache"));
   });
 });
