@@ -21,9 +21,13 @@
   ambiguous and drop. `init` becomes a method named after its type (like a
   Java constructor); `func` is a method inside any type and a function
   elsewhere. Calls resolve via `call_expression` with `navigation_expression`
-  / `self` / `super` receivers; a bare call inside a type body may be an
-  implicit-`self` member call, so it may also match a method (R Phase 4's
-  widening — unique matches only, ambiguity still drops); an initializer call
+  / `self` / `super` receivers; a bare lowercase call inside a type body may
+  be an implicit-`self` member call, so it emits a second intent typed to the
+  enclosing class — resolved only through the owner-qualified index and the
+  in-repo ancestor chain (a stdlib call like `contains` inside
+  `extension Set` drops instead of binding to an unrelated type's only
+  same-named method, a false positive dogfooding on
+  swift-composable-architecture caught); an initializer call
   (`Animal(legs: 4)` — an ordinary call node, no `new`) falls back to
   class/struct/enum targets once functions find nothing, Python's
   constructor-fallback shape. The `:` inheritance clause yields `extends`

@@ -127,8 +127,15 @@ func helper() {
   assert.equal(selfCall?.recvType, "Animal", "`self` resolves to the enclosing type");
   const superCall = calls.find((e) => e.name === "describe");
   assert.equal(superCall?.viaMember, true);
-  const bare = calls.find((e) => e.name === "helper");
-  assert.equal(bare?.viaMember, false);
+  // A bare lowercase call in a type body emits BOTH readings: the plain
+  // free-function intent, and an implicit-self member intent typed to the
+  // enclosing class (resolve keeps whichever finds its target).
+  const helperCalls = calls.filter((e) => e.name === "helper");
+  assert.ok(helperCalls.some((e) => !e.viaMember), "plain free-function intent");
+  assert.ok(
+    helperCalls.some((e) => e.viaMember && e.recvType === "Animal"),
+    "implicit-self member intent, typed to the enclosing class",
+  );
   const member = calls.find((e) => e.name === "walk");
   assert.equal(member?.viaMember, true);
 });
@@ -368,6 +375,45 @@ func use() {
   assert.ok(
     calls.some((c) => c.from === "use" && c.to === "scaled"),
     "extension method resolves via the receiver's bound type",
+  );
+});
+
+test("swift: implicit-self resolves through the ancestor chain, never to unrelated types", async () => {
+  // Two halves of one rule, pinned from real code (swift-composable-architecture):
+  // a bare call in a subclass resolves to the method it inherits, cross-file —
+  // but a stdlib call inside an extension (`contains` in `extension Set`) must
+  // NOT bind to an unrelated type's same-named method just because that name is
+  // unique in the repo.
+  const graph = await buildSwift({
+    "Base.swift": `
+class BaseTests {
+  func clearLogs() {}
+}
+`,
+    "Child.swift": `
+class NavTests: BaseTests {
+  func testDeep() { clearLogs() }
+}
+`,
+    "Unrelated.swift": `
+class Syntax {
+  func contains(_ s: String) -> Bool { return false }
+}
+`,
+    "SetExt.swift": `
+extension Set {
+  func hasAny() -> Bool { return contains(where: { _ in true }) }
+}
+`,
+  });
+  const calls = callEdges(graph);
+  assert.ok(
+    calls.some((c) => c.from === "testDeep" && c.to === "clearLogs"),
+    "inherited method resolves via the in-repo ancestor chain",
+  );
+  assert.ok(
+    !calls.some((c) => c.from === "hasAny"),
+    "a stdlib call in an extension resolves to nothing, not to Syntax.contains",
   );
 });
 

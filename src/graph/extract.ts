@@ -716,13 +716,28 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       // Java only: the call site's argument count, to pick the right overload.
       const argCount = ctx.lang === "java" ? javaArgCount(node) : undefined;
       if (argCount !== undefined) callEdge.argCount = argCount;
-      // Swift: a bare call inside a type body may be an implicit-`self` member
-      // call (`walk()` for `self.walk()`), syntactically indistinguishable from
-      // a free-function call. Widen the match to methods — R Phase 4's exact
-      // move, and with its exact safety: resolve.ts still requires a unique
-      // match, so an ambiguous function-vs-method name drops, never guesses.
-      if (ctx.lang === "swift" && !callee.viaMember && !callee.kinds && ctx.enclosingClass) {
-        callEdge.kinds = ["function", "method"];
+      // Swift: a bare lowercase call inside a type body may be an implicit-`self`
+      // member call (`walk()` for `self.walk()`), syntactically indistinguishable
+      // from a free-function call. Emit a SECOND intent for the member reading,
+      // typed to the enclosing class: it resolves only through the owner-qualified
+      // method index and the class's in-repo ancestor chain (`clearLogs()` in a
+      // test subclass finds the base class's method) and drops otherwise, while
+      // the plain intent still resolves genuine free-function calls. This is
+      // deliberately NOT a bare-name kind widening: dogfooding on
+      // swift-composable-architecture, a global unique-name match bound
+      // `contains(element)` inside `extension Set` — a stdlib call — to an
+      // unrelated type's only in-repo `contains`. And not for an UpperCamelCase
+      // callee: that is an initializer call (`Text("hi")`), which takes
+      // resolve.ts's class/struct/enum fallback instead — extension nodes (kind
+      // "module") can never false-match it.
+      if (
+        ctx.lang === "swift" &&
+        !callee.viaMember &&
+        !callee.kinds &&
+        ctx.enclosingClass &&
+        !/^[A-Z]/.test(callee.name)
+      ) {
+        edges.push({ ...callEdge, viaMember: true, recvType: ctx.enclosingClass });
       }
       const recvType = resolveRecvType(callee.receiver, ctx);
       edges.push(recvType ? { ...callEdge, recvType } : callEdge);
