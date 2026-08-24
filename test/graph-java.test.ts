@@ -1491,3 +1491,38 @@ test("Java extraction: external annotation keeps its bare name (#89)", async () 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Java extraction: external @Service does not collapse onto a plain interface Service (#89)", async () => {
+  // #103 in interface form: `@interface` and `interface` both mint kind
+  // `interface`, so `@Service` (external Spring annotation) must not resolve
+  // onto an in-repo `interface Service`. The edge stays a bare name.
+  const dir = mkdtempSync(join(tmpdir(), "graft-java-service-anno-"));
+  mkdirSync(join(dir, PKG), { recursive: true });
+  writeFileSync(
+    join(dir, PKG, "Service.java"),
+    "package com.acme;\n\npublic interface Service {}\n",
+  );
+  writeFileSync(
+    join(dir, PKG, "Foo.java"),
+    "package com.acme;\n\n@Service\npublic class Foo {}\n",
+  );
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const foo = `${PKG}/Foo.java#Foo`;
+    const service = `${PKG}/Service.java#Service`;
+    const refs = graph.edges.filter((e) => e.relation === "references" && e.source === foo);
+
+    assert.equal(nodeById(graph, service)?.kind, "interface", "plain Service is an in-repo interface");
+    assert.ok(
+      refs.some((e) => e.target === "Service"),
+      "unresolved @Service should keep the bare name",
+    );
+    assert.ok(
+      !refs.some((e) => e.target === service || e.target.endsWith("#Service")),
+      "@Service must not false-match the in-repo interface Service",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

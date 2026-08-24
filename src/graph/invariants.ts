@@ -36,7 +36,9 @@ const CONFIDENCE = new Set<string>([
 // Relations whose target may be a deliberately-unresolved external string rather
 // than an in-repo node id: an import's module specifier, a heritage clause naming
 // a supertype defined outside the repo (or a generic type parameter), or a Java
-// annotation whose type is not declared in-repo.
+// annotation whose type is not declared in-repo. The set is language-agnostic —
+// no other producer currently leaves an unresolved `references` target, so a
+// future bug elsewhere would be masked here.
 const TARGET_MAY_BE_EXTERNAL = new Set<string>(["imports", "extends", "implements", "references"]);
 
 export interface InvariantResult {
