@@ -166,3 +166,17 @@ test("viz export: asset-path text inside the assets does not fail a correct expo
   assert.match(page, /replaces <link rel="stylesheet" href="\/style\.css">/, "the comment survives inlining");
   assert.match(page, /window\.__GRAFT_DATA__/, "and the export still happened");
 });
+
+test("viz export: tabs can be trimmed, and the payload goes with them", () => {
+  const ctx = contextDir();
+  const all = exportViz({ contextDir: ctx, viewerDir: viewerDir(), outDir: out(), repoName: "demo" });
+  const one = exportViz({ contextDir: ctx, viewerDir: viewerDir(), outDir: out(), repoName: "demo", tabs: ["context"] });
+
+  assert.deepEqual(one.tabs, ["context"]);
+  assert.match(readFileSync(one.file, "utf8"), /"tabs":\["context"\]/, "the viewer is told which tabs to show");
+  // The dropped tabs are the only readers of the wiring graph, so it must not be
+  // embedded at all — that payload is most of a blast page's size.
+  assert.equal(one.codeNodes, 0, "no code graph is read");
+  assert.match(readFileSync(one.file, "utf8"), /codeGraph: null/);
+  assert.ok(all.codeNodes > 0 && readFileSync(all.file, "utf8").length > readFileSync(one.file, "utf8").length);
+});

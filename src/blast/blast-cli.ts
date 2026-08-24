@@ -187,7 +187,10 @@ async function exportRadius(
     outDir: resolvePath(outDir),
     repoName: repoLabel(root),
     subtitle,
-    contextGraph: blastVizGraph(report),
+    contextGraph: blastVizGraph(report, { root }),
+    // Context alone: see VizExportOptions.tabs — the other two tabs are about the
+    // repository, and this page is about one pull request.
+    tabs: ["context"],
   });
   console.error(`• --export-viz: ${out.file} (${Math.round(out.bytes / 1024)} kB, ${out.contextNodes} areas, ${out.codeNodes} code nodes)`);
 }

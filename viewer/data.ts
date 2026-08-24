@@ -9,6 +9,7 @@ export interface VizNode {
   type: string;
   summary: string;
   sources: string[];
+  evidence?: Evidence[];
 }
 
 export interface VizEdge {
@@ -19,12 +20,30 @@ export interface VizEdge {
   confidence?: "extracted" | "inferred";
 }
 
+export interface EvidenceLine {
+  n: number | null;
+  sign: "+" | "-" | " ";
+  text: string;
+}
+
+/** A code snippet shown under a node — see `Evidence` in src/viz/assemble.ts. */
+export interface Evidence {
+  label: string;
+  note?: string;
+  lines: EvidenceLine[];
+  more?: number;
+}
+
 export interface VizGraph {
   meta: {
     repoName?: string; subtitle?: string;
     /** Set by `graft viz --export`: the tab whose graph actually has content. */
     defaultTab?: "context" | "code";
+    /** Tabs this page offers. A blast export ships Context alone. */
+    tabs?: Array<"context" | "code" | "outline">;
     nodeCount: number; edgeCount: number; skippedFiles?: number; droppedEdges?: number;
+    /** Why the graph is empty, when it is — set by `blast --export-viz`. */
+    emptyNote?: string;
   };
   nodes: VizNode[];
   edges: VizEdge[];

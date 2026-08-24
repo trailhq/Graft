@@ -18,6 +18,25 @@ export interface LineRange {
   end: number;
 }
 
+/**
+ * One line git reported inside a hunk.
+ *
+ * `n` is the POST-image number, so it is the number a reviewer sees in the file
+ * on disk — a deleted line has none.
+ */
+export interface DiffLine {
+  n: number | null;
+  sign: "+" | "-";
+  text: string;
+}
+
+/** A hunk's range and the lines in it. `ranges` on the file mirrors these. */
+export interface Hunk extends LineRange {
+  lines: DiffLine[];
+  /** Lines dropped by the per-hunk cap — a generated file is not worth holding. */
+  dropped: number;
+}
+
 export interface ChangedFile {
   /** Repo-relative posix path, post-image (the new name for a rename). */
   path: string;
@@ -26,6 +45,9 @@ export interface ChangedFile {
   oldPath?: string;
   /** Post-image changed line ranges. Empty for a pure delete or a mode-only change. */
   ranges: LineRange[];
+  /** The same hunks, carrying their text: what a panel shows so a reader sees the
+   * change rather than a line number they have to go look up. One per range. */
+  hunks: Hunk[];
 }
 
 export interface DiffResult {
@@ -35,6 +57,12 @@ export interface DiffResult {
 }
 
 const HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
+
+/** Text kept per hunk, and per file. A regenerated lockfile is one hunk of 40,000
+ * lines: the ranges still matter (they seed the graph), the text does not, and it
+ * would otherwise ride along in `--format json` and in every exported page. */
+const MAX_HUNK_LINES = 24;
+const MAX_FILE_LINES = 200;
 
 /** Run git in `root`, or return null when git fails (not a repo, unknown ref). */
 function git(root: string, args: string[]): string | null {
@@ -126,38 +154,80 @@ function parseNameStatus(out: string): ChangedFile[] {
       const oldPath = fields[i++];
       const path = fields[i++];
       if (path === undefined) break;
-      files.push({ path, status: "renamed", oldPath, ranges: [] });
+      files.push({ path, status: "renamed", oldPath, ranges: [], hunks: [] });
       continue;
     }
     const path = fields[i++];
     if (path === undefined) break;
-    if (code.startsWith("A")) files.push({ path, status: "added", ranges: [] });
-    else if (code.startsWith("D")) files.push({ path, status: "deleted", ranges: [] });
-    else files.push({ path, status: "modified", ranges: [] });
+    if (code.startsWith("A")) files.push({ path, status: "added", ranges: [], hunks: [] });
+    else if (code.startsWith("D")) files.push({ path, status: "deleted", ranges: [], hunks: [] });
+    else files.push({ path, status: "modified", ranges: [], hunks: [] });
   }
   return files;
 }
 
-/** Attach each hunk's post-image range to its file. */
+/** Attach each hunk's post-image range — and its text — to its file. */
 function applyHunks(files: ChangedFile[], patch: string): void {
   const byPath = new Map(files.map((f) => [f.path, f]));
   let current: ChangedFile | undefined;
+  let hunk: Hunk | undefined;
+  /** Post-image number for the next `+` line of the open hunk. */
+  let next = 0;
+  let kept = 0;
+
   for (const line of patch.split("\n")) {
+    // Every file starts with this, and a content line cannot: a deleted one begins
+    // with `-`. Closing the open hunk here is what stops the NEXT file's `--- a/x`
+    // header being absorbed as a deleted line of the previous hunk.
+    if (line.startsWith("diff --git ")) {
+      current = undefined;
+      hunk = undefined;
+      continue;
+    }
     if (line.startsWith("+++ ")) {
       const raw = line.slice(4);
       current = raw === "/dev/null" ? undefined : byPath.get(stripPrefix(raw));
+      hunk = undefined;
+      kept = 0;
       continue;
     }
-    if (!line.startsWith("@@") || !current) continue;
-    const m = HUNK_RE.exec(line);
-    if (!m) continue;
-    const start = Number(m[1]);
-    // `+N,0` is a pure deletion: nothing survives in the post-image, and git
-    // reports the line BEFORE the gap. Recording that single line is what keeps
-    // "the body of foo() lost 10 lines" attributable to foo() at all.
-    const count = m[2] === undefined ? 1 : Number(m[2]);
-    current.ranges.push(count === 0 ? { start, end: start } : { start, end: start + count - 1 });
+    if (line.startsWith("@@")) {
+      hunk = undefined;
+      if (!current) continue;
+      const m = HUNK_RE.exec(line);
+      if (!m) continue;
+      const start = Number(m[1]);
+      // `+N,0` is a pure deletion: nothing survives in the post-image, and git
+      // reports the line BEFORE the gap. Recording that single line is what keeps
+      // "the body of foo() lost 10 lines" attributable to foo() at all.
+      const count = m[2] === undefined ? 1 : Number(m[2]);
+      const range = count === 0 ? { start, end: start } : { start, end: start + count - 1 };
+      hunk = { ...range, lines: [], dropped: 0 };
+      current.ranges.push(range);
+      current.hunks.push(hunk);
+      next = start;
+      continue;
+    }
+    if (!hunk) continue;
+    // With `--unified=0` every line inside a hunk is an edit, so there is no
+    // context to skip. `+++`/`---` headers are already consumed above; a bare
+    // `--- a/x` for the next file arrives before its `+++`, and the `!hunk`
+    // guard on a fresh file keeps it out.
+    if (line.startsWith("+")) {
+      pushLine(hunk, { n: next, sign: "+", text: line.slice(1) }, kept++ < MAX_FILE_LINES);
+      next += 1;
+    } else if (line.startsWith("-")) {
+      pushLine(hunk, { n: null, sign: "-", text: line.slice(1) }, kept++ < MAX_FILE_LINES);
+    }
   }
+}
+
+function pushLine(hunk: Hunk, line: DiffLine, withinFile: boolean): void {
+  if (!withinFile || hunk.lines.length >= MAX_HUNK_LINES) {
+    hunk.dropped += 1;
+    return;
+  }
+  hunk.lines.push(line);
 }
 
 /** `b/src/x.ts` → `src/x.ts`, minus any trailing tab-separated timestamp. */
