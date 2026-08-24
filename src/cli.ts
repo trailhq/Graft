@@ -14,6 +14,7 @@ import type { ProviderKind } from "./ai/llm/factory.js";
 import { formatCheckReport } from "./context/check.js";
 import { formatGraphCheckReport } from "./graph/check.js";
 import { buildGraphIfMissing, runInit } from "./claude/init.js";
+import { statuslineWanted } from "./claude/settings-merge.js";
 import { runHostsInit } from "./hosts/init.js";
 import { hostIds } from "./hosts/registry.js";
 import { contextDirFor } from "./context/node-file.js";
@@ -896,10 +897,11 @@ program
   .option("--list-agents", "list known agent ids and exit")
   .option("--no-mcp", "skip MCP server registration for other agents")
   .option("--no-hooks", "skip hook installation for other agents")
+  .option("--no-statusline", "skip writing Claude Code statusLine (keep a user-defined one)")
   .option("--dry-run", "print every file init would touch, then exit without writing")
   .option("-y, --yes", "skip the picker and wire every detected agent (the pre-0.8 default)")
   .option("--no-global", "skip writes outside this repo (the ~/.codex/ config + hooks)")
-  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean }) => {
+  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean }) => {
     if (opts.listAgents) {
       for (const id of [...hostIds(), "claude"]) console.log(id);
       return;
@@ -1021,10 +1023,11 @@ function wireTarget(
     cliPath: string;
     plan: ReturnType<typeof planInit>;
     wantClaude: boolean;
-    opts: { build?: boolean; mcp?: boolean; hooks?: boolean; global?: boolean };
+    opts: { build?: boolean; mcp?: boolean; hooks?: boolean; global?: boolean; statusline?: boolean };
   },
 ): void {
     const { home, cliPath, plan, wantClaude, opts } = ctx;
+    const wantStatusline = statuslineWanted({ statusline: opts.statusline });
 
     // Converge, don't just add. init writes the selected hosts; without this it
     // never touches the rest, so a repo wired by an older version (or by the same
@@ -1038,7 +1041,7 @@ function wireTarget(
     for (const r of retracted) console.error(`- removed ${r.path} (${r.what}) — agent not selected`);
 
     if (wantClaude) {
-      const res = runInit(repo, { build: opts.build, cliPath });
+      const res = runInit(repo, { build: opts.build, cliPath, statusline: wantStatusline });
       console.error(`✓ wrote ${res.settingsPath}`);
       for (const s of res.shims) console.error(`✓ wrote ${s}`);
       console.error(`✓ wrote ${res.skill}`);
@@ -1049,6 +1052,7 @@ function wireTarget(
       else
         console.error(`✓ mcp claude: ${res.mcp.path} (${res.mcp.action}) — restart Claude Code to load the graft MCP server`);
       console.error(res.built ? "✓ built the graph (graft build)" : "· skipped graph build");
+      if (!wantStatusline) console.error("· skipped Claude Code statusLine (--no-statusline)");
       for (const w of res.warnings) console.error(`⚠ ${w}`);
     }
 
@@ -1080,6 +1084,7 @@ function wireTarget(
       global: opts.global !== false,
       mcp: opts.mcp !== false,
       hooks: opts.hooks !== false,
+      statusline: wantStatusline,
     });
 
     // Every host's wiring points at graft/, so the graph is built whatever was

@@ -56,7 +56,7 @@ export interface InitResult {
   built: boolean;
 }
 
-export function runInit(dir: string, opts: { build?: boolean; cliPath?: string } = {}): InitResult {
+export function runInit(dir: string, opts: { build?: boolean; cliPath?: string; statusline?: boolean } = {}): InitResult {
   // Same list `--dry-run` and the picker report, so the two can't drift apart.
   const [settings, statusline, hooks, skill, mcpTarget] = claudeTargets(dir).map((t) => t.path);
 
@@ -65,7 +65,7 @@ export function runInit(dir: string, opts: { build?: boolean; cliPath?: string }
   const settingsPath = settings;
   let existing: Record<string, any> = {};
   try { existing = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch { /* none/invalid → start fresh */ }
-  const { merged, warnings } = mergeGraftSettings(existing);
+  const { merged, warnings } = mergeGraftSettings(existing, { statusline: opts.statusline });
   writeFileSync(settingsPath, `${JSON.stringify(merged, null, 2)}\n`);
 
   const sl = statusline;

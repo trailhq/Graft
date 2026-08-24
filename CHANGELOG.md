@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`graft init --no-statusline`** (and `GRAFT_NO_STATUSLINE=1`) skips writing
+  Claude Code's `statusLine` / `subagentStatusLine`. A custom bar — in the
+  project's `.claude/settings.json` or in `~/.claude/settings.json` — stays in
+  front: a project-level field would otherwise hide the user-level one. The
+  choice is recorded in the wiring stamp, so a later session refresh cannot
+  put Graft's bar back. Graft still recognises its own helper
+  (`graft-statusline.cjs`) and will update that command on re-init.
+
 ## 0.15.0
 
 ### Added

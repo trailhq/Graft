@@ -39,7 +39,7 @@ export interface UpkeepResult {
  * `opts.global`/`opts.hooks`, replayed from the stamp.
  */
 function rewriteWiring(repo: string, hosts: string[], opts: WiringOpts): void {
-  if (hosts.includes('claude')) runInit(repo, { build: false, cliPath: graftCliPath() });
+  if (hosts.includes('claude')) runInit(repo, { build: false, cliPath: graftCliPath(), statusline: opts.statusline });
   const others = hosts.filter((h) => h !== 'claude');
   if (others.length)
     runHostsInit(repo, { agents: others, global: opts.global, mcp: opts.mcp, hooks: opts.hooks });
