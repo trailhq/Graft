@@ -20,6 +20,12 @@ import type { RawEdge } from "./extract.js";
 const IMPORT_EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py"];
 /** C/C++ source + header extensions, for resolving `#include` targets. */
 const C_EXT = /\.(c|h|cc|cpp|cxx|hpp|hh|hxx|inl|ipp|c\+\+|h\+\+)$/i;
+/** Python source + stub extensions, for the constructor-call fallback below. */
+const PY_EXT = /\.pyi?$/i;
+/** What a bare Python call falls back to when no function of that name exists:
+ * construction. Only `class` — Python enums, dataclasses and NamedTuples are all
+ * classes, so no other kind is reachable this way. */
+const PY_CTOR_KINDS: Kind[] = ["class"];
 
 /** A Go module discovered in the repo: its `module` path from `go.mod` and the repo
  * directory that `go.mod` lives in (posix, `.` for the repo root). A monorepo may hold
@@ -199,7 +205,16 @@ export function resolveEdges(
           : e.file.endsWith(".java")
             ? ["class", "struct", "enum", "interface"]
             : ["function"];
-      const hit = resolveName(e.name!, e.file, callKinds, perFileName, globalName);
+      let hit = resolveName(e.name!, e.file, callKinds, perFileName, globalName);
+      // Python is the Java case without the `new` to mark it: `Widget()` is an
+      // ordinary call node, so a constructor edge dies against the function-only
+      // index. Java can widen to types outright; Python has free functions, so
+      // widening would trade real function edges for type ones. Hence a fallback,
+      // not a swap — types are tried only once functions have found nothing, and
+      // resolveName's same-file-then-unique-global rule still drops the ambiguous.
+      if (!hit && PY_EXT.test(e.file)) {
+        hit = resolveName(e.name!, e.file, PY_CTOR_KINDS, perFileName, globalName);
+      }
       if (hit) add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
     }
   }
