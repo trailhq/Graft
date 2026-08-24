@@ -670,7 +670,9 @@ program
     const dir = noteQuery(queryRoot(dirArg));
     const { startMcpServer } = await import("./mcp/server.js");
     const globalOpts = program.opts<{ dir?: string }>();
-    startMcpServer(dir, globalOpts.dir, currentVersion);
+    // Awaited so commander does not finish the action (and let the process
+    // exit) before a client writes `initialize`.
+    await startMcpServer(dir, globalOpts.dir, currentVersion);
   });
 
 program

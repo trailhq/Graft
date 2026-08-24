@@ -6,14 +6,8 @@
  * arrow-function consts) plus unresolved edge intents. Edge *targets* are
  * resolved against the whole-repo node index later, in build.ts.
  */
-import Parser from "tree-sitter";
-import TypeScript from "tree-sitter-typescript";
-import Python from "tree-sitter-python";
-import Go from "tree-sitter-go";
-import R from "tree-sitter-r";
-import Java from "tree-sitter-java";
-import Kotlin from "tree-sitter-kotlin";
-import PHP from "tree-sitter-php";
+import { createRequire } from "node:module";
+import type Parser from "tree-sitter";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
@@ -274,17 +268,56 @@ const FUNCTION_VALUE_TYPES = new Set([
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
 
-const parser = new Parser();
-const GRAMMARS: Record<Language, unknown> = {
-  typescript: TypeScript.typescript,
-  tsx: TypeScript.tsx,
-  python: Python,
-  go: Go,
-  r: R,
-  java: Java,
-  kotlin: Kotlin,
-  php: PHP.php,
-};
+/**
+ * Native grammars are loaded on first parse, not at import. `graft mcp` has to
+ * answer `initialize` before it ever looks at source, and pulling eight node-gyp
+ * addons (one of which, kotlin, has no prebuild on some platforms) was exiting
+ * the process — or stalling past the client's handshake timeout — on boot.
+ */
+const require = createRequire(import.meta.url);
+let parser: Parser | undefined;
+const grammarCache = new Map<Language, unknown>();
+
+type ParserCtor = new () => Parser;
+
+function treeSitter(): Parser {
+  if (!parser) parser = new (require("tree-sitter") as ParserCtor)();
+  return parser;
+}
+
+function grammarOf(lang: Language): unknown {
+  const hit = grammarCache.get(lang);
+  if (hit !== undefined) return hit;
+  let loaded: unknown;
+  switch (lang) {
+    case "typescript":
+      loaded = require("tree-sitter-typescript").typescript;
+      break;
+    case "tsx":
+      loaded = require("tree-sitter-typescript").tsx;
+      break;
+    case "python":
+      loaded = require("tree-sitter-python");
+      break;
+    case "go":
+      loaded = require("tree-sitter-go");
+      break;
+    case "r":
+      loaded = require("tree-sitter-r");
+      break;
+    case "java":
+      loaded = require("tree-sitter-java");
+      break;
+    case "kotlin":
+      loaded = require("tree-sitter-kotlin");
+      break;
+    case "php":
+      loaded = require("tree-sitter-php").php;
+      break;
+  }
+  grammarCache.set(lang, loaded);
+  return loaded;
+}
 
 export interface WalkCtx {
   rel: string;
@@ -344,11 +377,11 @@ interface DefDescriptor {
  * the source in <32 KB slices. Code-unit indexing matches `String.slice`. */
 const PARSE_CHUNK = 16384;
 function parseSource(source: string): Parser.SyntaxNode {
-  return parser.parse((index: number) => source.slice(index, index + PARSE_CHUNK)).rootNode;
+  return treeSitter().parse((index: number) => source.slice(index, index + PARSE_CHUNK)).rootNode;
 }
 
 export function extractFile(rel: string, source: string, lang: Language): ExtractResult {
-  parser.setLanguage(GRAMMARS[lang] as never);
+  treeSitter().setLanguage(grammarOf(lang) as never);
   const root = parseSource(source);
   const bindings = collectBindings(root, lang);
   const importedSymbols = collectImportedSymbols(root, lang);
