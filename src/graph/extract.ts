@@ -2120,6 +2120,21 @@ if (lang === "kotlin") {
           viaMember: true,
           receiver: receiver.type === "self_expression" ? "self" : "super",
         };
+      if (receiver?.type === "navigation_expression") {
+        // `self.repo.save()` — one hop off self is a field access and binds like
+        // TS's `this.x`. Deeper chains and call-result receivers carry no
+        // confident local clue, so those fall through with no receiver.
+        const head = receiver.namedChildren[0];
+        const field = receiver.namedChildren
+          .find((c) => c.type === "navigation_suffix")
+          ?.namedChildren.find((c) => c.type === "simple_identifier");
+        if (head?.type === "self_expression" && field)
+          return { name: name.text, viaMember: true, receiver: `self.${field.text}` };
+      }
+      // Still a member call even with an unknowable receiver (a chained call, a
+      // literal, a subscript): recvType stays unset and resolve drops it rather
+      // than guessing — same contract as Java's and TS's unknown receivers.
+      return { name: name.text, viaMember: true };
     }
     return null;
   }

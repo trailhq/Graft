@@ -304,6 +304,73 @@ func make() {
   );
 });
 
+test("swift: receiver-typed member calls resolve through bindings", async () => {
+  // The four binding clues, each feeding resolveRecvType a receiver type:
+  // an initializer-call local, a typed parameter, a field (bare and via self.),
+  // and a type-member (static) call on the type's own uppercase name.
+  const graph = await buildSwift({
+    "Zoo.swift": `
+class Repo {
+  func save() {}
+}
+
+class Keeper {
+  func wave() {}
+}
+
+class Vet {
+  func check() {}
+}
+
+class Animal {
+  func eat() {}
+  static func census() {}
+}
+
+class Zoo {
+  var keeper: Keeper
+  let repo = Repo()
+  init(keeper k: Keeper) { self.keeper = k }
+  func feed(animal: Animal) {
+    let vet = Vet()
+    vet.check()
+    animal.eat()
+    keeper.wave()
+    self.repo.save()
+    Animal.census()
+  }
+}
+`,
+  });
+  const calls = callEdges(graph);
+  const from = calls.filter((c) => c.from === "feed").map((c) => c.to).sort();
+  // "Vet" is the `Vet()` initializer call itself, resolved by the ctor fallback.
+  assert.deepEqual(from, ["Vet", "census", "check", "eat", "save", "wave"]);
+});
+
+test("swift: a typed receiver reaches methods declared in an extension", async () => {
+  const graph = await buildSwift({
+    "Point.swift": `
+struct Point {}
+
+extension Point {
+  func scaled() {}
+}
+`,
+    "Main.swift": `
+func use() {
+  let p = Point()
+  p.scaled()
+}
+`,
+  });
+  const calls = callEdges(graph);
+  assert.ok(
+    calls.some((c) => c.from === "use" && c.to === "scaled"),
+    "extension method resolves via the receiver's bound type",
+  );
+});
+
 test("swift: an ambiguous implicit-self widening drops rather than guesses", async () => {
   // `save` is a method on TWO classes in different files; a bare `save()` inside a
   // third class matches neither uniquely, so no edge may be minted.

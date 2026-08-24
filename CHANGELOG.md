@@ -31,8 +31,14 @@
   superclass), `import` declarations yield module-path import edges, and
   visibility maps to `exported` as only `private`/`fileprivate` hidden —
   Swift's default `internal` is module-wide, which for a one-module repo is
-  the API surface. Known gap (shared with Kotlin): an untyped receiver
-  (`a.run()`) has no bindings collector yet, so those member calls stay
+  the API surface. A Swift bindings collector types receivers from the
+  confident, syntax-local clues: typed parameters (`func feed(animal:
+  Animal)`, argument labels handled), typed properties, initializer-call
+  assignments (`let vet = Vet()` — UpperCamelCase callee, the same convention
+  trust as Go's `NewX`), and fields bound both bare and `self.`-prefixed —
+  so `vet.check()`, `keeper.wave()`, `self.repo.save()`, and type-member
+  calls (`Animal.census()`) all resolve through the owner-qualified method
+  index. A receiver with no local clue (a chained call's result) stays
   unresolved rather than guessed.
 
 ## 0.13.0
