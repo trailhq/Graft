@@ -36,6 +36,10 @@ export interface GraphCheckResult {
   stale: string[];
   /** Nodes never summarized (reported for context; not counted as drift). */
   pending: number;
+  /** Committed nodes in total — the denominator that turns `pending` into a
+   * coverage figure. A deep build that lost most of its LLM calls (#127) is only
+   * distinguishable from a deliberate Tier-1 build by the SHARE that is missing. */
+  nodes: number;
 }
 
 export interface GraphCheckOptions {
@@ -61,6 +65,7 @@ export async function checkGraph(
     changed: [],
     stale: [],
     pending: 0,
+    nodes: 0,
   };
 
   const committed = readGraph(wiringPath(outDir));
@@ -96,6 +101,7 @@ export async function checkGraph(
   }
 
   const committedById = new Map(committed.nodes.map((n) => [n.id, n]));
+  result.nodes = committedById.size;
   for (const [id, node] of committedById) {
     const now = current.get(id);
     if (now === undefined) result.removed.push(id);
@@ -123,7 +129,12 @@ export function formatGraphCheckReport(r: GraphCheckResult): string {
     return "graph check: NO GRAPH\n\nNo graft/.graph/wiring.json found. Run `graft build` first.";
   }
   if (r.ok) {
-    const note = r.pending ? ` (${r.pending} node(s) not yet summarized — run \`graft build --deep\`)` : "";
+    // A share, not a bare count: "1203 not yet summarized" reads the same whether
+    // the repo was never deep-built or a deep build failed most of its calls.
+    const pct = r.nodes > 0 ? Math.round(((r.nodes - r.pending) / r.nodes) * 100) : 0;
+    const note = r.pending
+      ? ` (meaning tier ${pct}% complete — ${r.pending} of ${r.nodes} node(s) not yet summarized; run \`graft build --deep\`)`
+      : "";
     return `graph check: OK — the wiring graph is in sync with the code.${note}`;
   }
 

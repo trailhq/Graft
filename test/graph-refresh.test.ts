@@ -174,18 +174,26 @@ test("a refresh leaves the statusline stats alone, so the Stop hook still fires"
 });
 
 test("a failed rebuild still answers from the graph on disk", async (t) => {
-  if (process.getuid?.() === 0) return t.skip("root writes anywhere, so a read-only directory proves nothing");
+  // Windows lands here too, not just root: the denial below is a directory mode, and
+  // Windows ignores those outright (see the helper). Before writeGraph became atomic
+  // this test denied by chmod-ing the FILE, which Windows *does* honour — so the
+  // Windows leg used to pass, and silently started replacing the read-only graph
+  // through the rename instead. Skipping says so rather than asserting vacuously.
+  const why = chmodDenialUnavailable();
+  if (why) return t.skip(why);
   const d = repo();
   await buildGraph(d);
   const before = readFileSync(wiringPath(outOf(d)), "utf8");
   writeFileSync(join(d, "src", "math.ts"), `${MATH}export const X = 1;\n`);
 
   // Make the graph write itself fail: the query must degrade to the old graph, not
-  // start erroring because a rebuild couldn't happen.
-  const graphFile = wiringPath(outOf(d));
-  chmodSync(graphFile, 0o400);
+  // start erroring because a rebuild couldn't happen. writeGraph is atomic (temp +
+  // rename), and a rename can replace a read-only FILE, so the unwritable target has
+  // to be the DIRECTORY — which is also the realistic "can't write here" case.
+  const graphDir = dirname(wiringPath(outOf(d)));
+  chmodSync(graphDir, 0o500); // r-x: the temp write fails, old wiring.json stays put
   const r = await ensureFreshGraph(d);
-  chmodSync(graphFile, 0o600);
+  chmodSync(graphDir, 0o700);
 
   assert.equal(r.refreshed, false);
   assert.match(r.note ?? "", /refresh skipped/);

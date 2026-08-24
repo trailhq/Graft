@@ -573,7 +573,56 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     }
   }
 
-  walkNamedChildren(node.namedChildren, ctx, out, edges, minted);
+  // Java anonymous class (`new Type() { … }`): tree-sitter-java has no
+  // `anonymous_class` node (unlike PHP) — the body is an optional `class_body`
+  // on `object_creation_expression`. Mint `{anonymous}` (mirroring PHP #144 /
+  // `{closure}`) so nested methods take that owner instead of the enclosing
+  // type's, which otherwise pollutes `ownerMethod` and steals real call edges
+  // (#161). The constructor call edge above still fires for `new Type()`.
+  if (ctx.lang === "java" && node.type === "object_creation_expression") {
+    const body = node.namedChildren.find((c) => c.type === "class_body");
+    if (body) {
+      const idPart = "{anonymous}";
+      const base = `${ctx.rel}#${[...ctx.scope, idPart].join(".")}`;
+      const id = mintId(base, minted);
+      out.push({
+        id,
+        name: "{anonymous}",
+        kind: "class",
+        path: ctx.rel,
+        span: `L${node.startPosition.row + 1}-L${node.endPosition.row + 1}`,
+        signature: clean(ctx.source.slice(node.startIndex, body.startIndex)),
+        exported: false,
+        origin: "ast",
+        body_hash: contentHash(node.text),
+        body_text: searchBody(node.text),
+        summary_state: "pending",
+        summary: null,
+        crux: null,
+      });
+      edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
+      // Single supertype from `new Type()`: emit `implements` so an interface
+      // target resolves (adapters are the common case; a class target drops
+      // under resolve's implements kind filter — drop-not-guess).
+      const superName = javaConstructedTypeName(node.childForFieldName("type"));
+      if (superName) {
+        edges.push({ source: id, relation: "implements", name: superName, file: ctx.rel });
+      }
+      const anonCtx: WalkCtx = {
+        ...ctx,
+        scope: [...ctx.scope, idPart],
+        enclosingKind: "class",
+        parentId: id,
+        enclosingClass: "{anonymous}",
+      };
+      for (const child of node.namedChildren) {
+        walk(child, child.type === "class_body" ? anonCtx : ctx, out, edges, minted);
+      }
+      return;
+    }
+  }
+
+  for (const child of node.namedChildren) walk(child, ctx, out, edges, minted);
 }
 
 /**

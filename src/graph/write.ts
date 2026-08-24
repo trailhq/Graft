@@ -8,7 +8,7 @@
  * timestamps, so rebuilding an unchanged repo produces a byte-identical file and
  * git diffs stay minimal.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { EdgeV1, GraphV1, NodeV1 } from "./types.js";
 
@@ -41,7 +41,28 @@ export function writeGraph(graph: GraphV1, outDir: string): string {
   };
   const path = wiringPath(outDir);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(sorted, null, 2) + "\n");
+  // Atomic write (temp + rename): the crux pass now checkpoints wiring.json
+  // periodically (#128), and a --deep run is exactly what gets killed mid-flush
+  // (SIGTERM/CI timeout/laptop sleep). A partial writeFileSync would leave a
+  // truncated, unparseable graph; rename swaps it in atomically on the same fs.
+  //
+  // pid in the temp name, and removed when the write fails — the same discipline
+  // `writeJsonAtomic` (util/state.ts) documents: a fixed name lets a concurrent
+  // build (a manual `graft build` racing the refresh child) write the same scratch
+  // file and hand the loser a corrupt graph, and a failed rename would otherwise
+  // leave a full-size orphan behind that nothing ever cleans up.
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(sorted, null, 2) + "\n");
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* nothing more we can do */
+    }
+    throw e;
+  }
   return path;
 }
 

@@ -1,0 +1,45 @@
+name: Blast radius
+
+# graft's own PRs run the action graft ships, so the comment format is reviewed the
+# same way the code is. `pull_request` (not `_target`) on purpose: the job reads the
+# PR's code, so it must not carry write access to secrets a fork could reach.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  blast:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/graft-blast
+        with:
+          depth: "2"
+          # graft reviews its own PRs with the code IN the PR, not with the last
+          # release — a release cannot run a command the PR is adding.
+          setup-cmd: npm ci && npm run build
+          graft-cmd: node dist/cli.js
+          # A fork's PR gets no secrets, so naming would fail anyway; every area then
+          # carries its hub-symbol name, which is still reviewable.
+          name-areas: ${{ github.event.pull_request.head.repo.fork == false }}
+          # Linked only once Pages is actually serving: set the repo variable
+          # BLAST_VIEWER_BASE (e.g. https://nanonets.github.io/Graft) after pointing
+          # Pages at the gh-pages branch that blast-pages.yml writes. Unset, the
+          # comment simply has no link rather than a link that 404s.
+          viewer-url: ${{ vars.BLAST_VIEWER_BASE != '' && format('{0}/pr/{1}/', vars.BLAST_VIEWER_BASE, github.event.pull_request.number) || '' }}
+        env:
+          GRAFT_API_KEY: ${{ secrets.GRAFT_API_KEY }}
+          # Wire format stays `openai` for any OpenAI-compatible gateway; these two
+          # point it at whichever one holds the key above.
+          GRAFT_BASE_URL: ${{ secrets.GRAFT_BASE_URL }}
+          GRAFT_MODEL: ${{ secrets.GRAFT_MODEL }}

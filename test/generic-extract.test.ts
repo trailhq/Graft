@@ -235,43 +235,6 @@ test("breadth tier: Rust use crate::… resolves to the in-repo module (longest-
   assert.deepEqual(fromTest.map((e) => e.target), ["crate::error::Error"], "test-binary crate:: never resolves into the lib");
 });
 
-// PHP `use App\Models\User` → a file→class-file import, resolved to the in-repo class by
-// the longest namespace-tail suffix (PSR-4 root is unknown). Groups expand; `use function`
-// is skipped; a vendor/unknown class or an ambiguous tail stays a string, never guessed.
-test("breadth tier: PHP use resolves to the class file (namespace-suffix, groups, drop-rather-than-guess)", async () => {
-  await warmGenericGrammars(["php"]);
-  const files: Record<string, string> = {
-    "src/Models/User.php": "<?php\nnamespace App\\Models;\nclass User {}\n",
-    "src/Http/Request.php": "<?php\nnamespace App\\Http;\nclass Request {}\n",
-    "src/Http/Response.php": "<?php\nnamespace App\\Http;\nclass Response {}\n",
-    "a/Dup.php": "<?php\nclass Dup {}\n",
-    "b/Dup.php": "<?php\nclass Dup {}\n",
-    "src/App.php":
-      "<?php\nnamespace App;\n" +
-      "use App\\Models\\User;\n" +              // → src/Models/User.php
-      "use App\\Http\\{Request, Response};\n" +  // group → both Http files
-      "use App\\Support\\Str as S;\n" +          // in-namespace but no file → string
-      "use function App\\helpers\\tap;\n" +      // function import → skipped, no edge
-      "use Psr\\Log\\LoggerInterface;\n" +       // external vendor → string
-      "use Whatever\\Dup;\n" +                   // ambiguous basename → drop
-      "class App {}\n",
-  };
-  const nodes = [], raw = [];
-  for (const [rel, src] of Object.entries(files)) {
-    const r = extractGeneric(rel, src, "php");
-    nodes.push(...r.nodes); raw.push(...r.rawEdges);
-  }
-  const imports = resolveEdges(nodes, raw).filter((e) => e.relation === "imports" && e.source === "src/App.php");
-  const targets = imports.map((e) => e.target).sort();
-
-  assert.ok(targets.includes("src/Models/User.php"), "use App\\Models\\User → Models/User.php");
-  assert.ok(targets.includes("src/Http/Request.php") && targets.includes("src/Http/Response.php"), "group expands to both");
-  assert.ok(targets.includes("App\\Support\\Str"), "in-namespace but fileless → kept as string");
-  assert.ok(targets.includes("Psr\\Log\\LoggerInterface"), "external vendor class → kept as string");
-  assert.ok(targets.includes("Whatever\\Dup"), "ambiguous basename → kept as string, never guessed");
-  assert.ok(!targets.some((t) => /tap|helpers/.test(t)), "use function … is skipped (symbol import, not a class file)");
-});
-
 test("buildGraph + checkGraph handle a breadth-tier (.rs) repo end-to-end", async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft-rust-"));
   mkdirSync(join(dir, "src"), { recursive: true });

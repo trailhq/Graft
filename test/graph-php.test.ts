@@ -26,6 +26,7 @@ class Widget extends Base implements Runnable
 
     public function run(): int
     {
+        $this->log();
         return $this->helper();
     }
 
@@ -42,7 +43,10 @@ class Widget extends Base implements Runnable
 
 interface Runnable {}
 
-trait Loggable {}
+trait Loggable
+{
+    protected function log(): void {}
+}
 
 enum Color: string
 {
@@ -138,6 +142,14 @@ test("PHP extraction: call, extends, and implements edges", async () => {
         (e) => e.relation === "implements" && e.source === "app.php#Widget" && e.target === "app.php#Runnable",
       ),
       "Widget should have a resolved implements edge to Runnable",
+    );
+
+    // `$this->log()` resolves to the used trait's method (trait-use → implements edge)
+    assert.ok(
+      graph.edges.some(
+        (e) => e.relation === "calls" && e.source === "app.php#Widget.run" && e.target === "app.php#Loggable.log",
+      ),
+      "run should have a resolved calls edge to Loggable.log via trait use",
     );
 
     // `$this->helper()` resolves to the receiver method (self → enclosing class)

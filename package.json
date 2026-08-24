@@ -1,6 +1,6 @@
 {
   "name": "@nanonets/graft",
-  "version": "0.11.0",
+  "version": "0.12.1",
   "description": "Build a repo's context graph as a folder of linked markdown files: a local, regenerable cache that every query keeps in sync with your code.",
   "keywords": [
     "ai",
@@ -47,7 +47,7 @@
     "dev": "tsc -p tsconfig.json --watch",
     "cli": "tsx src/cli.ts",
     "test": "node scripts/run-tests.mjs",
-    "prepare": "npm run build",
+    "prepare": "npm run build && node scripts/stamp-telemetry-key.mjs",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/postinstall.mjs"
   },
