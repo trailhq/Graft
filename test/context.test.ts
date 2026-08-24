@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { buildContext } from "../src/context/build.js";
 import { checkContext, indexFreshness, staleBanner } from "../src/context/check.js";
 import { contextDirFor, ensureGitignored, ensureSearchable } from "../src/context/node-file.js";
+import { buildGraph } from "../src/graph/build.js";
 import { writeBuildConfig } from "../src/util/state.js";
 import { fakeProviders } from "./helpers.js";
 
@@ -85,6 +86,47 @@ test("check passes immediately after init", async () => {
     const r = checkContext(dir);
     assert.equal(r.ok, true);
     assert.equal(r.missing, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #213 — per-file cards for root-level sources land in graft/<stem>.md, the same
+// directory readNodes() scans for concept nodes. Nested cards (graft/src/…) are
+// not scanned. After a deep context build + wiring cards, check must not treat
+// the root file card as a missing concept node.
+test("check: root-level file card is not indexDrift after build (#213)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxgraph-root-card-"));
+  try {
+    writeFileSync(
+      join(dir, "main.ts"),
+      `export function rootFn(a: number): number { return a * 2; }\n`,
+    );
+    mkdirSync(join(dir, "src"));
+    writeFileSync(
+      join(dir, "src", "foo.ts"),
+      `export function nestedFn(a: number): number { return a + 1; }\n`,
+    );
+
+    await buildContext(dir, buildOpts());
+    await buildGraph(dir);
+
+    assert.ok(existsSync(join(dir, "graft", "main.md")), "root source gets a top-level file card");
+    assert.ok(existsSync(join(dir, "graft", "src", "foo.md")), "nested source card stays in a subdir");
+
+    const r = checkContext(dir);
+    assert.equal(r.ok, true, `expected clean check, got ${JSON.stringify(r)}`);
+    assert.deepEqual(r.indexDrift, []);
+
+    // A hand-dropped .md in graft/ is still an orphaned node — the detector
+    // must not go silent for anything that is not a recorded per-file card.
+    writeFileSync(join(dir, "graft", "notes.md"), "# stray notes\n");
+    const stray = checkContext(dir);
+    assert.equal(stray.ok, false);
+    assert.ok(
+      stray.indexDrift.some((s) => s.startsWith("notes:")),
+      `expected stray notes.md to be indexDrift, got ${JSON.stringify(stray.indexDrift)}`,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
