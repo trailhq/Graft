@@ -253,13 +253,13 @@ npx @nanonets/graft init
 # Claude Code additionally gets the live statusline + hooks below
 ```
 
-On a terminal, `init` shows you every agent it knows about — flagging the ones it detected (via their config directories) and listing the exact files each would write — and wires only the ones you select. Claude Code is pre-selected; nothing else is. Selected agents get a marker-fenced Graft section in their shared instruction file — `AGENTS.md` (Codex, OpenCode and other CLIs that read it), `GEMINI.md`, `.github/copilot-instructions.md` — or a wholly-owned rule/skill file for the agents that use one: `.claude/skills/graft/SKILL.md`, `.cursor/rules/graft.mdc`, `.kiro/steering/graft.md`, `.windsurf/rules/graft.md`, `.adal/skills/graft/SKILL.md` for [AdaL](https://adal.sylph.ai). Claude Code is in the second group: `init` writes its own skill file and never touches your `CLAUDE.md`. Re-running only updates Graft's own section (or replaces the owned file) and never touches the rest of your content.
+On a terminal, `init` shows you every agent it knows about — flagging the ones it detected (via their config directories) and listing the exact files each would write — and wires only the ones you select. Claude Code is pre-selected; nothing else is. Selected agents get a marker-fenced Graft section in their shared instruction file — `AGENTS.md` (Codex, OpenCode and other CLIs that read it), `GEMINI.md`, `.github/copilot-instructions.md` — or a wholly-owned rule/skill file for the agents that use one: `.claude/skills/graft/SKILL.md`, `.cursor/rules/graft.mdc`, `.kiro/steering/graft.md`, `.windsurf/rules/graft.md`, `.grok/skills/graft/SKILL.md` for Grok (xAI), `.adal/skills/graft/SKILL.md` for [AdaL](https://adal.sylph.ai). Claude Code is in the second group: `init` writes its own skill file and never touches your `CLAUDE.md`. Re-running only updates Graft's own section (or replaces the owned file) and never touches the rest of your content.
 
 With no TTY to prompt on — CI, a Dockerfile, a piped shell — `init` writes **nothing** and prints the command to run instead. Pass `--agents <ids>` or `--yes` to make a scripted run explicit.
 
 | Flag | Effect |
 |---|---|
-| `--agents <ids...>` | wire only these, no prompt — ids: `agents`, `cursor`, `gemini`, `copilot`, `kiro`, `windsurf`, `adal`, `claude` |
+| `--agents <ids...>` | wire only these, no prompt — ids: `agents`, `cursor`, `gemini`, `grok`, `copilot`, `kiro`, `windsurf`, `adal`, `claude` |
 | `--yes`, `-y` | skip the prompt and wire every **detected** agent |
 | `--dry-run` | print every file `init` would touch, then exit without writing |
 | `--all-agents` | write instruction files for every known agent, detected or not |
@@ -372,7 +372,7 @@ graft viz --export site/ --title "PR #12"  # one self-contained index.html — f
 
 graft init [dir]                     # pick which agents to wire (prompts on a terminal; writes nothing until you choose)
 graft init --dry-run                 # list every file it would touch, then exit
-graft init --agents cursor kiro      # wire only these agents, no prompt (ids: agents, cursor, gemini, copilot, kiro, windsurf, adal, claude)
+graft init --agents cursor kiro      # wire only these agents, no prompt (ids: agents, cursor, gemini, grok, copilot, kiro, windsurf, adal, claude)
 graft init --yes                     # no prompt; wire every detected agent
 graft init --no-global               # skip writes outside this repo (~/.codex/ config + hooks)
 graft init --no-build                # wire the files only; don't build the graph

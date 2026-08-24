@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Grok (xAI) is a first-class `graft init` host.** Detects `~/.grok` or a
+  repo `.grok/` and writes `.grok/skills/graft/SKILL.md` plus a repo-level
+  `[mcp_servers.graft]` block in `.grok/config.toml` (Grok's MCP config).
+  Select it with `graft init --agents grok`.
+
 ## 0.12.0
 
 ### Changed

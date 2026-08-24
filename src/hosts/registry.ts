@@ -63,6 +63,14 @@ export const HOSTS: HostTarget[] = [
     detect: (p) => p.dirExists(join(p.home, '.gemini')),
   },
   {
+    id: 'grok',
+    name: 'Grok (xAI)',
+    kind: 'owned',
+    relPath: join('.grok', 'skills', 'graft', 'SKILL.md'),
+    content: skillTemplate,
+    detect: (p) => p.dirExists(join(p.home, '.grok')) || p.dirExists(join(p.repo, '.grok')),
+  },
+  {
     id: 'antigravity',
     name: 'Google Antigravity',
     kind: 'section',
