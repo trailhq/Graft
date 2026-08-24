@@ -6,7 +6,9 @@
  * the first candidate is the absolute path baked in at `graft init` time. So
  * `npm i -g @nanonets/graft@latest` upgraded a directory the shim never looked
  * at, and the user's hooks kept loading whatever version wired the repo. The
- * shim now takes the highest-versioned candidate instead.
+ * shim now tries the highest-versioned candidate first. A candidate that *exists*
+ * but fails to load (throw on import, or no `main`) falls through to the next;
+ * once `main()` has run, a throw is swallowed and no later candidate is tried.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -80,4 +82,31 @@ test('no candidate at all exits quietly — a hook must never fail the session',
   const root = tmpRepo('shim-none');
   mkdirSync(join(root, 'project'), { recursive: true });
   assert.equal(runShim(root, join(root, 'nowhere'), join(root, 'project')), null);
+});
+
+test('a candidate that fails to load falls through to a working later one (#80)', () => {
+  const root = tmpRepo('shim-load-fail');
+  const broken = fakeInstall(root, 'old-node-install', '0.12.0');
+  writeFileSync(join(broken, 'hooks.js'), 'throw new Error("cannot load");\n');
+  fakeInstall(join(root, 'project', 'node_modules', '@nanonets'), 'graft', '0.11.0');
+  assert.equal(runShim(root, broken, join(root, 'project')), '0.11.0');
+});
+
+test('a candidate without main() falls through to the next (#80)', () => {
+  const root = tmpRepo('shim-no-main');
+  const newer = fakeInstall(root, 'current', '0.12.0');
+  writeFileSync(join(newer, 'hooks.js'), 'module.exports.other = () => {};\n');
+  fakeInstall(join(root, 'project', 'node_modules', '@nanonets'), 'graft', '0.11.0');
+  assert.equal(runShim(root, newer, join(root, 'project')), '0.11.0');
+});
+
+test('once main() runs, a throw does not retry the next candidate (#80)', () => {
+  const root = tmpRepo('shim-main-owns');
+  const newer = fakeInstall(root, 'current', '0.12.0');
+  writeFileSync(
+    join(newer, 'hooks.js'),
+    `module.exports.main = () => { require('node:fs').writeFileSync(process.env.MARKER, '0.12.0'); throw new Error('boom'); };\n`,
+  );
+  fakeInstall(join(root, 'project', 'node_modules', '@nanonets'), 'graft', '0.11.0');
+  assert.equal(runShim(root, newer, join(root, 'project')), '0.12.0');
 });

@@ -193,8 +193,12 @@ test("viz --tabs: a bad tab name fails loudly rather than exporting a page missi
     }
   };
 
-  const bad = run(["viz", ".", "--export", out(), "--tabs", "context,graph"]);
+  // Point at a dir with no `graft/` — CI never has one (`graft/` is gitignored).
+  // `--tabs` must still be the error; "run build --deep first" would hide the typo.
+  const empty = mkdtempSync(join(tmpdir(), "graft-notabs-"));
+  const bad = run(["viz", empty, "--export", out(), "--tabs", "context,graph"]);
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /--tabs takes a comma-separated subset of context, code, outline — got "graph"/);
-  assert.equal(run(["viz", ".", "--export", out(), "--tabs", ""]).status, 1, "an empty list is a mistake too");
+  assert.doesNotMatch(bad.stderr, /no context graph/);
+  assert.equal(run(["viz", empty, "--export", out(), "--tabs", ""]).status, 1, "an empty list is a mistake too");
 });
