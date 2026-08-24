@@ -21,14 +21,16 @@ for (const [name, src] of [['statusline', statuslineShim(BAKED)], ['hooks', hook
     assert.match(src, /execFileSync\('npm', \['root', '-g'\]/);
     assert.doesNotMatch(src, /tmpdir/); // no predictable temp cache path
 
-    // Highest version wins among the candidates, not first-hit — otherwise the
-    // baked path pins the user to whatever graft wired the repo, forever.
-    // Behaviour is exercised for real in claude-shim-resolve.test.ts.
-    assert.match(src, /function best\(dirs, name\)/);
+    // Highest version is tried first among the candidates, not first-hit — otherwise
+    // the baked path pins the user to whatever graft wired the repo, forever.
+    // Load failure then walks the rest. Behaviour is in claude-shim-resolve.test.ts.
+    assert.match(src, /function ranked\(dirs, name\)/);
     assert.match(src, /'package\.json'/); // versionOf reads each candidate's version
+    assert.match(src, /typeof mod\.main !== 'function'/);
+    assert.match(src, /return true; \/\/ main\(\) was reached/);
 
     // Windows-safe dynamic import + best-effort catch
-    assert.match(src, /pathToFileURL\(entry\(/);
+    assert.match(src, /pathToFileURL\(f\)/);
     assert.match(src, /\.catch\(\(\) => \{/);
   });
 }

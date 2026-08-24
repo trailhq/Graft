@@ -6,8 +6,10 @@
 export function instructionBody(): string {
   return `## Graft — repo context graph
 
-This repo is indexed in \`graft/\`: small linked markdown nodes that explain each
-system and carry exact file:line spans, kept in sync with the code through git.
+\`graft/\` is a local, regenerable cache: small linked markdown nodes that explain
+each system and carry exact file:line spans. It is gitignored, so a fresh clone
+does not have it — run \`graft build\` when it is absent or stale, before
+\`graft map\`, \`graft ask\`, \`graft grep\` or \`graft callers\`.
 
 For ANY task here — understanding how something works, finding where code lives,
 or scoping a change — get context from the graph before grepping or opening
@@ -63,6 +65,13 @@ ${instructionBody()}
 }
 
 export function windsurfRule(): string {
-  return `${instructionBody()}
+  // Windsurf workspace rules require YAML frontmatter with `trigger`
+  // (always_on | glob | model_decision | manual). Without it the file is
+  // inert — Cascade never applies the body. `always_on` matches the other
+  // hosts' "always apply" frontmatter.
+  return `---
+trigger: always_on
+---
+${instructionBody()}
 `;
 }

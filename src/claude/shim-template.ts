@@ -8,16 +8,21 @@
 //   2. repo node_modules — a local dev-dep install.
 //   3. `execDir/../lib`  — the cheap legacy guess (covers nvm / classic prefix layout).
 //   4. `npm root -g`     — authoritative global dir, layout-agnostic. Only shelled out to
-//                     when 1–3 all miss; queried on demand — no on-disk cache, which on a
-//                     shared machine would be a world-writable path an attacker could point
-//                     at their own code for us to import.
+//                     when 1–3 all miss or fail to load; queried on demand — no on-disk
+//                     cache, which on a shared machine would be a world-writable path an
+//                     attacker could point at their own code for us to import.
 //
-// Among the candidates that exist we take the HIGHEST VERSION, not the first hit. First-hit
-// silently pinned users to a stale graft forever: `bakedDir` points into one Node install's
-// global node_modules, so switching Node versions (nvm/volta) or moving the install leaves
-// the old directory on disk and still winning, and `npm i -g @nanonets/graft@latest`
-// upgrades a directory the shim never looks at. The upgrade appeared to work and changed
-// nothing — the shim kept loading the version from whenever `graft init` was last run.
+// Among the candidates that exist we try the HIGHEST VERSION first, not the first hit.
+// First-hit silently pinned users to a stale graft forever: `bakedDir` points into one
+// Node install's global node_modules, so switching Node versions (nvm/volta) or moving
+// the install leaves the old directory on disk and still winning, and
+// `npm i -g @nanonets/graft@latest` upgrades a directory the shim never looks at.
+//
+// Existence is not enough. A stale or half-installed candidate whose file is on disk
+// but fails to import used to disable every later one — the `.catch()` swallowed the
+// load error and the hook silently no-op'd. Walk remaining candidates on *load*
+// failure (import throw, or no `main`). Once `main()` has been reached it owns the
+// outcome: retrying after it ran would repeat side effects.
 function shim(entryFile: string, call: string, bakedDir: string): string {
   return `#!/usr/bin/env node
 const path = require('path');
@@ -63,29 +68,41 @@ function newer(a, b) {
   return false;
 }
 
-// The highest-versioned dir in \`dirs\` that actually contains \`name\`, or null.
-function best(dirs, name) {
-  let bestDir = null, bestVer = null;
-  for (const d of dirs) {
-    if (!d || !fs.existsSync(path.join(d, name))) continue;
-    const v = versionOf(d);
-    if (bestDir === null || newer(v, bestVer)) { bestDir = d; bestVer = v; }
-  }
-  return bestDir;
+// Dirs in \`dirs\` that contain \`name\`, highest version first. Equal versions keep
+// their original order (the comparator returns 0).
+function ranked(dirs, name) {
+  return dirs.filter((d) => d && fs.existsSync(path.join(d, name))).sort((a, b) => {
+    const va = versionOf(a), vb = versionOf(b);
+    if (newer(va, vb)) return -1;
+    if (newer(vb, va)) return 1;
+    return 0;
+  });
 }
 
-function entry(name) {
-  // Cheap candidates first, and only shell out to npm when every one of them misses.
-  const cheap = [BAKED, fromPkg(dir), fromPkg(path.join(path.dirname(process.execPath), '..', 'lib'))];
-  const hit = best(cheap, name);
-  if (hit) return path.join(hit, name);
+async function launch(name, call) {
+  const seen = new Set();
+  const tryDir = async (d) => {
+    if (!d || seen.has(d)) return false;
+    seen.add(d);
+    const f = path.join(d, name);
+    if (!fs.existsSync(f)) return false;
+    let mod;
+    try { mod = await import(pathToFileURL(f).href); } catch { return false; }
+    if (typeof mod.main !== 'function') return false;
+    try { await call(mod); } catch { /* failed — do not block the session */ }
+    return true; // main() was reached; do not try another candidate
+  };
+  // Cheap candidates first; only shell out to npm when every one of them misses *or* fails to load.
+  for (const d of ranked([BAKED, fromPkg(dir), fromPkg(path.join(path.dirname(process.execPath), '..', 'lib'))], name)) {
+    if (await tryDir(d)) return;
+  }
   const gr = globalRoot();
   const global = gr && path.join(gr, '@nanonets', 'graft', 'dist', 'claude');
-  if (global && fs.existsSync(path.join(global, name))) return path.join(global, name);
-  return path.join(dir, 'dist', 'claude', name); // last-ditch; import will no-op if absent
+  if (await tryDir(global)) return;
+  await tryDir(path.join(dir, 'dist', 'claude')); // last-ditch
 }
 
-import(pathToFileURL(entry(${JSON.stringify(entryFile)})).href).then((m) => ${call}).catch(() => { /* graft unavailable — no-op */ });
+launch(${JSON.stringify(entryFile)}, async (m) => ${call}).catch(() => { /* graft unavailable — no-op */ });
 `;
 }
 

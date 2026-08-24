@@ -242,6 +242,16 @@ test('CLI: --no-global stays quiet when the selection has nothing out-of-repo', 
   assert.doesNotMatch(out, /skipped out-of-repo writes/);
 });
 
+test('windsurf rule is written with always_on frontmatter (#80)', () => {
+  const home = fresh(); const repo = fresh();
+  const r = runHostsInit(repo, { home, agents: ['windsurf'] });
+  assert.deepEqual(r.written.map((w) => w.id), ['windsurf']);
+  const text = readFileSync(join(repo, '.windsurf', 'rules', 'graft.md'), 'utf8');
+  assert.match(text, /^---\ntrigger: always_on\n---\n/);
+  assert.match(text, /gitignored/);
+  assert.doesNotMatch(text, /kept in sync with the code through git/);
+});
+
 test('CLI: --dry-run respects an explicit --agents list', () => {
   const home = fresh(); const repo = fresh();
   mkdirSync(join(home, '.codex'), { recursive: true });
