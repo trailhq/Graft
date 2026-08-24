@@ -13,13 +13,14 @@ import Go from "tree-sitter-go";
 import R from "tree-sitter-r";
 import Java from "tree-sitter-java";
 import Kotlin from "tree-sitter-kotlin";
+import Swift from "tree-sitter-swift";
 import PHP from "tree-sitter-php";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "kotlin" | "php" | "r";
+export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "kotlin" | "swift" | "php" | "r";
 
 /**
  * Extension → the tree-sitter grammar that parses it, and the label a human expects
@@ -51,6 +52,7 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".java", grammar: "java", label: "java" },
   { ext: ".kt", grammar: "kotlin", label: "kotlin" },
   { ext: ".kts", grammar: "kotlin", label: "kotlin" },
+  { ext: ".swift", grammar: "swift", label: "swift" },
   { ext: ".php", grammar: "php", label: "php" },
   // `entryFor` lower-cases the path before matching, so this one entry covers
   // both `.R` (the conventional case in real R codebases) and `.r`.
@@ -217,6 +219,31 @@ const KOTLIN_KINDS: Record<string, Kind> = {
  * same class_declaration node rekinded in describeKotlin, so all three land in the set. */
 const KOTLIN_TYPE_KINDS: ReadonlySet<Kind> = new Set<Kind>(["class", "interface", "enum"]);
 
+const SWIFT_KINDS: Record<string, Kind> = {
+  class_declaration: "class", // → "struct" / "enum" in describeSwift (one node type covers all five keywords)
+  protocol_declaration: "interface",
+  function_declaration: "function", // → "method" inside a type (resolved in the walk)
+  protocol_function_declaration: "method", // a protocol requirement is always a member
+  init_declaration: "method", // the type's own initializer (named after it, like a Java constructor)
+  typealias_declaration: "type",
+  property_declaration: "variable", // top-level `let`/`var` only (fields resolved in the walk)
+};
+
+/** Swift type declarations: they set `enclosingClass` for the members nested in them.
+ * class/struct/enum are the same class_declaration node rekinded in describeSwift
+ * (an actor takes "class"); protocols are "interface". "module" is an extension
+ * body — a member-contributing scope named after the extended type, deliberately
+ * NOT a type kind in the graph so it can never make the real declaration's name
+ * ambiguous (see describeSwift's extension branch) — but its members still
+ * promote to methods owned by that type, which is why it belongs in this set. */
+const SWIFT_TYPE_KINDS: ReadonlySet<Kind> = new Set<Kind>([
+  "class",
+  "struct",
+  "enum",
+  "interface",
+  "module",
+]);
+
 // PHP: definition node types are all distinct (no py-style function→method
 // promotion needed — a class body uses `method_declaration`, not
 // `function_definition`). `trait_declaration` maps to the PHP-only `trait` kind.
@@ -237,6 +264,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   r: R_KINDS,
   java: JAVA_KINDS,
   kotlin: KOTLIN_KINDS,
+  swift: SWIFT_KINDS,
   php: PHP_KINDS,
 };
 
@@ -256,6 +284,7 @@ const CALL_TYPES: Record<Language, ReadonlySet<string>> = {
   go: new Set(["call_expression"]),
   java: new Set(["method_invocation", "object_creation_expression"]),
   kotlin: new Set(["call_expression"]),
+  swift: new Set(["call_expression"]),
   php: new Set([
     "function_call_expression",
     "member_call_expression",
@@ -283,6 +312,7 @@ const GRAMMARS: Record<Language, unknown> = {
   r: R,
   java: Java,
   kotlin: Kotlin,
+  swift: Swift,
   php: PHP.php,
 };
 
@@ -561,9 +591,11 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
                 ? javaExported(node)
                 : ctx.lang === "kotlin"
                   ? kotlinExported(node)
-                  : ctx.lang === "php"
-                    ? phpExported(node)
-                    : tsExported(node),
+                  : ctx.lang === "swift"
+                    ? swiftExported(node)
+                    : ctx.lang === "php"
+                      ? phpExported(node)
+                      : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -580,12 +612,13 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     // may `implements`, so every type declaration is a heritage site, not just a class.
     const javaTypeDecl = ctx.lang === "java" && JAVA_TYPE_KINDS.has(desc.kind);
     const kotlinTypeDecl = ctx.lang === "kotlin" && KOTLIN_TYPE_KINDS.has(desc.kind);
-    if (desc.kind === "class" || javaTypeDecl || kotlinTypeDecl)
+    const swiftTypeDecl = ctx.lang === "swift" && SWIFT_TYPE_KINDS.has(desc.kind);
+    if (desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl)
       edges.push(...heritageEdges(node, id, ctx));
     if (ctx.lang === "php") edges.push(...phpAttributeReferenceEdges(node, id, ctx));
 
     const enclosingClass =
-      desc.kind === "class" || javaTypeDecl || kotlinTypeDecl
+      desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl
         ? desc.name
         : isGoMethod
           ? goReceiverType(node)
@@ -683,6 +716,14 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       // Java only: the call site's argument count, to pick the right overload.
       const argCount = ctx.lang === "java" ? javaArgCount(node) : undefined;
       if (argCount !== undefined) callEdge.argCount = argCount;
+      // Swift: a bare call inside a type body may be an implicit-`self` member
+      // call (`walk()` for `self.walk()`), syntactically indistinguishable from
+      // a free-function call. Widen the match to methods — R Phase 4's exact
+      // move, and with its exact safety: resolve.ts still requires a unique
+      // match, so an ambiguous function-vs-method name drops, never guesses.
+      if (ctx.lang === "swift" && !callee.viaMember && !callee.kinds && ctx.enclosingClass) {
+        callEdge.kinds = ["function", "method"];
+      }
       const recvType = resolveRecvType(callee.receiver, ctx);
       edges.push(recvType ? { ...callEdge, recvType } : callEdge);
     }
@@ -997,6 +1038,7 @@ function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "r") return describeR(node, ctx);
   if (ctx.lang === "java") return describeJava(node, ctx);
   if (ctx.lang === "kotlin") return describeKotlin(node, ctx);
+  if (ctx.lang === "swift") return describeSwift(node, ctx);
 
   // PHP closures: `$h = function () {…}` / `fn() => …`, and bare callbacks
   // (`$routes->get('/x', function () {…})`). Captured as function nodes so a
@@ -1650,6 +1692,116 @@ function describeKotlin(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | 
   return null;
 }
 
+/** Swift definition shapes. Like Kotlin's, tree-sitter-swift exposes no `name` or
+ * `body` fields: a definition's name is a direct `type_identifier` (types) or
+ * `simple_identifier` (functions) child, and its body is a `class_body` /
+ * `enum_class_body` / `protocol_body` / `function_body` child. One
+ * `class_declaration` node type covers `class`, `struct`, `enum`, `actor` AND
+ * `extension` — the declaration's own keyword token tells them apart. */
+function describeSwift(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
+  // The first direct `type_identifier` is the declared name (generic parameters and
+  // inheritance specifiers are all nested beneath other child nodes).
+  const typeName = (): string | null =>
+    node.namedChildren.find((c) => c.type === "type_identifier")?.text ?? null;
+  // The first direct `simple_identifier` is the function name (parameters and
+  // generic parameters are all nested beneath other child nodes).
+  const funcName = (): string | null =>
+    node.namedChildren.find((c) => c.type === "simple_identifier")?.text ?? null;
+  const headEnd = (...types: string[]): number => {
+    const body = node.namedChildren.find((c) => types.includes(c.type));
+    return body ? body.startIndex : node.endIndex;
+  };
+
+  if (node.type === "class_declaration") {
+    const kw = node.children.find(
+      (c) =>
+        c.type === "class" ||
+        c.type === "struct" ||
+        c.type === "enum" ||
+        c.type === "actor" ||
+        c.type === "extension",
+    )?.type;
+    let name: string | null;
+    if (kw === "extension") {
+      // `extension Point { … }` has no name of its own — the extended type's IS its
+      // identity, so the node takes that name: members mint as `Point.method`,
+      // `enclosingClass` becomes `Point`, and a member call on a Point receiver
+      // resolves to them exactly as if they were declared on the type. A qualified
+      // target (`extension Swift.Array`) reduces to its last component, matching
+      // how the extended type is itself named in the graph.
+      //
+      // Its KIND is "module", not "class": the type usually already has a real
+      // declaration, and a second same-named "class" node would make the name
+      // AMBIGUOUS to resolveName — every `Point(...)` initializer call and every
+      // `: Point` heritage target would then drop instead of resolving (resolve
+      // never guesses between same-named candidates). "module" keeps the node out
+      // of type-name resolution entirely while SWIFT_TYPE_KINDS still makes it
+      // own its members; typed member calls are untouched either way, since they
+      // go through the owner-qualified method index, not the type's own node.
+      const ut = node.namedChildren.find((c) => c.type === "user_type");
+      const ids = ut?.namedChildren.filter((c) => c.type === "type_identifier") ?? [];
+      name = ids.length ? ids[ids.length - 1]!.text : null;
+    } else {
+      name = typeName();
+    }
+    if (!name) return null;
+    // An actor is class-like (reference semantics, methods) and there is no
+    // dedicated actor kind, so it takes "class".
+    const kind: Kind =
+      kw === "extension" ? "module" : kw === "struct" ? "struct" : kw === "enum" ? "enum" : "class";
+    return { name, kind, headerEnd: headEnd("class_body", "enum_class_body"), hashNode: node };
+  }
+
+  if (node.type === "protocol_declaration") {
+    const name = typeName();
+    if (!name) return null;
+    return { name, kind: "interface", headerEnd: headEnd("protocol_body"), hashNode: node };
+  }
+
+  // A protocol requirement (`protocol_function_declaration`) has no body and is
+  // always a member; an ordinary `function_declaration` is a method exactly when
+  // it is nested in a type (or an extension of one).
+  if (node.type === "function_declaration" || node.type === "protocol_function_declaration") {
+    const name = funcName();
+    if (!name) return null;
+    const kind: Kind =
+      node.type === "protocol_function_declaration" ||
+      SWIFT_TYPE_KINDS.has(ctx.enclosingKind ?? "file")
+        ? "method"
+        : "function";
+    return { name, kind, headerEnd: headEnd("function_body"), hashNode: node };
+  }
+
+  if (node.type === "init_declaration") {
+    // Initializers carry no name of their own — they are the type's own, so scope
+    // the node under the enclosing type the same way Java's constructor_declaration
+    // does. (A protocol's `init` requirement lands here too, owned by the protocol.)
+    if (!ctx.enclosingClass) return null;
+    return { name: ctx.enclosingClass, kind: "method", headerEnd: headEnd("function_body"), hashNode: node };
+  }
+
+  if (node.type === "typealias_declaration") {
+    const name = typeName();
+    if (!name) return null;
+    return { name, kind: "type", headerEnd: node.endIndex, hashNode: node };
+  }
+
+  if (node.type === "property_declaration") {
+    // Top-level `let`/`var` only — a stored/computed property inside a type is a
+    // field, not a definition node (no depth tier emits fields), so it must not
+    // become one. `deinit` and `subscript` are likewise skipped: neither is ever
+    // the target of a resolvable call edge, and neither carries a usable name.
+    if (ctx.enclosingKind !== null) return null;
+    const name = node.namedChildren
+      .find((c) => c.type === "pattern")
+      ?.namedChildren.find((c) => c.type === "simple_identifier")?.text;
+    if (!name) return null;
+    return { name, kind: "variable", headerEnd: node.endIndex, hashNode: node };
+  }
+
+  return null;
+}
+
 /** Java visibility: `public` (or `protected`) on the declaration's own modifier list.
  * A package-private or private member is not part of the API surface. Read off the
  * `modifiers` child's tokens, ignoring annotations, which live in the same node. */
@@ -1666,6 +1818,17 @@ function kotlinExported(node: Parser.SyntaxNode): boolean {
   if (!mods) return true;
   const vis = mods.namedChildren.find((c) => c.type === "visibility_modifier");
   return !vis || vis.text === "public";
+}
+
+/** Swift visibility: the default (`internal`) is module-wide, and a repo is
+ * typically one module — so `public` / `open` / `package` / `internal` all count
+ * as API surface, and only an explicit `private` / `fileprivate` hides a
+ * definition. A setter-only restriction (`private(set)`) leaves the getter
+ * visible, so it does not hide the symbol either. */
+function swiftExported(node: Parser.SyntaxNode): boolean {
+  const mods = node.namedChildren.find((c) => c.type === "modifiers");
+  const vis = mods?.namedChildren.find((c) => c.type === "visibility_modifier");
+  return !vis || (vis.text !== "private" && vis.text !== "fileprivate");
 }
 
 /** The receiver's base type name for a Go method, unwrapping a pointer receiver
@@ -1751,6 +1914,25 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
       const t = child.namedChildren.find((c) => c.type === "user_type")?.namedChildren.find(
         (c) => c.type === "type_identifier",
       );
+      if (t) edges.push({ source: classId, relation: "extends", name: t.text, file: ctx.rel });
+    }
+    return edges;
+  }
+  if (ctx.lang === "swift") {
+    // `class A: B, C` — each `inheritance_specifier` (a direct child of the
+    // declaration; protocols and extensions carry them too) wraps a `user_type`
+    // whose LAST direct `type_identifier` is the bare supertype name: a
+    // module-qualified `Foundation.NSObject` reduces to `NSObject`, and generic
+    // arguments live in nested nodes so they never leak in. Swift cannot say
+    // syntactically whether a specifier is the superclass or a protocol
+    // conformance (that needs the target's kind), so every edge is `extends` —
+    // the same collapse Kotlin's delegation specifiers make.
+    for (const child of node.namedChildren) {
+      if (child.type !== "inheritance_specifier") continue;
+      const ids = child.namedChildren
+        .find((c) => c.type === "user_type")
+        ?.namedChildren.filter((c) => c.type === "type_identifier");
+      const t = ids?.length ? ids[ids.length - 1] : undefined;
       if (t) edges.push({ source: classId, relation: "extends", name: t.text, file: ctx.rel });
     }
     return edges;
@@ -1913,6 +2095,31 @@ if (lang === "kotlin") {
         return { name: name.text, viaMember: true, receiver: receiver.text };
       if (receiver?.type === "this_expression" || receiver?.type === "super_expression")
         return { name: name.text, viaMember: true, receiver: receiver.type === "this_expression" ? "this" : "super" };
+    }
+    return null;
+  }
+
+  if (lang === "swift") {
+    // Same shape as Kotlin's: `call_expression` = callee expression + `call_suffix`.
+    // A bare `foo()` names a plain call (this also covers `Animal()` initializer
+    // calls, which have no distinguishing syntax); `obj.foo()` is a
+    // `navigation_expression` whose trailing `navigation_suffix` holds the member
+    // name and whose head is the receiver.
+    const target = node.namedChildren[0];
+    if (target?.type === "simple_identifier") return { name: target.text, viaMember: false };
+    if (target?.type === "navigation_expression") {
+      const suffix = target.namedChildren.find((c) => c.type === "navigation_suffix");
+      const name = suffix?.namedChildren.find((c) => c.type === "simple_identifier");
+      const receiver = target.namedChildren[0];
+      if (!name) return null;
+      if (receiver?.type === "simple_identifier")
+        return { name: name.text, viaMember: true, receiver: receiver.text };
+      if (receiver?.type === "self_expression" || receiver?.type === "super_expression")
+        return {
+          name: name.text,
+          viaMember: true,
+          receiver: receiver.type === "self_expression" ? "self" : "super",
+        };
     }
     return null;
   }
@@ -2131,6 +2338,7 @@ function isImport(node: Parser.SyntaxNode, lang: Language): boolean {
   }
   if (lang === "java") return node.type === "import_declaration";
 if (lang === "kotlin") return node.type === "import_header";
+  if (lang === "swift") return node.type === "import_declaration";
   // PHP: one edge per imported symbol — the clause leaf inside a (possibly
   // grouped) `use A\B, C\D;` / `use A\{B, C};` declaration.
   if (lang === "php") return node.type === "namespace_use_clause";
@@ -2174,6 +2382,14 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
     // `import com.example.Foo` — the dotted path is the `identifier` child. A
     // wildcard (`import a.b.*`) and an `as` alias are separate children, so the
     // identifier text is already the module path (wildcards dropped, like Java).
+    return node.namedChildren.find((c) => c.type === "identifier")?.text ?? null;
+  }
+  if (lang === "swift") {
+    // `import UIKit` / `import struct Foundation.Date` — the dotted path is the
+    // `identifier` child (an import-kind keyword like `struct` is a separate
+    // token). Swift imports name MODULES, not files, so the specifier resolves
+    // to a repo file only when a same-named module target exists; external
+    // frameworks stay as unresolved (but truthful) import intents.
     return node.namedChildren.find((c) => c.type === "identifier")?.text ?? null;
   }
   const str = node.namedChildren.find((c) => c.type === "string");

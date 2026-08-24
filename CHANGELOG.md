@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Swift gets full-fidelity (depth-tier) extraction**, promoted from the
+  breadth tier the same way Kotlin was (#130) — whose swift tags query had no
+  call captures at all, so Swift repos indexed symbols with zero wiring.
+  `tree-sitter-swift` (native, `^0.7.1` — the first release whose install
+  compiles the shipped parser instead of regenerating it, which broke under
+  npm's hoisting; a root `overrides` entry pins its `tree-sitter` peer for dev
+  installs) parses `.swift`. One `class_declaration` node covers `class` /
+  `struct` / `enum` / `actor` / `extension`, told apart by their own keyword:
+  class and actor → `class`, struct → `struct`, enum → `enum`, `protocol` →
+  `interface`, `typealias` → `type`, top-level `let`/`var` → `variable`. An
+  `extension Point` node takes the extended type's own name, so its members
+  mint as Point methods and member calls on a Point receiver resolve to them.
+  The extension node itself is kind `module`, not a second same-named class —
+  otherwise every `Point()` call and `: Point` heritage target would go
+  ambiguous and drop. `init` becomes a method named after its type (like a
+  Java constructor); `func` is a method inside any type and a function
+  elsewhere. Calls resolve via `call_expression` with `navigation_expression`
+  / `self` / `super` receivers; a bare call inside a type body may be an
+  implicit-`self` member call, so it may also match a method (R Phase 4's
+  widening — unique matches only, ambiguity still drops); an initializer call
+  (`Animal(legs: 4)` — an ordinary call node, no `new`) falls back to
+  class/struct/enum targets once functions find nothing, Python's
+  constructor-fallback shape. The `:` inheritance clause yields `extends`
+  edges (bare names — Swift can't say syntactically which specifier is the
+  superclass), `import` declarations yield module-path import edges, and
+  visibility maps to `exported` as only `private`/`fileprivate` hidden —
+  Swift's default `internal` is module-wide, which for a one-module repo is
+  the API surface. Known gap (shared with Kotlin): an untyped receiver
+  (`a.run()`) has no bindings collector yet, so those member calls stay
+  unresolved rather than guessed.
+
 ## 0.13.0
 
 ### Added

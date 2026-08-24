@@ -26,6 +26,13 @@ const PY_EXT = /\.pyi?$/i;
  * construction. Only `class` — Python enums, dataclasses and NamedTuples are all
  * classes, so no other kind is reachable this way. */
 const PY_CTOR_KINDS: Kind[] = ["class"];
+/** Swift is Python's case with more nominal kinds: `Animal(legs: 4)` is an ordinary
+ * call node with no `new` to mark construction, and struct/enum initializers are as
+ * routine as class ones (a struct gets a memberwise init for free). Same fallback
+ * shape — types are tried only once functions (and methods, see extract.ts's
+ * implicit-self widening) have found nothing. */
+const SWIFT_EXT = /\.swift$/i;
+const SWIFT_CTOR_KINDS: Kind[] = ["class", "struct", "enum"];
 
 /** A Go module discovered in the repo: its `module` path from `go.mod` and the repo
  * directory that `go.mod` lives in (posix, `.` for the repo root). A monorepo may hold
@@ -242,6 +249,9 @@ export function resolveEdges(
       // resolveName's same-file-then-unique-global rule still drops the ambiguous.
       if (!hit && PY_EXT.test(e.file)) {
         hit = resolveName(e.name!, e.file, PY_CTOR_KINDS, perFileName, globalName);
+      }
+      if (!hit && SWIFT_EXT.test(e.file)) {
+        hit = resolveName(e.name!, e.file, SWIFT_CTOR_KINDS, perFileName, globalName);
       }
       if (hit) add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
     }
