@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { contextDirFor, ensureGitignored, ensureSearchable } from "../context/node-file.js";
-import { extractFile, languageLabelOf, languageOf, type RawEdge } from "./extract.js";
+import { extractFile, languageLabelOf, languageOf, nativeFallbackWarning, wasmFallbackLangs, type RawEdge } from "./extract.js";
 import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
 import { containerLangOf, extractContainer, warmContainerGrammars } from "./container.js";
 import { contentHash } from "../util/id.js";
@@ -117,6 +117,8 @@ export interface GraphBuildResult {
   languages: string[];
   meaning: EnrichStats;
   errors: string[];
+  /** Non-fatal notices (native parser WASM fallback, etc.). Not check-failures. */
+  warnings: string[];
 }
 
 /** Every Go module in the repo: each `go.mod`'s declared `module` path and the repo
@@ -185,9 +187,22 @@ export async function buildGraph(
 
   // Breadth tier: WASM grammars load asynchronously, so warm the ones this repo
   // needs ONCE here (buildGraph is async) before the synchronous parse loop below
-  // can call extractGeneric. Depth-tier (native) grammars need no warmup.
+  // can call extractGeneric. Depth-tier (native) grammars need no warmup — unless
+  // they failed to load, in which case the same WASM path covers them (#119).
+  const fallback = new Set(wasmFallbackLangs());
   await warmGenericGrammars(
-    new Set(files.map((f) => genericLangOf(f.abs)?.name).filter((n): n is string => !!n)),
+    new Set(
+      files.flatMap((f) => {
+        const names: string[] = [];
+        const generic = genericLangOf(f.abs)?.name;
+        if (generic) names.push(generic);
+        const lang = languageOf(f.abs);
+        if (lang && fallback.has(lang)) names.push(lang);
+        const container = containerLangOf(f.abs);
+        if (container && fallback.has(container.inner)) names.push(container.inner);
+        return names;
+      }),
+    ),
   );
   // Container tier (.vue and friends) loads its wrapper grammars the same way,
   // for the same reason: extractContainer runs inside the sync loop below.
@@ -399,5 +414,6 @@ export async function buildGraph(
     languages: [...langs].sort(),
     meaning,
     errors,
+    warnings: [nativeFallbackWarning()].filter((w): w is string => w !== null),
   };
 }

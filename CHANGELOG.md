@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`graft init` / `graft build` no longer crash on linux/arm64** when
+  `tree-sitter@0.21.1` has no native prebuild (`No native build was found for
+  platform=linux arch=arm64`). Native parsers still load when they exist
+  (darwin, linux-x64). If `require("tree-sitter")` fails, depth languages
+  (TypeScript/JavaScript, Python, Go, Java, Kotlin, PHP, R) fall back to the
+  existing WASM breadth grammars. Fidelity is reduced: no bindings /
+  receiver-type resolution; call edges come from `tags.scm` (symbols only if
+  a query is missing). The build prints
+  `native parser unavailable — falling back to WASM (reduced binding fidelity)`
+  and `graft check` / the statusline do not treat it as an error. (#119)
+
 ## 0.13.0
 
 ### Added

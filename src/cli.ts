@@ -470,6 +470,7 @@ program
       { repo: buildRoot },
     );
     for (const e of g.errors) console.error(`✗ ${e}`);
+    for (const w of g.warnings) console.error(`⚠ ${w}`);
 
     const rel = relative(process.cwd(), g.contextDir) || "graft";
     console.log(`  ${rel}/ is git-ignored (added automatically) — a local cache; teammates run \`graft build\` to get their own.`);

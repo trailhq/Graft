@@ -61,6 +61,26 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "lua", exts: [".lua"], wasm: "lua" },
 ];
 
+/**
+ * WASM rows for depth-tier languages. Used only when the native grammar failed
+ * to load (`extract.ts` wasmFallbackLangs). `genericLangOf` does NOT consult
+ * this table — depth extensions stay owned by `languageOf` so the native path
+ * is unchanged when addons exist. java is already in GENERIC_LANGS.
+ */
+export const DEPTH_WASM_LANGS: readonly GenericLang[] = [
+  { name: "typescript", exts: [".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"], wasm: "typescript" },
+  { name: "tsx", exts: [".tsx", ".jsx"], wasm: "tsx" },
+  { name: "python", exts: [".py", ".pyi"], wasm: "python" },
+  { name: "go", exts: [".go"], wasm: "go" },
+  { name: "kotlin", exts: [".kt", ".kts"], wasm: "kotlin" },
+  { name: "php", exts: [".php"], wasm: "php" },
+  { name: "r", exts: [".r"], wasm: "r" },
+];
+
+function wasmRow(name: string): GenericLang | undefined {
+  return GENERIC_LANGS.find((l) => l.name === name) ?? DEPTH_WASM_LANGS.find((l) => l.name === name);
+}
+
 const byExt = new Map<string, GenericLang>();
 for (const l of GENERIC_LANGS) for (const e of l.exts) byExt.set(e, l);
 
@@ -123,7 +143,7 @@ function loadQuery(name: string): string | null {
  * grammars are silently skipped (their files then extract as file-only). */
 export async function warmGenericGrammars(langNames: Iterable<string>): Promise<void> {
   const want = new Set(langNames);
-  const need = [...want].filter((n) => !loaded.has(n) && GENERIC_LANGS.some((l) => l.name === n));
+  const need = [...want].filter((n) => !loaded.has(n) && wasmRow(n));
   if (need.length === 0) return;
   if (!tsMod) {
     tsMod = await import("web-tree-sitter");
@@ -132,7 +152,7 @@ export async function warmGenericGrammars(langNames: Iterable<string>): Promise<
   await initPromise;
   const { Language, Query } = tsMod;
   for (const name of need) {
-    const row = GENERIC_LANGS.find((l) => l.name === name)!;
+    const row = wasmRow(name)!;
     const bytes = requireWasm(row.wasm);
     if (!bytes) continue;
     try {

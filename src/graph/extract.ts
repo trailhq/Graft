@@ -5,19 +5,21 @@
  * definition (file, class, function, method, interface, type, enum, and TS
  * arrow-function consts) plus unresolved edge intents. Edge *targets* are
  * resolved against the whole-repo node index later, in build.ts.
+ *
+ * Native tree-sitter addons load via `require` inside a try (issue #119). When
+ * they are missing — linux/arm64 has no prebuild in tree-sitter@0.21.1 —
+ * `extractFile` delegates to the WASM breadth extractor instead of throwing
+ * at module load. Darwin / linux-x64 keep the hand-written walk unchanged.
  */
-import Parser from "tree-sitter";
-import TypeScript from "tree-sitter-typescript";
-import Python from "tree-sitter-python";
-import Go from "tree-sitter-go";
-import R from "tree-sitter-r";
-import Java from "tree-sitter-java";
-import Kotlin from "tree-sitter-kotlin";
-import PHP from "tree-sitter-php";
+import type Parser from "tree-sitter";
+import { createRequire } from "node:module";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
+import { extractGeneric } from "./generic.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
+
+const require = createRequire(import.meta.url);
 
 export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "kotlin" | "php" | "r";
 
@@ -79,6 +81,83 @@ export function languageOf(path: string): Language | null {
  */
 export function languageLabelOf(path: string): string | null {
   return entryFor(path)?.label ?? null;
+}
+
+export const NATIVE_FALLBACK_WARNING =
+  "native parser unavailable — falling back to WASM (reduced binding fidelity)";
+
+const DEPTH_LANGS: Language[] = ["typescript", "tsx", "python", "go", "java", "kotlin", "php", "r"];
+
+function asParserCtor(mod: unknown): (new () => Parser) | null {
+  if (typeof mod === "function") return mod as new () => Parser;
+  if (mod && typeof mod === "object" && "default" in mod) {
+    const d = (mod as { default: unknown }).default;
+    if (typeof d === "function") return d as new () => Parser;
+  }
+  return null;
+}
+
+export interface NativeLoadResult {
+  Parser: (new () => Parser) | null;
+  grammars: Partial<Record<Language, unknown>>;
+  error: string | null;
+}
+
+/** Load native grammars via `require`. Injectable so tests can simulate a missing
+ * prebuild (`No native build was found for platform=linux arch=arm64`) without
+ * unloading this process's real addons. Native available → same grammars as
+ * the old static imports; a throw or a missing Parser ctor → empty grammars. */
+export function loadNativeGrammars(req: (id: string) => unknown = require): NativeLoadResult {
+  try {
+    const ParserCtor = asParserCtor(req("tree-sitter"));
+    if (!ParserCtor) {
+      return { Parser: null, grammars: {}, error: "tree-sitter did not export a Parser constructor" };
+    }
+    const grammars: Partial<Record<Language, unknown>> = {};
+    const one = (id: string): unknown | null => {
+      try {
+        return req(id);
+      } catch {
+        return null;
+      }
+    };
+    const ts = one("tree-sitter-typescript") as { typescript?: unknown; tsx?: unknown } | null;
+    if (ts?.typescript) grammars.typescript = ts.typescript;
+    if (ts?.tsx) grammars.tsx = ts.tsx;
+    const py = one("tree-sitter-python");
+    if (py) grammars.python = py;
+    const go = one("tree-sitter-go");
+    if (go) grammars.go = go;
+    const r = one("tree-sitter-r");
+    if (r) grammars.r = r;
+    const java = one("tree-sitter-java");
+    if (java) grammars.java = java;
+    const kotlin = one("tree-sitter-kotlin");
+    if (kotlin) grammars.kotlin = kotlin;
+    const php = one("tree-sitter-php") as { php?: unknown } | null;
+    if (php?.php) grammars.php = php.php;
+    return { Parser: ParserCtor, grammars, error: null };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { Parser: null, grammars: {}, error: message };
+  }
+}
+
+const native = loadNativeGrammars();
+const parser: Parser | null = native.Parser ? new native.Parser() : null;
+const GRAMMARS: Partial<Record<Language, unknown>> = native.grammars;
+
+/** Depth-tier languages whose native grammar did not load — warm these as WASM. */
+export function wasmFallbackLangs(): Language[] {
+  if (!parser) return [...DEPTH_LANGS];
+  return DEPTH_LANGS.filter((l) => GRAMMARS[l] === undefined);
+}
+
+/** One-line banner when the native runtime itself failed to load (issue #119).
+ * Missing *individual* grammars still WASM-fall back, but that is not the
+ * linux/arm64 crash and must not warn on darwin where tree-sitter loaded. */
+export function nativeFallbackWarning(): string | null {
+  return parser ? null : NATIVE_FALLBACK_WARNING;
 }
 
 /**
@@ -274,18 +353,6 @@ const FUNCTION_VALUE_TYPES = new Set([
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
 
-const parser = new Parser();
-const GRAMMARS: Record<Language, unknown> = {
-  typescript: TypeScript.typescript,
-  tsx: TypeScript.tsx,
-  python: Python,
-  go: Go,
-  r: R,
-  java: Java,
-  kotlin: Kotlin,
-  php: PHP.php,
-};
-
 export interface WalkCtx {
   rel: string;
   source: string;
@@ -344,10 +411,13 @@ interface DefDescriptor {
  * the source in <32 KB slices. Code-unit indexing matches `String.slice`. */
 const PARSE_CHUNK = 16384;
 function parseSource(source: string): Parser.SyntaxNode {
-  return parser.parse((index: number) => source.slice(index, index + PARSE_CHUNK)).rootNode;
+  return parser!.parse((index: number) => source.slice(index, index + PARSE_CHUNK)).rootNode;
 }
 
-export function extractFile(rel: string, source: string, lang: Language): ExtractResult {
+export function extractFile(rel: string, source: string, lang: Language, opts?: { wasm?: boolean }): ExtractResult {
+  if (opts?.wasm || !parser || GRAMMARS[lang] === undefined) {
+    return extractGeneric(rel, source, lang);
+  }
   parser.setLanguage(GRAMMARS[lang] as never);
   const root = parseSource(source);
   const bindings = collectBindings(root, lang);
