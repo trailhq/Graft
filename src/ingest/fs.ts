@@ -10,6 +10,12 @@ export const SKIP_DIRS = new Set([
   "node_modules",
   "dist",
   "build",
+  // The underscore spelling that Sphinx, CMake, Jekyll and the OCaml tools all
+  // emit. Left out, a materialized build tree lands in the graph as ordinary
+  // source: one repo here indexed 4,484 files of vendored WordPress against 121
+  // hand-written ones, and queries slowed enough that the prompt hook's budget
+  // could no longer fit them. `--include-dir _build` remains the way back in.
+  "_build",
   "out",
   "target",
   "vendor",
