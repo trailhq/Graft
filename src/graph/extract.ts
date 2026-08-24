@@ -109,10 +109,17 @@ export interface RawEdge {
    * unconditionally unresolvable rather than just occasionally ambiguous. */
   kinds?: Kind[];
   /** calls: the number of arguments at the CALL SITE. Only emitted for languages
-   * with overloading (Java), where a same-named sibling on the same class is
+   * with overloading (Java, Swift), where a same-named sibling on the same class is
    * otherwise indistinguishable — and picking wrong turns a delegating overload
    * into a self-loop. */
   argCount?: number;
+  /** Swift only: a bare lowercase call inside a type body, which the language
+   * resolves member-first (inner scope wins). The edge carries the member
+   * reading (viaMember + recvType = the enclosing type); this flag lets
+   * resolve.ts fall back to the free-function reading when the owner chain has
+   * no such member — and ONLY then, so a name defined as both a member and a
+   * free function yields the member edge alone, exactly as Swift dispatches it. */
+  implicitSelf?: boolean;
 }
 
 export interface ExtractResult {
@@ -641,9 +648,18 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       // defined inside one).
       rR6Access: null,
       // Unlike rR6Access, only reset when entering a genuinely new class (so it
-      // stays live through a method's whole body, where super$ calls actually
-      // happen) — inherited unchanged for every other definition kind.
-      rSuperClass: desc.kind === "class" ? (ctx.lang === "r" ? rR6ParentClass(node) : null) : ctx.rSuperClass,
+      // stays live through a method's whole body, where super$ / super. calls
+      // actually happen) — inherited unchanged for every other definition kind.
+      // Swift reads it off the declaration's own `:` clause, so `super.ping()`
+      // resolves against the PARENT type, not the overriding current one.
+      rSuperClass:
+        desc.kind === "class"
+          ? ctx.lang === "r"
+            ? rR6ParentClass(node)
+            : ctx.lang === "swift"
+              ? swiftSuperClassName(node)
+              : null
+          : ctx.rSuperClass,
     };
     walkNamedChildren(node.namedChildren, childCtx, out, edges, minted);
     return;
@@ -713,16 +729,20 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         file: ctx.rel,
         ...(callee.kinds ? { kinds: callee.kinds } : {}),
       };
-      // Java only: the call site's argument count, to pick the right overload.
-      const argCount = ctx.lang === "java" ? javaArgCount(node) : undefined;
+      // Overloading languages: the call site's argument count, to pick the right
+      // overload (see RawEdge.argCount).
+      const argCount =
+        ctx.lang === "java" ? javaArgCount(node) : ctx.lang === "swift" ? swiftArgCount(node) : undefined;
       if (argCount !== undefined) callEdge.argCount = argCount;
       // Swift: a bare lowercase call inside a type body may be an implicit-`self`
       // member call (`walk()` for `self.walk()`), syntactically indistinguishable
-      // from a free-function call. Emit a SECOND intent for the member reading,
-      // typed to the enclosing class: it resolves only through the owner-qualified
-      // method index and the class's in-repo ancestor chain (`clearLogs()` in a
-      // test subclass finds the base class's method) and drops otherwise, while
-      // the plain intent still resolves genuine free-function calls. This is
+      // from a free-function call — and Swift's own lookup is member-FIRST (inner
+      // scope wins). So the edge is emitted as the member reading, typed to the
+      // enclosing class — resolved through the owner-qualified method index and
+      // the class's in-repo ancestor chain (`clearLogs()` in a test subclass
+      // finds the base class's method) — with `implicitSelf` letting resolve.ts
+      // fall back to the free-function reading only when no member exists on the
+      // chain. One edge, both readings, language-order precedence. This is
       // deliberately NOT a bare-name kind widening: dogfooding on
       // swift-composable-architecture, a global unique-name match bound
       // `contains(element)` inside `extension Set` — a stdlib call — to an
@@ -730,17 +750,23 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       // callee: that is an initializer call (`Text("hi")`), which takes
       // resolve.ts's class/struct/enum fallback instead — extension nodes (kind
       // "module") can never false-match it.
-      if (
+      const swiftImplicitSelf =
         ctx.lang === "swift" &&
         !callee.viaMember &&
         !callee.kinds &&
         ctx.enclosingClass &&
-        !/^[A-Z]/.test(callee.name)
-      ) {
-        edges.push({ ...callEdge, viaMember: true, recvType: ctx.enclosingClass });
+        !/^[A-Z]/.test(callee.name);
+      if (swiftImplicitSelf) {
+        edges.push({
+          ...callEdge,
+          viaMember: true,
+          recvType: ctx.enclosingClass!,
+          implicitSelf: true,
+        });
+      } else {
+        const recvType = resolveRecvType(callee.receiver, ctx);
+        edges.push(recvType ? { ...callEdge, recvType } : callEdge);
       }
-      const recvType = resolveRecvType(callee.receiver, ctx);
-      edges.push(recvType ? { ...callEdge, recvType } : callEdge);
     }
   } else if (ctx.lang === "php" && node.type === "use_declaration") {
     // Trait composition inside a class body (`use HasFactory, Notifiable;`).
@@ -1784,7 +1810,13 @@ function describeSwift(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | n
       SWIFT_TYPE_KINDS.has(ctx.enclosingKind ?? "file")
         ? "method"
         : "function";
-    return { name, kind, headerEnd: headEnd("function_body"), hashNode: node };
+    return {
+      name,
+      kind,
+      headerEnd: headEnd("function_body"),
+      hashNode: node,
+      ...swiftArity(node),
+    };
   }
 
   if (node.type === "init_declaration") {
@@ -1792,7 +1824,13 @@ function describeSwift(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | n
     // the node under the enclosing type the same way Java's constructor_declaration
     // does. (A protocol's `init` requirement lands here too, owned by the protocol.)
     if (!ctx.enclosingClass) return null;
-    return { name: ctx.enclosingClass, kind: "method", headerEnd: headEnd("function_body"), hashNode: node };
+    return {
+      name: ctx.enclosingClass,
+      kind: "method",
+      headerEnd: headEnd("function_body"),
+      hashNode: node,
+      ...swiftArity(node),
+    };
   }
 
   if (node.type === "typealias_declaration") {
@@ -1835,6 +1873,34 @@ function kotlinExported(node: Parser.SyntaxNode): boolean {
   return !vis || vis.text === "public";
 }
 
+/** Declared parameter count for a Swift callable, for overload disambiguation
+ * (the same role Java's `arity`/`argCount` pair plays). `parameter` nodes are
+ * direct children of the declaration; a default value's `=` sits as a SIBLING
+ * token after its parameter, and a variadic `...` sits inside its parameter.
+ * `arity` is the REQUIRED minimum (parameters minus defaults) and `variadic`
+ * marks any default or variadic parameter, so `narrowByArity`'s at-least
+ * semantics keeps every overload a call of that shape could reach. */
+function swiftArity(node: Parser.SyntaxNode): { arity: number; variadic?: boolean } {
+  const params = node.children.filter((c) => c.type === "parameter");
+  const defaults = node.children.filter((c) => c.type === "=").length;
+  const hasVariadic = params.some((p) => p.children.some((c) => c.type === "..."));
+  const arity = Math.max(0, params.length - defaults);
+  return hasVariadic || defaults > 0 ? { arity, variadic: true } : { arity };
+}
+
+/** Argument count at a Swift call site: the `value_argument`s plus one for a
+ * trailing closure (`run(x) { … }` calls a two-parameter function). */
+function swiftArgCount(node: Parser.SyntaxNode): number | undefined {
+  const suffix = node.namedChildren.find((c) => c.type === "call_suffix");
+  if (!suffix) return undefined;
+  const args =
+    suffix.namedChildren
+      .find((c) => c.type === "value_arguments")
+      ?.namedChildren.filter((c) => c.type === "value_argument").length ?? 0;
+  const trailing = suffix.namedChildren.some((c) => c.type === "lambda_literal") ? 1 : 0;
+  return args + trailing;
+}
+
 /** Swift visibility: the default (`internal`) is module-wide, and a repo is
  * typically one module — so `public` / `open` / `package` / `internal` all count
  * as API surface, and only an explicit `private` / `fileprivate` hides a
@@ -1844,6 +1910,21 @@ function swiftExported(node: Parser.SyntaxNode): boolean {
   const mods = node.namedChildren.find((c) => c.type === "modifiers");
   const vis = mods?.namedChildren.find((c) => c.type === "visibility_modifier");
   return !vis || (vis.text !== "private" && vis.text !== "fileprivate");
+}
+
+/** The superclass a Swift class declaration names: its FIRST inheritance
+ * specifier — Swift's grammar requires the superclass to precede any protocol
+ * in the `:` list, so when a superclass exists it is always this entry. A
+ * class conforming only to protocols yields that protocol's name instead, but
+ * `super` is illegal in such a class, so no call site ever consults it. Null
+ * for a bare `class Foo` (and for an extension, whose declaration carries no
+ * heritage for the original type — `super` inside one stays unresolved). */
+function swiftSuperClassName(node: Parser.SyntaxNode): string | null {
+  const spec = node.namedChildren.find((c) => c.type === "inheritance_specifier");
+  const ids = spec?.namedChildren
+    .find((c) => c.type === "user_type")
+    ?.namedChildren.filter((c) => c.type === "type_identifier");
+  return ids?.length ? ids[ids.length - 1]!.text : null;
 }
 
 /** The receiver's base type name for a Go method, unwrapping a pointer receiver

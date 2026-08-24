@@ -21,16 +21,24 @@
   ambiguous and drop. `init` becomes a method named after its type (like a
   Java constructor); `func` is a method inside any type and a function
   elsewhere. Calls resolve via `call_expression` with `navigation_expression`
-  / `self` / `super` receivers; a bare lowercase call inside a type body may
-  be an implicit-`self` member call, so it emits a second intent typed to the
-  enclosing class — resolved only through the owner-qualified index and the
-  in-repo ancestor chain (a stdlib call like `contains` inside
-  `extension Set` drops instead of binding to an unrelated type's only
-  same-named method, a false positive dogfooding on
-  swift-composable-architecture caught); an initializer call
-  (`Animal(legs: 4)` — an ordinary call node, no `new`) falls back to
-  class/struct/enum targets once functions find nothing, Python's
-  constructor-fallback shape. The `:` inheritance clause yields `extends`
+  / `self` / `super` receivers. A bare lowercase call inside a type body is
+  ONE edge carrying both of its readings in Swift's own inner-scope-first
+  order: the member reading first (owner-qualified index + the in-repo
+  ancestor chain — a stdlib call like `contains` inside `extension Set`
+  drops instead of binding to an unrelated type's only same-named method, a
+  false positive dogfooding on swift-composable-architecture caught), then
+  the free-function reading only when no member exists on the chain — so a
+  name defined as both yields the member edge alone, as Swift dispatches it.
+  `super.method()` resolves against the declaration's own superclass (the
+  first `:` entry, which Swift's grammar puts before any protocol), climbing
+  past the current class's override. Overloads disambiguate by declared
+  arity vs call-site argument count (Java's exact mechanism — defaults and
+  variadics make the arity a minimum); an overload set arity can't split
+  (`save(Int)` vs `save(String)`) DROPS rather than taking the same-file
+  tiebreak, which would stamp whichever overload appears first `extracted`.
+  An initializer call (`Animal(legs: 4)` — an ordinary call node, no `new`)
+  falls back to class/struct/enum targets once functions find nothing,
+  Python's constructor-fallback shape. The `:` inheritance clause yields `extends`
   edges (bare names — Swift can't say syntactically which specifier is the
   superclass), `import` declarations yield module-path import edges, and
   visibility maps to `exported` as only `private`/`fileprivate` hidden —

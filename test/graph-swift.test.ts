@@ -127,15 +127,15 @@ func helper() {
   assert.equal(selfCall?.recvType, "Animal", "`self` resolves to the enclosing type");
   const superCall = calls.find((e) => e.name === "describe");
   assert.equal(superCall?.viaMember, true);
-  // A bare lowercase call in a type body emits BOTH readings: the plain
-  // free-function intent, and an implicit-self member intent typed to the
-  // enclosing class (resolve keeps whichever finds its target).
+  // A bare lowercase call in a type body is ONE edge carrying both readings:
+  // the member reading (typed to the enclosing class, tried first — Swift's
+  // inner-scope-first lookup) with `implicitSelf` marking the free-function
+  // fallback resolve.ts may take when no member exists on the owner chain.
   const helperCalls = calls.filter((e) => e.name === "helper");
-  assert.ok(helperCalls.some((e) => !e.viaMember), "plain free-function intent");
-  assert.ok(
-    helperCalls.some((e) => e.viaMember && e.recvType === "Animal"),
-    "implicit-self member intent, typed to the enclosing class",
-  );
+  assert.equal(helperCalls.length, 1, "one edge, not one per reading");
+  assert.equal(helperCalls[0]?.viaMember, true);
+  assert.equal(helperCalls[0]?.recvType, "Animal");
+  assert.equal(helperCalls[0]?.implicitSelf, true);
   const member = calls.find((e) => e.name === "walk");
   assert.equal(member?.viaMember, true);
 });
@@ -415,6 +415,86 @@ extension Set {
     !calls.some((c) => c.from === "hasAny"),
     "a stdlib call in an extension resolves to nothing, not to Syntax.contains",
   );
+});
+
+test("swift: a name that is both a member and a free function resolves member-first", async () => {
+  // Swift's lookup is inner-scope-first: inside A, `helper()` is A's method, not
+  // the global function — the graph must carry exactly that one edge, and a
+  // caller OUTSIDE the type must get the free function.
+  const graph = await buildSwift({
+    "A.swift": `
+func helper() {}
+
+class A {
+  func helper() {}
+  func go() { helper() }
+}
+
+func outside() { helper() }
+`,
+  });
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const goCalls = graph.edges.filter(
+    (e) => e.relation === "calls" && byId.get(e.source)?.name === "go",
+  );
+  assert.equal(goCalls.length, 1, "one edge from go, not one per reading");
+  assert.equal(byId.get(goCalls[0]!.target)?.kind, "method", "go calls the MEMBER helper");
+  const outsideCalls = graph.edges.filter(
+    (e) => e.relation === "calls" && byId.get(e.source)?.name === "outside",
+  );
+  assert.equal(byId.get(outsideCalls[0]?.target ?? "")?.kind, "function", "outside calls the free function");
+});
+
+test("swift: overloads — distinct arity resolves, equal arity drops", async () => {
+  const graph = await buildSwift({
+    "Store.swift": `
+class Store {
+  func save(_ n: Int) {}
+  func save(_ s: String) {}
+  func load() {}
+  func load(_ n: Int) {}
+}
+`,
+    "Main.swift": `
+func use(store: Store) {
+  store.save("x")
+  store.load(1)
+}
+`,
+  });
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const calls = graph.edges.filter(
+    (e) => e.relation === "calls" && byId.get(e.source)?.name === "use",
+  );
+  const saveTargets = calls.filter((e) => byId.get(e.target)?.name === "save");
+  assert.equal(saveTargets.length, 0, "equal-arity overloads drop instead of picking the first");
+  const loadTargets = calls.filter((e) => byId.get(e.target)?.name === "load");
+  assert.equal(loadTargets.length, 1, "distinct-arity overload resolves");
+  assert.equal(byId.get(loadTargets[0]!.target)?.arity, 1, "…to the one-parameter overload");
+});
+
+test("swift: super.method() resolves to the parent class's method", async () => {
+  const graph = await buildSwift({
+    "Base.swift": `
+class Base {
+  func ping() {}
+}
+`,
+    "Child.swift": `
+class Child: Base {
+  override func ping() { super.ping() }
+}
+`,
+  });
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const superCall = graph.edges.find(
+    (e) =>
+      e.relation === "calls" &&
+      byId.get(e.source)?.id.includes("Child") &&
+      byId.get(e.target)?.name === "ping",
+  );
+  assert.ok(superCall, "super call resolves");
+  assert.equal(byId.get(superCall!.target)?.owner, "Base", "…to the PARENT's ping, not the override");
 });
 
 test("swift: an ambiguous implicit-self widening drops rather than guesses", async () => {

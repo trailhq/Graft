@@ -207,12 +207,24 @@ export function resolveEdges(
         if (!e.recvType) continue;
         const hit = resolveTypedMember(e.recvType, e.name!, e.file, ownerMethod, classParents, classTraits, e.argCount);
         if (hit === "ambiguous") continue; // drop — never guess past an ambiguous owner
-        if (hit) add(e.source, hit.id, "calls", hit.confidence);
+        if (hit) {
+          add(e.source, hit.id, "calls", hit.confidence);
+          continue;
+        }
         // No owner-qualified match means the call is unresolved. A unique bare
         // method name is not evidence that this receiver has that method — a
         // name-fallback here was measured to HALVE call-edge precision (73%→37%
         // vs a compiler-grade oracle) for a 3x count inflation, i.e. noise. See #35.
-        continue;
+        //
+        // One carve-out, which is NOT that fallback: a Swift `implicitSelf` edge
+        // carries two readings of one bare call — member (tried above, in
+        // Swift's own inner-scope-first order) and free function. Zero members
+        // on the whole owner chain means the call was a free-function call after
+        // all, so it falls through to bare-name resolution; an ambiguous member
+        // set has already dropped it above, and a resolved member never reaches
+        // here — a name defined as both member and free function yields the
+        // member edge alone, exactly as Swift dispatches it.
+        if (!e.implicitSelf) continue;
       }
       // Every language's bare-name call is a free function, except R (Phase 4):
       // an untyped `obj$method()` there sets e.kinds to also allow a "method"
@@ -353,6 +365,12 @@ function resolveTypedMember(
           const c = candidates[0];
           return { id: c.id, confidence: c.path === file ? "extracted" : "inferred" };
         }
+        // Swift: several candidates surviving arity narrowing are a genuine
+        // overload set distinguished only by parameter TYPES (`save(Int)` vs
+        // `save(String)`), which this pass cannot read — the same-file tiebreak
+        // below would pick whichever overload appears first in the file and
+        // stamp it `extracted`, a confidently wrong edge. Drop instead.
+        if (SWIFT_EXT.test(file)) return "ambiguous";
         const sameFile = candidates.find((c) => c.path === file);
         if (sameFile) return { id: sameFile.id, confidence: "extracted" };
         return "ambiguous"; // several, none same-file — drop and stop
