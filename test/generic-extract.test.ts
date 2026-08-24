@@ -339,7 +339,7 @@ test("Dart file-level skeleton lists the API, not function-body locals (#134)", 
   );
 });
 
-// #197: Zig is registered in GENERIC_LANGS but had no tags.scm, so the walker
+// #198: Zig is registered in GENERIC_LANGS but had no tags.scm, so the walker
 // minted `const Point = struct` as a variable and emitted no call edges.
 const ZIG = `const Point = struct {
     x: i32,
@@ -366,7 +366,7 @@ test("genericLangOf routes .zig to the breadth tier", () => {
   assert.equal(genericLangOf("src/main.zig")?.name, "zig");
 });
 
-test("Zig fn/const struct/named test become symbols; call edges resolve; unnamed tests stay out (#197)", async () => {
+test("Zig fn/const struct/named test become symbols; call edges resolve; unnamed tests stay out (#198)", async () => {
   await warmGenericGrammars(["zig"]);
   assert.ok(isWarm("zig"), "zig grammar should warm");
   const { nodes, rawEdges } = extractGeneric("src/main.zig", ZIG, "zig");
