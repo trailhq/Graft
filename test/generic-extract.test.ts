@@ -36,6 +36,7 @@ fn helper() -> String {
 
 test("genericLangOf routes .rs to the breadth tier (and not depth-tier extensions)", () => {
   assert.equal(genericLangOf("src/main.rs")?.name, "rust");
+  assert.equal(genericLangOf("src/init.lua")?.name, "lua");
   assert.equal(genericLangOf("src/app.ts"), null); // depth tier owns .ts
   assert.equal(genericLangOf("README.md"), null);
 });
@@ -105,6 +106,13 @@ const SNIPPETS: Array<{ lang: string; file: string; src: string; defs: string[];
     lang: "clojure", file: "a.clj",
     src: `(ns my.core)\n\n(defn helper [] 1)\n\n(defn run [] (helper))\n`,
     defs: ["function:helper", "function:run", "module:my.core"], call: ["run", "helper"],
+  },
+  {
+    // Lua functions can be declarations, assigned expressions, or table fields;
+    // colon syntax defines and calls methods.
+    lang: "lua", file: "a.lua",
+    src: `local function helper()\n  return 1\nend\n\nlocal assigned = function()\n  return helper()\nend\n\nlocal handlers = { draw = function() return helper() end }\n\nfunction Widget:run()\n  return helper()\nend\n\nlocal function launch()\n  return Widget:run()\nend\n`,
+    defs: ["function:assigned", "function:draw", "function:helper", "function:launch", "method:run"], call: ["launch", "run"],
   },
 ];
 
