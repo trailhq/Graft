@@ -1259,3 +1259,97 @@ test("Java receivers: an unrecognised receiver shape resolves to nothing", async
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * Issue #161: a method inside an anonymous class body (`new Greeter() { … }`)
+ * used to take the enclosing type's `owner`, so `ownerMethod["App.greet"]` held
+ * both the real method and the anonymous override. `resolveTypedMember` then
+ * same-file first-wins tied to the anonymous impl, and `App.use → App.greet`
+ * vanished. Named nested classes already own their methods correctly — keep
+ * that as a control so this fix does not retarget lexical nesting.
+ *
+ * Shape mirrors PHP #144: mint `{anonymous}` and hang methods under it.
+ */
+const ANON_GREETER = `package com.acme;
+
+public interface Greeter {
+  String greet(String n);
+}
+`;
+
+const ANON_APP = `package com.acme;
+
+public final class App {
+
+  public Greeter make() {
+    return new Greeter() {
+      @Override public String greet(String n) { return "anon:" + n; }
+    };
+  }
+
+  public String use() {
+    App self = new App();
+    return self.greet("x");
+  }
+
+  public String greet(String n) { return "real:" + n; }
+
+  public static class Nested {
+    public String greet(String n) { return "nested:" + n; }
+  }
+}
+`;
+
+function anonOwnerFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), "graft-java-anon-"));
+  mkdirSync(join(dir, PKG), { recursive: true });
+  writeFileSync(join(dir, PKG, "Greeter.java"), ANON_GREETER);
+  writeFileSync(join(dir, PKG, "App.java"), ANON_APP);
+  return dir;
+}
+
+test("Java anonymous class: methods do not take the enclosing type's owner (#161)", async () => {
+  const dir = anonOwnerFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const file = `${PKG}/App.java`;
+
+    const anon = nodeById(graph, `${file}#App.make.{anonymous}`);
+    assert.equal(anon?.kind, "class", "anonymous body mints an {anonymous} class node");
+
+    const anonGreet = nodeById(graph, `${file}#App.make.{anonymous}.greet`);
+    assert.equal(anonGreet?.kind, "method");
+    assert.equal(anonGreet?.owner, "{anonymous}", "anonymous greet is owned by {anonymous}");
+
+    const real = nodeById(graph, `${file}#App.greet`);
+    assert.equal(real?.owner, "App", "real App.greet keeps owner App");
+
+    const nested = nodeById(graph, `${file}#App.Nested.greet`);
+    assert.equal(nested?.owner, "Nested", "named nested class owner is unchanged");
+
+    assert.ok(
+      graph.edges.some(
+        (e) =>
+          e.relation === "implements" &&
+          e.source === `${file}#App.make.{anonymous}` &&
+          e.target === `${PKG}/Greeter.java#Greeter`,
+      ),
+      "anonymous class should implement Greeter",
+    );
+
+    const useCalls = graph.edges.filter(
+      (e) => e.relation === "calls" && e.source === `${file}#App.use`,
+    );
+    assert.ok(
+      useCalls.some((e) => e.target === `${file}#App.greet`),
+      `App.use should call the real App.greet; got: ${useCalls.map((e) => e.target).join(", ")}`,
+    );
+    assert.ok(
+      !useCalls.some((e) => e.target === `${file}#App.make.{anonymous}.greet`),
+      "App.use must not resolve to the anonymous greet",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
