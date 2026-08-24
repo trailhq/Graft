@@ -339,7 +339,7 @@ test("Dart file-level skeleton lists the API, not function-body locals (#134)", 
   );
 });
 
-// #197: OCaml is registered in GENERIC_LANGS but had no tags.scm, so the walker
+// #198: OCaml is registered in GENERIC_LANGS but had no tags.scm, so the walker
 // minted `let helper x = …` as kind `variable` (`value_definition` matches
 // `(^|_)(val|…)`) and emitted no call edges.
 const OCAML = `let helper x = 1
@@ -360,7 +360,7 @@ test("genericLangOf routes .ml/.mli to the breadth tier", () => {
   assert.equal(genericLangOf("lib/example.mli")?.name, "ocaml");
 });
 
-test("OCaml let/let rec/module/type become symbols; call edges resolve; bare lets stay out (#197)", async () => {
+test("OCaml let/let rec/module/type become symbols; call edges resolve; bare lets stay out (#198)", async () => {
   await warmGenericGrammars(["ocaml"]);
   assert.ok(isWarm("ocaml"), "ocaml grammar should warm");
   const { nodes, rawEdges } = extractGeneric("lib/example.ml", OCAML, "ocaml");
