@@ -322,7 +322,7 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
   // childCtx, so a by-ref Set there would read as ordinary inherited context
   // when it's actually accidental shared mutable state across the whole walk.
   const minted = new Set<string>([rel]);
-  for (const child of root.namedChildren) walk(child, ctx, nodes, rawEdges, minted);
+  walkNamedChildren(root.namedChildren, ctx, nodes, rawEdges, minted);
   // nodes[0] is the file node; the rest are its symbols. Index the module-level
   // residual on the file node so a term outside every symbol still surfaces it.
   nodes[0].body_text = fileResidual(source, nodes.slice(1));
@@ -341,6 +341,113 @@ export function mintId(base: string, minted: Set<string>): string {
   while (minted.has(id)) id = `${base}~${k++}`;
   minted.add(id);
   return id;
+}
+
+/**
+ * tree-sitter-php 0.23.x cannot parse a `const` inside an enum body (#145). An
+ * array initializer collapses the whole `enum_declaration` into ERROR; the
+ * method is recovered as a sibling `function_definition`. 0.24.2 parses this
+ * natively but is ABI 15 and cannot load on Graft's tree-sitter 0.21.1.
+ *
+ * Bound: only an ERROR that already contains `enum_case` + `name` is treated as
+ * a collapsed enum. Only `const_declaration` / `function_definition` /
+ * `method_declaration` / ERROR siblings are absorbed, stopping at a `}` ERROR.
+ * Unknown ERROR nodes are still walked, never mapped to a type. Clean
+ * class/enum trees are `class_declaration` / `enum_declaration` and skip this.
+ */
+function phpCollapsedEnumName(node: Parser.SyntaxNode): string | null {
+  if (node.type !== "ERROR") return null;
+  if (!node.namedChildren.some((c) => c.type === "enum_case")) return null;
+  return node.namedChildren.find((c) => c.type === "name")?.text ?? null;
+}
+
+function phpCollapsedEnumHold(node: Parser.SyntaxNode): boolean {
+  return (
+    node.type === "const_declaration" ||
+    node.type === "function_definition" ||
+    node.type === "method_declaration" ||
+    node.type === "ERROR"
+  );
+}
+
+function phpCollapsedEnumClose(node: Parser.SyntaxNode): boolean {
+  return node.type === "ERROR" && node.text.trim() === "}";
+}
+
+function walkNamedChildren(
+  children: Parser.SyntaxNode[],
+  ctx: WalkCtx,
+  out: NodeV1[],
+  edges: RawEdge[],
+  minted: Set<string>,
+): void {
+  if (ctx.lang !== "php") {
+    for (const child of children) walk(child, ctx, out, edges, minted);
+    return;
+  }
+  for (let i = 0; i < children.length; ) {
+    const n = children[i]!;
+    const enumName = phpCollapsedEnumName(n);
+    if (enumName) {
+      const group: Parser.SyntaxNode[] = [n];
+      let j = i + 1;
+      while (j < children.length && phpCollapsedEnumHold(children[j]!)) {
+        const next = children[j]!;
+        group.push(next);
+        j++;
+        if (phpCollapsedEnumClose(next)) break;
+      }
+      emitPhpCollapsedEnum(enumName, n, group, ctx, out, edges, minted);
+      i = j;
+      continue;
+    }
+    walk(n, ctx, out, edges, minted);
+    i++;
+  }
+}
+
+function emitPhpCollapsedEnum(
+  name: string,
+  errorNode: Parser.SyntaxNode,
+  group: Parser.SyntaxNode[],
+  ctx: WalkCtx,
+  out: NodeV1[],
+  edges: RawEdge[],
+  minted: Set<string>,
+): void {
+  const last = group[group.length - 1]!;
+  const id = mintId(`${ctx.rel}#${[...ctx.scope, name].join(".")}`, minted);
+  const body = ctx.source.slice(errorNode.startIndex, last.endIndex);
+  out.push({
+    id,
+    name,
+    kind: "enum",
+    path: ctx.rel,
+    span: `L${errorNode.startPosition.row + 1}-L${last.endPosition.row + 1}`,
+    signature: `enum ${name}`,
+    exported: true,
+    origin: "ast",
+    body_hash: contentHash(body),
+    body_text: searchBody(body),
+    summary_state: "pending",
+    summary: null,
+    crux: null,
+  });
+  edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
+  const childCtx: WalkCtx = {
+    ...ctx,
+    scope: [...ctx.scope, name],
+    enclosingKind: "enum",
+    parentId: id,
+  };
+  for (const g of group) {
+    if (phpCollapsedEnumClose(g)) continue;
+    if (phpCollapsedEnumName(g)) {
+      walkNamedChildren(g.namedChildren, childCtx, out, edges, minted);
+      continue;
+    }
+    walk(g, childCtx, out, edges, minted);
+  }
 }
 
 function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEdge[], minted: Set<string>): void {
@@ -412,7 +519,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
           ? withoutShadowedImports(ctx.importedSymbols, node)
           : ctx.importedSymbols,
     };
-    for (const child of node.namedChildren) walk(child, childCtx, out, edges, minted);
+    walkNamedChildren(node.namedChildren, childCtx, out, edges, minted);
     return;
   }
 
@@ -464,6 +571,55 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         specifier: imported.specifier,
         file: ctx.rel,
       });
+    }
+  }
+
+  // Java anonymous class (`new Type() { … }`): tree-sitter-java has no
+  // `anonymous_class` node (unlike PHP) — the body is an optional `class_body`
+  // on `object_creation_expression`. Mint `{anonymous}` (mirroring PHP #144 /
+  // `{closure}`) so nested methods take that owner instead of the enclosing
+  // type's, which otherwise pollutes `ownerMethod` and steals real call edges
+  // (#161). The constructor call edge above still fires for `new Type()`.
+  if (ctx.lang === "java" && node.type === "object_creation_expression") {
+    const body = node.namedChildren.find((c) => c.type === "class_body");
+    if (body) {
+      const idPart = "{anonymous}";
+      const base = `${ctx.rel}#${[...ctx.scope, idPart].join(".")}`;
+      const id = mintId(base, minted);
+      out.push({
+        id,
+        name: "{anonymous}",
+        kind: "class",
+        path: ctx.rel,
+        span: `L${node.startPosition.row + 1}-L${node.endPosition.row + 1}`,
+        signature: clean(ctx.source.slice(node.startIndex, body.startIndex)),
+        exported: false,
+        origin: "ast",
+        body_hash: contentHash(node.text),
+        body_text: searchBody(node.text),
+        summary_state: "pending",
+        summary: null,
+        crux: null,
+      });
+      edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
+      // Single supertype from `new Type()`: emit `implements` so an interface
+      // target resolves (adapters are the common case; a class target drops
+      // under resolve's implements kind filter — drop-not-guess).
+      const superName = javaConstructedTypeName(node.childForFieldName("type"));
+      if (superName) {
+        edges.push({ source: id, relation: "implements", name: superName, file: ctx.rel });
+      }
+      const anonCtx: WalkCtx = {
+        ...ctx,
+        scope: [...ctx.scope, idPart],
+        enclosingKind: "class",
+        parentId: id,
+        enclosingClass: "{anonymous}",
+      };
+      for (const child of node.namedChildren) {
+        walk(child, child.type === "class_body" ? anonCtx : ctx, out, edges, minted);
+      }
+      return;
     }
   }
 
@@ -723,6 +879,12 @@ function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
     if (ctx.lang === "python" && mapped === "function" && ctx.enclosingKind === "class") {
       kind = "method";
     }
+    // tree-sitter-php 0.23.x recovers a collapsed enum method as function_definition
+    // at program scope; walkNamedChildren reparents it under the enum, and this
+    // promotion is what keeps the kind `method` rather than a leaked `function`.
+    if (ctx.lang === "php" && mapped === "function" && ctx.enclosingKind === "enum") {
+      kind = "method";
+    }
     const body = node.childForFieldName("body");
     return { name, kind, headerEnd: body ? body.startIndex : node.endIndex, hashNode: node };
   }
@@ -878,6 +1040,7 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
     // `superclass` holds `extends X`; `super_interfaces` holds `implements A, B`
     // (and, on an interface declaration, `extends A, B` — which tree-sitter-java
     // still spells `extends_interfaces`).
+    const typeParams = javaTypeParameterNames(node);
     for (const child of node.namedChildren) {
       const relation: Relation | null =
         child.type === "superclass"
@@ -886,8 +1049,16 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
             ? "implements"
             : null;
       if (!relation) continue;
-      for (const t of typeIdentifiersIn(child)) {
-        edges.push({ source: classId, relation, name: t, file: ctx.rel });
+      for (const entry of javaSupertypeEntries(child)) {
+        const name = javaSupertypeName(entry);
+        // Belt-and-braces. A type VARIABLE is never a supertype, and erasing the
+        // arguments already removes every case measured on gson and spring-petclinic
+        // (identical output with this filter removed) — Java cannot extend or implement
+        // a type variable, so a surviving `T` would have to come from a shape neither
+        // repo contains. Kept because a wrong supertype is not a cosmetic edge: it
+        // feeds `classParents` and from there call resolution.
+        if (!name || typeParams.has(name)) continue;
+        edges.push({ source: classId, relation, name, file: ctx.rel });
       }
     }
     return edges;
@@ -934,15 +1105,54 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
   return edges;
 }
 
-/** Every `type_identifier` under a heritage clause, so `implements A, B<C>` yields
- * each named type rather than the clause's raw text. */
-function typeIdentifiersIn(node: Parser.SyntaxNode): string[] {
-  const out: string[] = [];
+/**
+ * The supertypes a heritage clause names, one node each — NOT every `type_identifier`
+ * beneath it.
+ *
+ * `superclass` wraps a single type; `super_interfaces`/`extends_interfaces` wrap a
+ * `type_list` of them. Descending blindly instead walked into `type_arguments`, so
+ * `implements Comparable<Item>` reported `Item` as a supertype too.
+ */
+function javaSupertypeEntries(clause: Parser.SyntaxNode): Parser.SyntaxNode[] {
+  const list = clause.namedChildren.find((c) => c.type === "type_list");
+  return list ? [...list.namedChildren] : [...clause.namedChildren];
+}
+
+/**
+ * What a supertype entry is CALLED, or null when this pass cannot say.
+ *
+ * Type arguments are erased, because they are not part of the supertype's identity:
+ *
+ *     Base           |  Base<Item>          -> Base
+ *
+ * A qualified name is kept WHOLE rather than reduced to its final segment:
+ *
+ *     Outer.Inner    |  Outer.Inner<K>      -> Outer.Inner
+ *
+ * Heritage keeps an unresolved base as the edge target by design ("usually an
+ * external/imported type — keep the name"), so the full string is both truthful and
+ * unable to false-match a node id, where a bare `Inner` could collide with an
+ * unrelated in-repo type. That differs from construction (#103), which drops a
+ * qualified name instead — construction has no keep-the-name contract to fall back on.
+ */
+function javaSupertypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "generic_type") return javaSupertypeName(node.namedChildren[0]);
+  if (node.type === "scoped_type_identifier") return node.text;
+  return node.type === "type_identifier" ? node.text : null;
+}
+
+/** The names a declaration binds as its own type parameters (`class C<T, U>` → T, U),
+ * so they can never be mistaken for supertypes. */
+function javaTypeParameterNames(decl: Parser.SyntaxNode): ReadonlySet<string> {
+  const params = decl.childForFieldName("type_parameters");
+  if (!params) return new Set();
+  const out = new Set<string>();
   const visit = (n: Parser.SyntaxNode): void => {
-    if (n.type === "type_identifier") out.push(n.text);
+    if (n.type === "type_identifier") out.add(n.text);
     for (const c of n.namedChildren) visit(c);
   };
-  visit(node);
+  visit(params);
   return out;
 }
 

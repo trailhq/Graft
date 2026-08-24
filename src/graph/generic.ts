@@ -46,7 +46,6 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "c", exts: [".c", ".h"], wasm: "c" },
   { name: "cpp", exts: [".cpp", ".cc", ".cxx", ".hpp", ".hh"], wasm: "cpp" },
   { name: "ruby", exts: [".rb"], wasm: "ruby" },
-  { name: "php", exts: [".php"], wasm: "php" },
   { name: "c_sharp", exts: [".cs"], wasm: "c_sharp" },
   // These ship a tags.scm (calls + symbols); ocaml/zig have none and use the
   // node-kind walker fallback (symbols only) — still one row, zero query.
@@ -255,7 +254,7 @@ export function extractGeneric(rel: string, source: string, langName: string): E
   };
 
   if (entry.query) {
-    tagsExtract(entry.query, tree.rootNode as TsNode, rel, mkDef, defs, rawEdges);
+    tagsExtract(entry.query, tree.rootNode as TsNode, rel, mkDef, defs, rawEdges, langName);
   } else {
     walkExtract(tree.rootNode as TsNode, mkDef); // no tags.scm → symbols only
   }
@@ -366,6 +365,7 @@ function tagsExtract(
   mkDef: (name: string, kind: Kind, whole: TsNode) => void,
   defs: Def[],
   rawEdges: RawEdge[],
+  langName: string,
 ): void {
   const q = query as { matches(n: unknown): Array<{ captures: Array<{ name: string; node: TsNode }> }> };
   const matches = q.matches(root);
@@ -381,7 +381,7 @@ function tagsExtract(
     const defKey = Object.keys(cap).find((k) => k.startsWith("definition."));
     if (defKey && cap.name) {
       defNameAt.add(cap.name.startIndex);
-      mkDef(cap.name.text, KIND[defKey.slice("definition.".length)] ?? "function", defScope(cap[defKey]));
+      mkDef(cap.name.text, KIND[defKey.slice("definition.".length)] ?? "function", defScope(cap[defKey], langName));
     }
     if (("reference.call" in cap || "reference.send" in cap) && cap.name)
       calls.push({ name: cap.name.text, at: cap.name.startIndex });
@@ -488,8 +488,38 @@ export interface TsNode {
 // attributed to the function. Expand up to the outermost enclosing
 // declaration/definition node so a def's span covers its body.
 const DEF_CONTAINER = /(definition|declaration|specifier|_item)$/;
-function defScope(node: TsNode): TsNode {
+function nextNamedSibling(n: TsNode): TsNode | null {
+  const tagged = n as TsNode & { nextNamedSibling?: TsNode | null };
+  if ("nextNamedSibling" in tagged) return tagged.nextNamedSibling ?? null;
+  const p = n.parent;
+  if (!p?.namedChild) return null;
+  const count = p.namedChildCount ?? 0;
+  for (let i = 0; i < count - 1; i++) {
+    const c = p.namedChild(i);
+    if (c && c.startIndex === n.startIndex && c.endIndex === n.endIndex) return p.namedChild(i + 1);
+  }
+  return null;
+}
+function defScope(node: TsNode, langName?: string): TsNode {
   let n = node;
   while (n.parent && DEF_CONTAINER.test(n.parent.type)) n = n.parent;
+  // Dart's grammar leaves `function_signature` / `method_signature` as a sibling
+  // of `function_body` (no wrapping function_definition). Expand so a def's span
+  // covers its body and calls inside it attribute to the function, not the file
+  // or enclosing class. Gated on Dart so other breadth-tier languages are untouched.
+  if (langName === "dart") {
+    const body = nextNamedSibling(n);
+    if (body?.type === "function_body") {
+      return {
+        type: n.type,
+        text: n.text,
+        startIndex: n.startIndex,
+        endIndex: body.endIndex,
+        startPosition: n.startPosition,
+        endPosition: body.endPosition,
+        parent: n.parent,
+      };
+    }
+  }
   return n;
 }

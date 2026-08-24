@@ -26,6 +26,7 @@ class Widget extends Base implements Runnable
 
     public function run(): int
     {
+        $this->log();
         return $this->helper();
     }
 
@@ -42,7 +43,10 @@ class Widget extends Base implements Runnable
 
 interface Runnable {}
 
-trait Loggable {}
+trait Loggable
+{
+    protected function log(): void {}
+}
 
 enum Color: string
 {
@@ -138,6 +142,14 @@ test("PHP extraction: call, extends, and implements edges", async () => {
         (e) => e.relation === "implements" && e.source === "app.php#Widget" && e.target === "app.php#Runnable",
       ),
       "Widget should have a resolved implements edge to Runnable",
+    );
+
+    // `$this->log()` resolves to the used trait's method (trait-use → implements edge)
+    assert.ok(
+      graph.edges.some(
+        (e) => e.relation === "calls" && e.source === "app.php#Widget.run" && e.target === "app.php#Loggable.log",
+      ),
+      "run should have a resolved calls edge to Loggable.log via trait use",
     );
 
     // `$this->helper()` resolves to the receiver method (self → enclosing class)
@@ -259,6 +271,103 @@ test("PHP closures: `graft check` stays fresh after build (no name drift)", asyn
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// #145: tree-sitter-php 0.23.x cannot parse `const` inside an enum body. An
+// array value collapses the whole `enum_declaration` into ERROR and recovers
+// the method as a file-scope `function_definition`. Scalar const / class const
+// must keep working — those trees already have a real type node.
+const ENUM_ARRAY_CONST_PHP = `<?php
+
+enum Foo: string
+{
+    case A = 'a';
+    case B = 'b';
+
+    private const MAP = [
+        'a' => 'Alpha',
+        'b' => 'Beta',
+    ];
+
+    public static function nameFor(string $k): ?string
+    {
+        return self::MAP[$k] ?? null;
+    }
+}
+`;
+
+const ENUM_SCALAR_CONST_PHP = `<?php
+
+enum Foo: string
+{
+    case A = 'a';
+
+    private const LABEL = 'x';
+
+    public static function nameFor(string $k): ?string
+    {
+        return self::LABEL;
+    }
+}
+`;
+
+const CLASS_ARRAY_CONST_PHP = `<?php
+
+class Foo
+{
+    private const MAP = [
+        'a' => 'Alpha',
+        'b' => 'Beta',
+    ];
+
+    public static function nameFor(string $k): ?string
+    {
+        return self::MAP[$k] ?? null;
+    }
+}
+`;
+
+function symbolIds(nodes: NodeV1[]): string[] {
+  return nodes.filter((n) => n.kind !== "file").map((n) => `${n.kind}:${n.id}`);
+}
+
+test("PHP enum with array const keeps enum:Foo and method:Foo.nameFor (#145)", () => {
+  const { nodes } = extractFile("e.php", ENUM_ARRAY_CONST_PHP, "php");
+  const ids = symbolIds(nodes);
+  assert.equal(nodes.find((n) => n.id === "e.php#Foo")?.kind, "enum", `expected enum:Foo, got: ${ids.join(", ")}`);
+  const nameFor = nodes.find((n) => n.id === "e.php#Foo.nameFor");
+  assert.equal(nameFor?.kind, "method", `expected method:Foo.nameFor, got: ${ids.join(", ")}`);
+  assert.equal(nameFor?.name, "nameFor");
+  assert.ok(
+    !nodes.some((n) => n.kind === "function" && n.name === "nameFor"),
+    `nameFor must not leak as a top-level function, got: ${ids.join(", ")}`,
+  );
+});
+
+test("PHP enum with scalar const still emits enum + qualified method (#145 control)", () => {
+  const { nodes } = extractFile("e.php", ENUM_SCALAR_CONST_PHP, "php");
+  const ids = symbolIds(nodes);
+  assert.equal(nodes.find((n) => n.id === "e.php#Foo")?.kind, "enum", `expected enum:Foo, got: ${ids.join(", ")}`);
+  assert.equal(nodes.find((n) => n.id === "e.php#Foo.nameFor")?.kind, "method", `expected method:Foo.nameFor, got: ${ids.join(", ")}`);
+  assert.ok(!nodes.some((n) => n.kind === "function" && n.name === "nameFor"), `got: ${ids.join(", ")}`);
+});
+
+test("PHP class with array const is unchanged (#145 control)", () => {
+  const { nodes } = extractFile("e.php", CLASS_ARRAY_CONST_PHP, "php");
+  const ids = symbolIds(nodes);
+  assert.equal(nodes.find((n) => n.id === "e.php#Foo")?.kind, "class", `expected class:Foo, got: ${ids.join(", ")}`);
+  assert.equal(nodes.find((n) => n.id === "e.php#Foo.nameFor")?.kind, "method", `expected method:Foo.nameFor, got: ${ids.join(", ")}`);
+  assert.ok(!nodes.some((n) => n.kind === "function" && n.name === "nameFor"), `got: ${ids.join(", ")}`);
+});
+
+test("PHP enum array-const recovery does not swallow a following top-level function (#145)", () => {
+  const source = `${ENUM_ARRAY_CONST_PHP.trimEnd()}\n\nfunction topLevel(): int\n{\n    return 1;\n}\n`;
+  const { nodes } = extractFile("e.php", source, "php");
+  const ids = symbolIds(nodes);
+  assert.equal(nodes.find((n) => n.id === "e.php#Foo")?.kind, "enum", `got: ${ids.join(", ")}`);
+  assert.equal(nodes.find((n) => n.id === "e.php#Foo.nameFor")?.kind, "method", `got: ${ids.join(", ")}`);
+  assert.equal(nodes.find((n) => n.id === "e.php#topLevel")?.kind, "function", `got: ${ids.join(", ")}`);
+  assert.ok(!nodes.some((n) => n.id === "e.php#Foo.topLevel"), `topLevel must stay file-scope, got: ${ids.join(", ")}`);
 });
 
 test("PHP extraction: closures become nodes and own the calls inside them", async () => {

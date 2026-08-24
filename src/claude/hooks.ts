@@ -8,6 +8,7 @@ import { patchStats, readStats, acquireLock, readSession, writeSession } from '.
 import { graftCliPath, claudeScriptPath } from './paths.js';
 import { runUpkeep } from '../upkeep-run.js';
 import { runningVersion } from '../upkeep.js';
+import { flushClosedSessions } from '../telemetry/sessions.js';
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
@@ -223,6 +224,9 @@ export async function main(event: string): Promise<void> {
     // background:false — a hook must never touch the network; the CLI and the MCP
     // server fill that cache, this only reads it.
     const upkeep = runUpkeep(dir, runningVersion(), { background: false }).lines;
+    // Roll up any session that ended since we were last here. Queue-only — the
+    // hook still touches no network; the CLI or the MCP server sends it later.
+    flushClosedSessions(dir);
     try {
       const idx = readFileSync(join(dir, 'graft', 'INDEX.md'), 'utf8');
       const banner = staleBanner(indexFreshness(dir)) ?? undefined;
