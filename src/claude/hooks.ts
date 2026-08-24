@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { readWiring } from './stats.js';
 import { formatBlastRadius, relevantRetrieval, formatOrientation } from './format.js';
 import { indexFreshness, staleBanner } from '../context/check.js';
-import { patchStats, readStats, acquireLock, readSession, writeSession } from './state.js';
+import { patchStats, readStats, acquireLock, readSession, writeSession, resolveContextDir } from './state.js';
 import { graftCliPath, claudeScriptPath } from './paths.js';
 import { runUpkeep } from '../upkeep-run.js';
 import { runningVersion } from '../upkeep.js';
@@ -116,6 +116,18 @@ function installedHookTimeout(dir: string, event: string): number | null {
   return smallest;
 }
 
+/**
+ * Append `--dir <contextDir>` for the hooks' own `graft ask`/`graft check`
+ * children — the one place in this file that spawns the CLI itself rather
+ * than reading `graft/` off disk (which already resolves through
+ * `resolveContextDir` inside `util/state.ts` and `claude/stats.ts`). A no-op
+ * when `GRAFT_DIR` isn't set, so an unconfigured repo's spawned CLI sees
+ * byte-identical argv to before this existed.
+ */
+function withContextDirArg(dir: string, args: string[]): string[] {
+  return process.env.GRAFT_DIR ? [...args, '--dir', resolveContextDir(dir)] : args;
+}
+
 function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_MS): any | null {
   try {
     // GRAFT_TEST_CLI is a test seam (mirrors GRAFT_TEST_STDIN/GRAFT_TEST_SYNC_RUN) so
@@ -136,7 +148,7 @@ function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_
   }
 }
 function checkStaleCount(dir: string): number {
-  const r = graftJson(dir, ['check', '.', '--json']);
+  const r = graftJson(dir, withContextDirArg(dir, ['check', '.', '--json']));
   const g = r?.graph ?? {};
   return (g.changed?.length ?? 0) + (g.added?.length ?? 0) + (g.removed?.length ?? 0);
 }
@@ -265,7 +277,7 @@ export async function main(event: string): Promise<void> {
     // hook still touches no network; the CLI or the MCP server sends it later.
     flushClosedSessions(dir);
     try {
-      const idx = readFileSync(join(dir, 'graft', 'INDEX.md'), 'utf8');
+      const idx = readFileSync(join(resolveContextDir(dir), 'INDEX.md'), 'utf8');
       const banner = staleBanner(indexFreshness(dir)) ?? undefined;
       const orientation = formatOrientation(idx, undefined, banner);
       emit('SessionStart', upkeep.length ? `${upkeep.join('\n')}\n\n${orientation}` : orientation);
@@ -293,7 +305,7 @@ export async function main(event: string): Promise<void> {
     // pulls spans itself via `graft ask --source` when a pointer looks right.
     // relevantRetrieval then drops the pack entirely when the prompt barely
     // overlaps the top hit or when every hit was already injected this session.
-    const askArgs = ['ask', prompt, '.', '--json', '-n', '3'];
+    const askArgs = withContextDirArg(dir, ['ask', prompt, '.', '--json', '-n', '3']);
     // "You're working in backend/, weight it": only fires on a multi-scope
     // repo whose lastFile resolves cleanly to one scope — see lastFileScopeHint.
     const scopeHint = lastFileScopeHint(dir, readStats(dir)?.lastFile);

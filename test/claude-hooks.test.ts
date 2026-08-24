@@ -7,7 +7,7 @@ import { underGraft, main, lastFileScopeHint, promptAskTimeout } from '../src/cl
 import { readStats, readSession } from '../src/claude/state.js';
 import { runSync } from '../src/claude/sync-run.js';
 import { savingsLine } from '../src/context/savings.js';
-import { writeStats, emptyStats, acquireLock } from '../src/claude/state.js';
+import { writeStats, emptyStats, acquireLock, resolveContextDir } from '../src/claude/state.js';
 
 test('underGraft detects edits inside graft/', () => {
   assert.equal(underGraft('/repo', '/repo/graft/x.md'), true);
@@ -95,6 +95,31 @@ test('runSync clears dirty/syncing, recomputes stats, releases lock', () => {
   assert.equal(s.readyCount, 1);
   assert.ok(s.syncedAt);
   assert.equal(acquireLock(d), true, 'lock released, so reacquire succeeds');
+});
+
+test("runSync's default build passes --dir <resolved> to graft build when GRAFT_DIR is set", () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-sync-dir-'));
+  mkdirSync(join(d, 'elsewhere', '.graph'), { recursive: true });
+  const argsFile = join(d, 'args-seen.json');
+  const stub = join(d, 'build-stub.cjs');
+  writeFileSync(
+    stub,
+    `const fs = require('fs');\n` +
+      `fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));\n` +
+      `fs.writeFileSync(${JSON.stringify(join(d, 'elsewhere', '.graph', 'wiring.json'))}, JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));\n`,
+  );
+  process.env.GRAFT_TEST_CLI = stub;
+  process.env.GRAFT_DIR = 'elsewhere';
+  try {
+    runSync(d); // exercises the real (non-injected) build path
+    const argsSeen: string[] = JSON.parse(readFileSync(argsFile, 'utf8'));
+    const dirIdx = argsSeen.indexOf('--dir');
+    assert.ok(dirIdx !== -1, 'the build call carries --dir when GRAFT_DIR is set');
+    assert.equal(argsSeen[dirIdx + 1], resolveContextDir(d));
+  } finally {
+    delete process.env.GRAFT_TEST_CLI;
+    delete process.env.GRAFT_DIR;
+  }
 });
 
 test('runSync clears syncing even if build throws (money-safe failure)', () => {
@@ -518,4 +543,104 @@ test('promptAskTimeout reads a user-level hook when the repo declares none', () 
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previous;
   }
+});
+
+// ── GRAFT_DIR: the hooks' own `graft ask`/`graft check` children, and the
+// SessionStart INDEX.md read, must land on the same relocated context dir
+// that readWiring/readStats/patchStats/acquireLock/session state already
+// resolve through resolveContextDir. ──────────────────────────────────────
+
+test('prompt hook passes --dir <resolved> to graft ask when GRAFT_DIR is set', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-prompt-dir-'));
+  mkdirSync(join(d, 'elsewhere', '.graph'), { recursive: true });
+  writeFileSync(join(d, 'elsewhere', '.graph', 'wiring.json'),
+    JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));
+  const { stub, argsFile } = writeAskArgsStub(d);
+  process.env.CLAUDE_PROJECT_DIR = d;
+  process.env.GRAFT_TEST_CLI = stub;
+  process.env.GRAFT_DIR = 'elsewhere';
+  try {
+    await runWithStdin(
+      JSON.stringify({ session_id: 'p-dir', prompt: 'how does the relocated graph get queried' }),
+      () => main('prompt'),
+    );
+    const argsSeen: string[] = JSON.parse(readFileSync(argsFile, 'utf8'));
+    const dirIdx = argsSeen.indexOf('--dir');
+    assert.ok(dirIdx !== -1, 'the ask call carries --dir when GRAFT_DIR is set');
+    assert.equal(argsSeen[dirIdx + 1], resolveContextDir(d));
+  } finally {
+    delete process.env.GRAFT_TEST_CLI;
+    delete process.env.CLAUDE_PROJECT_DIR;
+    delete process.env.GRAFT_DIR;
+  }
+});
+
+test('prompt hook omits --dir when GRAFT_DIR is unset (byte-identical argv to before)', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-prompt-dir-'));
+  mkdirSync(join(d, 'graft', '.graph'), { recursive: true });
+  writeFileSync(join(d, 'graft', '.graph', 'wiring.json'),
+    JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));
+  const { stub, argsFile } = writeAskArgsStub(d);
+  process.env.CLAUDE_PROJECT_DIR = d;
+  process.env.GRAFT_TEST_CLI = stub;
+  try {
+    await runWithStdin(
+      JSON.stringify({ session_id: 'p-nodir', prompt: 'how does the default graph get queried' }),
+      () => main('prompt'),
+    );
+    const argsSeen: string[] = JSON.parse(readFileSync(argsFile, 'utf8'));
+    assert.equal(argsSeen.indexOf('--dir'), -1, 'unconfigured repo: no --dir added');
+  } finally {
+    delete process.env.GRAFT_TEST_CLI;
+    delete process.env.CLAUDE_PROJECT_DIR;
+  }
+});
+
+test('post-edit passes --dir <resolved> to graft check when GRAFT_DIR is set', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-postedit-dir-'));
+  mkdirSync(join(d, 'elsewhere', '.graph'), { recursive: true });
+  writeFileSync(join(d, 'elsewhere', '.graph', 'wiring.json'),
+    JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));
+  const stub = join(d, 'check-stub.cjs');
+  const argsFile = join(d, 'args-seen.json');
+  writeFileSync(
+    stub,
+    `const fs = require('fs');\n` +
+      `fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));\n` +
+      `process.stdout.write(JSON.stringify({ graph: { changed: [], added: [], removed: [] } }));\n`,
+  );
+  process.env.CLAUDE_PROJECT_DIR = d;
+  process.env.GRAFT_TEST_CLI = stub;
+  process.env.GRAFT_DIR = 'elsewhere';
+  try {
+    const stdin = JSON.stringify({ tool_input: { file_path: join(d, 'src', 'auth.ts') } });
+    await runWithStdin(stdin, () => main('post-edit'));
+    const argsSeen: string[] = JSON.parse(readFileSync(argsFile, 'utf8'));
+    const dirIdx = argsSeen.indexOf('--dir');
+    assert.ok(dirIdx !== -1, 'the check call carries --dir when GRAFT_DIR is set');
+    assert.equal(argsSeen[dirIdx + 1], resolveContextDir(d));
+  } finally {
+    delete process.env.GRAFT_TEST_CLI;
+    delete process.env.CLAUDE_PROJECT_DIR;
+    delete process.env.GRAFT_DIR;
+  }
+});
+
+test('session-start reads INDEX.md from a GRAFT_DIR-relocated context dir', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-session-start-dir-'));
+  mkdirSync(join(d, 'elsewhere'), { recursive: true });
+  writeFileSync(join(d, 'elsewhere', 'INDEX.md'), '# repo map (relocated)\n');
+  process.env.CLAUDE_PROJECT_DIR = d;
+  process.env.GRAFT_DIR = 'elsewhere';
+  const chunks: string[] = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  (process.stdout as any).write = (s: any) => { chunks.push(String(s)); return true; };
+  try {
+    await runWithStdin('{}', () => main('session-start'));
+  } finally {
+    (process.stdout as any).write = orig;
+    delete process.env.CLAUDE_PROJECT_DIR;
+    delete process.env.GRAFT_DIR;
+  }
+  assert.match(chunks.join(''), /repo map \(relocated\)/, 'orientation was built from the relocated INDEX.md');
 });
