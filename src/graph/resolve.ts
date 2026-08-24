@@ -185,6 +185,16 @@ export function resolveEdges(
         const refKinds: Kind[] = ["class", "interface", "trait", "enum"];
         const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
         if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
+      } else if (e.file.endsWith(".java") && byId.get(e.source)?.origin === "ast") {
+        // Java annotation without a specifier (same-file or globally unique
+        // `@interface`). Annotation types are `interface` kind — a class of the
+        // same name is not a match, so `@Entity` cannot collapse onto an in-repo
+        // `class Entity` (#103). Unresolved targets keep the bare name, matching
+        // heritage, rather than dropping the way PHP attributes do.
+        const refKinds: Kind[] = ["interface"];
+        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
+        if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
+        else add(e.source, e.name, "references", "inferred");
       } else if (byId.get(e.source)?.origin === "generic") {
         // Breadth tier: a bare-name structural reference (extends / implements /
         // object-creation / module alias) the grammar marked but cannot type. Resolve

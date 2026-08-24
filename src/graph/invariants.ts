@@ -8,8 +8,9 @@
  *   - edge relations and confidences are in the allowed sets
  *   - every edge source is a real node
  *   - every edge target is a real node, EXCEPT the relations that deliberately keep
- *     an unresolved external string (an import specifier, or a bare heritage name for
- *     an out-of-repo supertype) — those are a feature of "drop rather than guess",
+ *     an unresolved external string (an import specifier, a bare heritage name for
+ *     an out-of-repo supertype, or a Java annotation type with no in-repo
+ *     `@interface`) — those are a feature of "drop rather than guess",
  *     not a dangling edge.
  *
  * Self-loop `calls` are NOT a violation: direct recursion is a real edge a function
@@ -33,9 +34,10 @@ const CONFIDENCE = new Set<string>([
   "lsp_resolved", "lsp_dispatch", "extracted", "inferred",
 ]);
 // Relations whose target may be a deliberately-unresolved external string rather
-// than an in-repo node id: an import's module specifier, or a heritage clause naming
-// a supertype defined outside the repo (or a generic type parameter).
-const TARGET_MAY_BE_EXTERNAL = new Set<string>(["imports", "extends", "implements"]);
+// than an in-repo node id: an import's module specifier, a heritage clause naming
+// a supertype defined outside the repo (or a generic type parameter), or a Java
+// annotation whose type is not declared in-repo.
+const TARGET_MAY_BE_EXTERNAL = new Set<string>(["imports", "extends", "implements", "references"]);
 
 export interface InvariantResult {
   /** One human-readable line per violation; empty when the graph is well-formed. */

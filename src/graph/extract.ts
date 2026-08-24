@@ -583,6 +583,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     if (desc.kind === "class" || javaTypeDecl || kotlinTypeDecl)
       edges.push(...heritageEdges(node, id, ctx));
     if (ctx.lang === "php") edges.push(...phpAttributeReferenceEdges(node, id, ctx));
+    if (ctx.lang === "java") edges.push(...javaAnnotationReferenceEdges(node, id, ctx));
 
     const enclosingClass =
       desc.kind === "class" || javaTypeDecl || kotlinTypeDecl
@@ -894,6 +895,36 @@ function phpAttributeClassRef(
   const imported = ctx.importedSymbols.get(bare);
   if (imported) return { name: imported.name, specifier: imported.specifier };
   return { name: bare };
+}
+
+/** Java annotations on a definition → `references` edges to the annotation type. */
+function javaAnnotationReferenceEdges(node: Parser.SyntaxNode, sourceId: string, ctx: WalkCtx): RawEdge[] {
+  const edges: RawEdge[] = [];
+  const mods = node.namedChildren.find((c) => c.type === "modifiers");
+  if (!mods) return edges;
+  for (const child of mods.namedChildren) {
+    if (child.type !== "marker_annotation" && child.type !== "annotation") continue;
+    const name = javaAnnotationTypeName(child);
+    if (name) {
+      edges.push({
+        source: sourceId,
+        relation: "references",
+        name,
+        file: ctx.rel,
+      });
+    }
+  }
+  return edges;
+}
+
+/** The type named by `@Foo` / `@a.b.Foo(...)`. Arguments are ignored (issue #89).
+ * A scoped name is kept whole, matching heritage: a bare last segment would
+ * false-match an unrelated in-repo type (#103). */
+function javaAnnotationTypeName(anno: Parser.SyntaxNode): string | null {
+  const nameNode = anno.childForFieldName("name");
+  if (!nameNode) return null;
+  if (nameNode.type === "identifier" || nameNode.type === "scoped_identifier") return nameNode.text;
+  return null;
 }
 
 function collectTsImportBindings(
