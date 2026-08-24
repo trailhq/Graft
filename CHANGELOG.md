@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Generated agent instructions work without a global `graft` install.**
+  `graft init` never puts `graft` on PATH, but AGENTS.md / GEMINI.md / SKILL.md
+  told agents to run bare `graft ask`. They now say to use
+  `npx -y @nanonets/graft` (or `bunx` / `pnpm dlx` / `yarn dlx`) when the
+  binary is missing.
+
 ## 0.13.0
 
 ### Added
