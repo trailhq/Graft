@@ -62,7 +62,26 @@ export interface PickerRow {
   summary: string;
   /** True when selecting this host writes outside the repo. */
   hasGlobal: boolean;
+  /** Display name. Differs from the id only for setting rows, whose id is an
+   *  internal marker the user should never see. */
+  label: string;
+  /** `host` rows wire an agent; `setting` rows are choices that write no files.
+   *  They render below a rule, and `a` (toggle all) leaves them alone — that key
+   *  means "every agent", not "flip my privacy choice too". */
+  kind: 'host' | 'setting';
 }
+
+/**
+ * The id of the telemetry consent row.
+ *
+ * The picker is where a user is already deciding what graft may touch, which
+ * makes it the honest place to also ask whether they mind anonymous usage stats
+ * — the same move munder-difflin makes with a pre-checked box in onboarding, and
+ * the reason this is a disclosed default rather than a silent one. It is only
+ * offered when telemetry could actually run: showing it in a fork, in CI, or
+ * under DO_NOT_TRACK would be theatre.
+ */
+export const TELEMETRY_ROW_ID = '__telemetry';
 
 export interface PickerState {
   rows: PickerRow[];
@@ -72,20 +91,39 @@ export interface PickerState {
   aborted: boolean;
 }
 
-/** Claude Code starts checked — it's the deep integration — everything else off. */
-export function initialPickerState(plan: HostPlan[], repo: string, home: string): PickerState {
-  return {
-    rows: plan.map((p) => ({
-      id: p.id,
-      detected: p.detected,
-      summary: describeWrites(p.writes, repo, home),
-      hasGlobal: p.writes.some((w) => w.scope === 'global'),
-    })),
-    cursor: 0,
-    checked: new Set(plan.some((p) => p.id === 'claude') ? ['claude'] : []),
-    done: false,
-    aborted: false,
-  };
+/**
+ * Claude Code starts checked — it's the deep integration — everything else off.
+ *
+ * `offerTelemetry` appends the consent row, checked. Default false so every
+ * existing caller (and every test) sees exactly the host rows it always did.
+ */
+export function initialPickerState(
+  plan: HostPlan[],
+  repo: string,
+  home: string,
+  opts: { offerTelemetry?: boolean } = {},
+): PickerState {
+  const rows: PickerRow[] = plan.map((p) => ({
+    id: p.id,
+    label: p.id,
+    kind: 'host' as const,
+    detected: p.detected,
+    summary: describeWrites(p.writes, repo, home),
+    hasGlobal: p.writes.some((w) => w.scope === 'global'),
+  }));
+  const checked = new Set(plan.some((p) => p.id === 'claude') ? ['claude'] : []);
+  if (opts.offerTelemetry) {
+    rows.push({
+      id: TELEMETRY_ROW_ID,
+      label: 'anonymous usage stats',
+      kind: 'setting',
+      detected: true,
+      summary: 'no code, no file paths, no queries · TELEMETRY.md',
+      hasGlobal: false,
+    });
+    checked.add(TELEMETRY_ROW_ID);
+  }
+  return { rows, cursor: 0, checked, done: false, aborted: false };
 }
 
 export type PickerKey = 'up' | 'down' | 'space' | 'all' | 'enter' | 'abort';
@@ -148,8 +186,14 @@ export function reducePicker(state: PickerState, key: PickerKey): PickerState {
       return { ...state, checked: next };
     }
     case 'all': {
-      const allOn = state.rows.every((r) => state.checked.has(r.id));
-      return { ...state, checked: new Set(allOn ? [] : state.rows.map((r) => r.id)) };
+      // Hosts only. `a` means "wire everything"; a user who pressed it to select
+      // every agent has not thereby said anything about usage stats, so whatever
+      // they chose on that row survives untouched.
+      const hosts = state.rows.filter((r) => r.kind === 'host');
+      const allOn = hosts.every((r) => state.checked.has(r.id));
+      const next = new Set(state.rows.filter((r) => r.kind === 'setting' && state.checked.has(r.id)).map((r) => r.id));
+      if (!allOn) for (const r of hosts) next.add(r.id);
+      return { ...state, checked: next };
     }
     case 'enter':
       return { ...state, done: true };
@@ -165,15 +209,22 @@ export function renderPicker(state: PickerState, tty = true): string {
 
   // Pad on the plain label so the summary column lines up regardless of which
   // rows carry the '(not detected)' tag or the cursor's colour codes.
-  const label = (r: PickerRow) => `${r.id}${r.detected ? '' : ' (not detected)'}`;
+  const label = (r: PickerRow) => `${r.label}${r.detected ? '' : ' (not detected)'}`;
   const width = Math.max(...state.rows.map((r) => label(r).length));
   const lines = ['graft init — select what to wire into this repo:', ''];
+  let ruled = false;
   for (const [i, row] of state.rows.entries()) {
+    // One rule between the agents and the settings, so the consent row reads as
+    // a separate question rather than as another thing being installed.
+    if (row.kind === 'setting' && !ruled) {
+      lines.push(dim(`  ${'─'.repeat(width + 24)}`));
+      ruled = true;
+    }
     const here = i === state.cursor;
     const box = state.checked.has(row.id) ? '[x]' : '[ ]';
     const gap = ' '.repeat(width - label(row).length);
-    const name = here ? hot(row.id) : row.id;
-    const tag = row.detected ? '' : dim(' (not detected)');
+    const name = here ? hot(row.label) : row.label;
+    const tag = row.detected || row.kind === 'setting' ? '' : dim(' (not detected)');
     const summary = row.hasGlobal ? warn(row.summary) : dim(row.summary);
     lines.push(`${here ? '›' : ' '} ${box} ${name}${tag}${gap}  ${summary}`);
   }
@@ -186,16 +237,37 @@ export function pickedIds(state: PickerState): string[] {
   return state.rows.filter((r) => state.checked.has(r.id)).map((r) => r.id);
 }
 
+/** Just the agents, with the setting rows filtered out — what init wires. */
+export function pickedHostIds(state: PickerState): string[] {
+  return state.rows.filter((r) => r.kind === 'host' && state.checked.has(r.id)).map((r) => r.id);
+}
+
+/** The consent answer, or undefined when the row was never offered (a fork, CI,
+ *  DO_NOT_TRACK) — undefined means "don't change what's stored". */
+export function pickedTelemetry(state: PickerState): boolean | undefined {
+  if (!state.rows.some((r) => r.id === TELEMETRY_ROW_ID)) return undefined;
+  return state.checked.has(TELEMETRY_ROW_ID);
+}
+
 /**
- * Drive the picker on a real terminal. Resolves the chosen ids, or null if the
- * user cancelled — in which case the caller must write nothing.
+ * Drive the picker on a real terminal. Resolves the chosen agents plus the
+ * consent answer, or null if the user cancelled — in which case the caller must
+ * write nothing, telemetry setting included.
  */
+export interface Picked {
+  /** Agent ids to wire. */
+  hosts: string[];
+  /** The consent answer, or undefined when the row was not offered. */
+  telemetry?: boolean;
+}
+
 export async function runPicker(
   plan: HostPlan[],
   repo: string,
   home: string,
-): Promise<string[] | null> {
-  let state = initialPickerState(plan, repo, home);
+  opts: { offerTelemetry?: boolean } = {},
+): Promise<Picked | null> {
+  let state = initialPickerState(plan, repo, home, opts);
   const out = process.stderr;
   const stdin = process.stdin;
 
@@ -213,14 +285,14 @@ export async function runPicker(
   draw();
 
   try {
-    return await new Promise<string[] | null>((resolve) => {
+    return await new Promise<Picked | null>((resolve) => {
       // Both listeners come off together: a leftover 'end' would otherwise fire
       // after a confirmed pick and redraw the picker over init's own output.
       const finish = (onData: (b: Buffer) => void) => {
         stdin.off('data', onData);
         stdin.off('end', onEnd);
         draw();
-        resolve(state.aborted ? null : pickedIds(state));
+        resolve(state.aborted ? null : { hosts: pickedHostIds(state), telemetry: pickedTelemetry(state) });
       };
       const onData = (buf: Buffer) => {
         const keys = keysOf(buf.toString('utf8'));

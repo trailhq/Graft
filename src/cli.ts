@@ -38,9 +38,49 @@ import { homedir } from "node:os";
 import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurrentVersion, runUpgrade } from "./cli-meta.js";
 import { patchBuildConfig, type BuildConfig } from "./util/state.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readUpdateCache, refreshUpdateCache, writeStamp } from "./upkeep.js";
+import {
+  errorCode,
+  filesBucket,
+  durationBucket,
+  formatDebug,
+  formatStatus,
+  firstRunNotice,
+  isTrackedCommand,
+  langsValue,
+  offReason,
+  maybeFlushInBackground,
+  patchState,
+  runFlush,
+  track,
+  trackFirstRunIfNew,
+} from "./telemetry/index.js";
 
 const program = new Command();
 const currentVersion = readCurrentVersion(import.meta.url);
+
+/**
+ * What the `query` telemetry event will say, filled in by the command as it runs
+ * and emitted once from the `postAction` hook below.
+ *
+ * A module-level slot rather than a threaded parameter because the repo root is
+ * resolved deep inside each action (`queryRoot`) while the event is emitted
+ * centrally — and because a command that calls `process.exit` should simply
+ * report nothing, which falls out of never emitting until postAction.
+ */
+let queryNote: { repo?: string; hit?: "yes" | "no" } = {};
+
+/** Record the repo a query ran against, and pass it straight through so call
+ *  sites stay one line. */
+function noteQuery(dir: string): string {
+  queryNote.repo = dir;
+  return dir;
+}
+
+/** Whether a query found anything. Only the commands that have a result count in
+ *  hand call this; the property is simply absent for the others. */
+function noteHit(found: boolean): void {
+  queryNote.hit = found ? "yes" : "no";
+}
 
 program
   .name("graft")
@@ -145,6 +185,25 @@ program.hook("preAction", (_parent, action) => {
   maybeRefreshInBackground();
   const nudge = formatUpdateNudge(currentVersion, readUpdateCache()?.latest);
   if (nudge) console.error(nudge);
+  // Telemetry, in the order a user should experience it: disclose first, then
+  // record, then (at most once a day, detached) send. Every step is a no-op in a
+  // fork, in CI, under DO_NOT_TRACK, or after `graft telemetry disable`.
+  const notice = firstRunNotice();
+  if (notice) console.error(notice);
+  trackFirstRunIfNew();
+  maybeFlushInBackground();
+});
+
+/**
+ * The `query` event, emitted after the command rather than before it, so it can
+ * carry what the query actually did. A command that exits early via
+ * `process.exit` never reaches here and is simply not counted — under-reporting
+ * is the right failure mode for a metric.
+ */
+program.hook("postAction", (_parent, action) => {
+  const name = action.name();
+  if (!isTrackedCommand(name)) return;
+  track("query", { command: name, surface: "cli", hit: queryNote.hit }, { repo: queryNote.repo });
 });
 
 // Hidden from --help: only ever spawned detached by maybeRefreshInBackground.
@@ -153,6 +212,43 @@ program
   .description("internal: refresh the cached latest-version answer")
   .action(() => {
     refreshUpdateCache();
+  });
+
+// Hidden for the same reason as _update-check: only ever spawned detached, by
+// maybeFlushInBackground. Running it by hand is harmless — it drains the queue.
+program
+  .command("_telemetry-flush", { hidden: true })
+  .description("internal: POST the queued anonymous usage events")
+  .action(async () => {
+    await runFlush();
+  });
+
+program
+  .command("telemetry")
+  .description("Show, inspect, or turn off the anonymous usage stats (see TELEMETRY.md)")
+  .argument("[action]", "status (default) | enable | disable | debug", "status")
+  .action((action: string) => {
+    switch (action) {
+      case "status":
+        console.log(formatStatus());
+        return;
+      case "enable":
+        patchState({ enabled: true });
+        console.log("telemetry: on — anonymous, aggregate-only. `graft telemetry status` for details.");
+        return;
+      case "disable":
+        // Also stamp the notice as shown: someone who has just opted out should
+        // not be told about telemetry again the next time they run a command.
+        patchState({ enabled: false, noticeShownAt: new Date().toISOString() });
+        console.log("telemetry: off. Nothing further will be recorded or sent.");
+        return;
+      case "debug":
+        console.log(formatDebug());
+        return;
+      default:
+        console.error(`✗ unknown action "${action}" — expected status, enable, disable, or debug`);
+        process.exit(1);
+    }
   });
 
 program
@@ -184,6 +280,7 @@ program
   .option("-j, --concurrency <n>", "files summarized in parallel during --deep (default 5)")
   .option("--no-reuse", "re-parse every file instead of replaying unchanged ones from the extraction cache")
   .option("--lsp", "add compiler-grade call edges via a language server if one is installed (opt-in, slower; e.g. rust-analyzer, clangd)")
+  .option("--allow-partial", "with --deep: exit 0 even when some files' summaries failed (default: a degraded meaning tier exits 1)")
   .option(
     "--follow-submodules",
     "include initialized Git submodules recursively; persisted for later builds and automatic refreshes",
@@ -207,11 +304,13 @@ program
       concurrency?: string;
       reuse?: boolean;
       lsp?: boolean;
+      allowPartial?: boolean;
       includeDir?: string[];
       followSubmodules?: boolean;
     },
     command: Command,
   ) => {
+    const buildStartedAt = Date.now();
     const concurrency = opts.concurrency ? Math.max(1, Number(opts.concurrency)) : undefined;
     if (opts.concurrency && !Number.isFinite(concurrency)) {
       console.error(`✗ --concurrency must be a number, got "${opts.concurrency}"`);
@@ -288,6 +387,8 @@ program
     }
 
     // --deep: concept nodes first, then the wiring graph links cards up to them.
+    let conceptErrors: string[] = [];
+    let conceptFatal: string | undefined;
     if (deep) {
       const c = await engine.init(dir, {
         extensions: opts.extensions,
@@ -295,12 +396,18 @@ program
           process.stderr.write(
             `\r${phase === "summarize" ? "reading" : "writing"} concepts ${index + 1}/${total}: ${file.slice(0, 40).padEnd(40)}`,
           ),
+      }).catch((err: unknown) => {
+        // Only the stage and a code enum; the message stays on this machine.
+        track("build_failed", { stage: "summarize", code: errorCode(err) }, { repo: buildRoot });
+        throw err;
       });
       process.stderr.write("\n");
       console.log(
         `✓ concepts: ${c.nodes} nodes, ${c.links} links from ${c.files} files (${c.summarized} read, ${c.cached} cached)`,
       );
       for (const e of c.errors) console.error(`✗ ${e}`);
+      conceptErrors = c.errors;
+      conceptFatal = c.fatal;
     }
 
     // Wiring graph — always; LLM meaning only with --deep.
@@ -313,6 +420,9 @@ program
         process.stderr.write(
           `\r${phase === "enrich" ? "summarizing" : "parsing"} ${index + 1}/${total}: ${file.slice(0, 50).padEnd(50)}`,
         ),
+    }).catch((err: unknown) => {
+      track("build_failed", { stage: "graph", code: errorCode(err) }, { repo: buildRoot });
+      throw err;
     });
     process.stderr.write("\n");
     console.log(`✓ wiring: ${g.nodes} nodes (${fmt(g.byKind)}), ${g.edges} edges, ${g.cards} cards [${g.languages.join(", ")}]`);
@@ -324,10 +434,54 @@ program
       console.log(`  meaning: ${m.computed} computed, ${m.cached} cached, ${m.stale} stale, ${m.pending} pending`);
     }
     console.log(`  → ${g.contextDir}`);
+    // The activation event. Everything here is a bucket or a fixed label: repo
+    // scale rather than a file count, a language set rather than file names.
+    track(
+      "build_completed",
+      {
+        files_bucket: filesBucket(g.files),
+        langs: langsValue(g.languages),
+        mode: deep ? "deep" : "fast",
+        duration_bucket: durationBucket(Date.now() - buildStartedAt),
+        incremental: String(g.reused > 0),
+      },
+      { repo: buildRoot },
+    );
     for (const e of g.errors) console.error(`✗ ${e}`);
 
     const rel = relative(process.cwd(), g.contextDir) || "graft";
     console.log(`  ${rel}/ is git-ignored (added automatically) — a local cache; teammates run \`graft build\` to get their own.`);
+
+    // #127: a --deep run whose LLM calls failed used to print the same success
+    // footer and exit 0, so a quota-exhausted build looked identical to a clean
+    // one and `graft check` still said "in sync" (it only ever checked Tier-1).
+    // The structural graph IS still written and every successful summary is
+    // cached, so this is a loud warning about a degraded tier, not a rollback.
+    if (deep) {
+      const m = g.meaning;
+      const failed =
+        m.failedFiles > 0 || m.fatal !== undefined || conceptErrors.length > 0 || conceptFatal !== undefined;
+      if (failed) {
+        const ready = m.computed + m.cached;
+        const total = ready + m.stale + m.pending;
+        const pct = total > 0 ? Math.round((ready / total) * 100) : 0;
+        console.error("");
+        console.error(`✗ the deep pass did not complete — the meaning tier is incomplete.`);
+        if (conceptFatal) console.error(`  concepts: ${conceptFatal}`);
+        if (m.fatal) console.error(`  summaries: ${m.fatal}`);
+        if (m.failedFiles > 0) {
+          const skipped = m.skippedFiles > 0 ? `, ${m.skippedFiles} never attempted` : "";
+          console.error(`  ${m.failedFiles} file(s) failed to summarize${skipped}.`);
+        }
+        if (conceptErrors.length > 0) console.error(`  ${conceptErrors.length} concept-pass error(s).`);
+        console.error(`  meaning coverage: ${ready}/${total} symbols (${pct}%).`);
+        console.error(
+          "  Nothing computed was lost: re-run `graft build --deep` to resume from what is cached.\n" +
+            "  Pass --allow-partial to accept a degraded meaning tier and exit 0.",
+        );
+        if (!opts.allowPartial) process.exitCode = 1;
+      }
+    }
   });
 
 program
@@ -343,7 +497,7 @@ program
   .option("--no-graph-rank", "rank by lexical relevance only, without the graph-connectivity re-rank (ablation/eval)")
   .option(...NO_REFRESH_FLAG)
   .action(async (query: string, dirArg: string | undefined, opts: { limit: string; source?: boolean; full?: boolean; in?: string; json?: boolean; refresh?: boolean; graphRank?: boolean }) => {
-    const dir = queryRoot(dirArg);
+    const dir = noteQuery(queryRoot(dirArg));
     await refreshBefore(dir, opts);
     const askGlobalDir = program.opts<GlobalOpts>().dir;
     if (readWorkspace(dir, askGlobalDir)) {
@@ -361,6 +515,7 @@ program
       process.exit(1);
       return;
     }
+    noteHit(r.hits.length > 0);
     if (opts.json) {
       console.log(JSON.stringify(r, null, 2));
     } else {
@@ -377,7 +532,7 @@ program
   .option("--json", "output the result as JSON")
   .option(...NO_REFRESH_FLAG)
   .action(async (file: string, dirArg: string | undefined, opts: { json?: boolean; refresh?: boolean }) => {
-    const dir = queryRoot(dirArg);
+    const dir = noteQuery(queryRoot(dirArg));
     await refreshBefore(dir, opts);
     const { skeleton, formatSkeleton } = await import("./ask/ask.js");
     const globalOpts = program.opts<{ dir?: string }>();
@@ -394,7 +549,7 @@ program
   .option("--json", "output the drift as JSON")
   .action(async (dirArg: string | undefined, opts: { extensions?: string[]; json?: boolean }) => {
     warnUnsupportedExtensions(opts.extensions);
-    const dir = queryRoot(dirArg);
+    const dir = noteQuery(queryRoot(dirArg));
     const checkGlobalDir = program.opts<GlobalOpts>().dir;
     if (readWorkspace(dir, checkGlobalDir)) {
       await runWorkspaceCheck(dir, checkGlobalDir);
@@ -434,8 +589,10 @@ program
   .argument(...DIR_ARG)
   .option("-p, --port <port>", "port to serve on", "4400")
   .option("--no-open", "don't open the browser")
-  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean }) => {
-    const dir = queryRoot(dirArg);
+  .option("--export <dir>", "write one self-contained index.html instead of serving (for CI, GitHub Pages, or a build artifact)")
+  .option("--title <text>", "subtitle shown beside the repo name in an exported page (e.g. \"PR #151\")")
+  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; export?: string; title?: string }) => {
+    const dir = noteQuery(queryRoot(dirArg));
     const { existsSync } = await import("node:fs");
     const { resolve, basename } = await import("node:path");
     const { spawn } = await import("node:child_process");
@@ -451,6 +608,23 @@ program
       process.exit(1);
     }
     const viewerDir = fileURLToPath(new URL("./viewer/", import.meta.url)); // prebuilt
+
+    if (opts.export) {
+      const { exportViz } = await import("./viz/export.js");
+      const out = exportViz({
+        contextDir,
+        viewerDir,
+        outDir: resolve(opts.export),
+        repoName: basename(root),
+        subtitle: opts.title,
+      });
+      const kb = Math.round(out.bytes / 1024);
+      console.log(
+        `graft viz → ${out.file} (${kb} kB, ${out.contextNodes} concept nodes, ${out.codeNodes} code nodes)`,
+      );
+      return;
+    }
+
     const srv = await startVizServer({
       contextDir,
       viewerDir,
@@ -469,7 +643,7 @@ program
   .description("Serve the graph over MCP (stdio) — exposes graft_find_code, graft_trace_calls, graft_find_all, graft_file_api, graft_repo_map and graft_check_freshness as tools")
   .argument(...DIR_ARG)
   .action(async (dirArg: string | undefined) => {
-    const dir = queryRoot(dirArg);
+    const dir = noteQuery(queryRoot(dirArg));
     const { startMcpServer } = await import("./mcp/server.js");
     const globalOpts = program.opts<{ dir?: string }>();
     startMcpServer(dir, globalOpts.dir, currentVersion);
@@ -493,7 +667,7 @@ program
       dirArg: string | undefined,
       opts: { direction?: string; depth?: string; in?: string; json?: boolean; refresh?: boolean },
     ) => {
-      const dir = queryRoot(dirArg);
+      const dir = noteQuery(queryRoot(dirArg));
       await refreshBefore(dir, opts);
       const globalOpts = program.opts<{ dir?: string }>();
       if (!opts.json && readWorkspace(dir, globalOpts.dir)) {
@@ -518,6 +692,35 @@ program
   );
 
 program
+  .command("blast")
+  .description(
+    "Blast radius of a diff: what depends on the lines this change touched ($0, no LLM). " +
+      "Built for CI — `--format markdown` is a PR comment with a Mermaid diagram.",
+  )
+  .argument(...DIR_ARG)
+  .option("--base <ref>", "diff against this ref's merge base with HEAD (e.g. origin/main); default: the working tree vs HEAD")
+  .option("-d, --depth <n>", 'hops to walk over incoming edges, or "all" for the full closure (default 2)')
+  .option("--format <fmt>", "text (default) | markdown | mermaid | json")
+  .option("--name", "name the affected areas with one cached LLM call (needs GRAFT_API_KEY); without it, areas are named after their hub symbol")
+  .option("--export-viz <dir>", "also write the interactive page for this radius (one self-contained index.html — for CI, GitHub Pages, or an artifact)")
+  .option("--title <text>", "subtitle beside the repo name on the exported page (e.g. \"PR #171\")")
+  .option(...NO_REFRESH_FLAG)
+  .action(async (dirArg: string | undefined, opts: { base?: string; depth?: string; format?: string; name?: boolean; exportViz?: string; title?: string; refresh?: boolean }) => {
+    const dir = noteQuery(queryRoot(dirArg));
+    await refreshBefore(dir, opts);
+    const { runBlastCommand } = await import("./blast/blast-cli.js");
+    await runBlastCommand(dir, {
+      base: opts.base,
+      depth: opts.depth,
+      format: opts.format,
+      name: opts.name,
+      exportViz: opts.exportViz,
+      title: opts.title,
+      globalDir: program.opts<GlobalOpts>().dir,
+    });
+  });
+
+program
   .command("grep")
   .description("Regex search over indexed files, hits grouped by enclosing symbol and ranked by coupling ($0, no LLM)")
   .argument("<pattern>", "regex pattern (or literal string with --fixed)")
@@ -533,7 +736,7 @@ program
       dirArg: string | undefined,
       opts: { ignoreCase?: boolean; fixed?: boolean; in?: string; json?: boolean; refresh?: boolean },
     ) => {
-      const dir = queryRoot(dirArg);
+      const dir = noteQuery(queryRoot(dirArg));
       await refreshBefore(dir, opts);
       const globalOpts = program.opts<{ dir?: string }>();
       if (readWorkspace(dir, globalOpts.dir)) {
@@ -563,7 +766,7 @@ program
   .option("--json", "output as JSON")
   .option(...NO_REFRESH_FLAG)
   .action(async (dirArg: string | undefined, opts: { json?: boolean; maxDirs?: string; refresh?: boolean }) => {
-    const dir = queryRoot(dirArg);
+    const dir = noteQuery(queryRoot(dirArg));
     const root = resolve(dir);
     const globalOpts = program.opts<{ dir?: string }>();
     let maxDirsW: number | undefined;
@@ -638,20 +841,35 @@ program
     const noAgents = (opts as { agents?: unknown }).agents === false;
 
     let ids: string[];
+    // The consent answer from the picker. Undefined everywhere else — a scripted
+    // or flag-driven init never asked, so it must not silently answer.
+    let consent: boolean | undefined;
     if (explicit) ids = explicit;
     else if (opts.allAgents) ids = plan.map((p) => p.id);
     else if (noAgents) ids = ["claude"];
     else if (opts.yes || opts.dryRun) ids = detectedIds;
     else if (process.stdin.isTTY && process.stderr.isTTY) {
-      const picked = await runPicker(plan, repo, home);
+      // Only offer the row when telemetry could actually run. `disabled` still
+      // counts: someone who turned it off should be able to turn it back on here.
+      const reason = offReason();
+      const picked = await runPicker(plan, repo, home, {
+        offerTelemetry: reason === null || reason === "disabled",
+      });
       if (picked === null) {
         console.error("· cancelled — nothing written");
         return;
       }
-      ids = picked;
+      ids = picked.hosts;
+      consent = picked.telemetry;
     } else {
       console.error(formatNonInteractiveHelp(detectedIds));
       return;
+    }
+
+    // The picker's answer, recorded before anything is wired: a user who
+    // unchecked the row must not have this run's init_completed sent.
+    if (consent !== undefined) {
+      patchState({ enabled: consent, noticeShownAt: new Date().toISOString() });
     }
 
     // Workspace parent: every child repo gets its OWN wiring too. A session
@@ -700,6 +918,12 @@ program
           nodes: graphs.reduce((n, g) => n + g.meta.nodeCount, 0),
           edges: graphs.reduce((n, g) => n + g.meta.edgeCount, 0),
         }),
+    );
+    // Sorted so `claude,cursor` and `cursor,claude` aggregate as one value.
+    track(
+      "init_completed",
+      { agents: [...ids].sort().join(","), consent: consent === undefined ? "unasked" : String(consent) },
+      { repo },
     );
   });
 

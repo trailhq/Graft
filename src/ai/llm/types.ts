@@ -111,3 +111,16 @@ export interface ChatModel {
   readonly label: string;
   create(req: ChatRequest): Promise<ChatResponse>;
 }
+
+/**
+ * How many times the transport retries a failed request before the error reaches
+ * the caller. Both SDKs retry only what is worth retrying (429 and 5xx, honouring
+ * `Retry-After`) with exponential backoff, so this is the knob that separates a
+ * transient rate limit from a real failure — #127 lost whole files to the first
+ * 429 a shared gateway threw. Env-overridable because a metered corporate gateway
+ * may want fewer, and a flaky local proxy more.
+ */
+export function transportRetries(): number {
+  const raw = Number(process.env.GRAFT_LLM_RETRIES);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 4;
+}

@@ -71,6 +71,8 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     // Closures push a scope segment in extract.ts too — mirror it so a typed
     // parameter bound inside a closure is keyed under the same scope path.
     if (node.type === "anonymous_function" || node.type === "arrow_function") return phpClosureName(node);
+    // Anonymous classes likewise mint an `{anonymous}` scope segment (#144).
+    if (node.type === "anonymous_class") return "{anonymous}";
     return null;
   }
   const defTypes =
