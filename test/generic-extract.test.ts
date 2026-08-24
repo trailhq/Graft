@@ -338,3 +338,40 @@ test("Dart file-level skeleton lists the API, not function-body locals (#134)", 
     "skeleton has no bogus class int",
   );
 });
+
+// #197: OCaml is registered in GENERIC_LANGS but had no tags.scm, so the walker
+// minted `let helper x = …` as kind `variable` (`value_definition` matches
+// `(^|_)(val|…)`) and emitted no call edges.
+const OCAML = `let helper x = 1
+
+let rec go x = helper x
+
+let n = 1
+
+module M = struct
+  let wrap x = go x
+end
+
+type t = { n : int }
+`;
+
+test("genericLangOf routes .ml/.mli to the breadth tier", () => {
+  assert.equal(genericLangOf("lib/example.ml")?.name, "ocaml");
+  assert.equal(genericLangOf("lib/example.mli")?.name, "ocaml");
+});
+
+test("OCaml let/let rec/module/type become symbols; call edges resolve; bare lets stay out (#197)", async () => {
+  await warmGenericGrammars(["ocaml"]);
+  assert.ok(isWarm("ocaml"), "ocaml grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("lib/example.ml", OCAML, "ocaml");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const kinds = symbols.map((n) => `${n.kind}:${n.name}`).sort();
+  assert.deepEqual(kinds, ["function:go", "function:helper", "function:wrap", "module:M", "type:t"]);
+
+  const edges = resolveEdges(nodes, rawEdges);
+  const calls = edges
+    .filter((e) => e.relation === "calls")
+    .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
+  assert.ok(calls.includes("go→helper"), `go → helper (got ${calls.join(", ")})`);
+  assert.ok(calls.includes("wrap→go"), `M.wrap → go (got ${calls.join(", ")})`);
+});

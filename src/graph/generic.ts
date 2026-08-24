@@ -47,7 +47,7 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "cpp", exts: [".cpp", ".cc", ".cxx", ".hpp", ".hh"], wasm: "cpp" },
   { name: "ruby", exts: [".rb"], wasm: "ruby" },
   { name: "c_sharp", exts: [".cs"], wasm: "c_sharp" },
-  // These ship a tags.scm (calls + symbols); ocaml/zig have none and use the
+  // These ship a tags.scm (calls + symbols); zig has none and uses the
   // node-kind walker fallback (symbols only) — still one row, zero query.
   { name: "scala", exts: [".scala", ".sc"], wasm: "scala" },
   { name: "swift", exts: [".swift"], wasm: "swift" },
