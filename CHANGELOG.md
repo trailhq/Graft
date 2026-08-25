@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`allowScripts` now names R by the identity npm actually matches on.** The
+  entry was `tree-sitter-r@1.3.0`, the alias in `dependencies`, but npm derives
+  the identity from the resolved package in the lockfile —
+  `@davisvaughan/tree-sitter-r@1.3.0`. The old key matched nothing, so the
+  grammar's install script counted as unreviewed and was blocked;
+  `npm ci --strict-allow-scripts` failed on it. Harmless in practice only
+  because the package ships prebuilds for every supported platform. Note the
+  `overrides` key must stay the alias — the two fields key differently.
+
 ## 0.13.0
 
 ### Added
