@@ -333,6 +333,8 @@ graft build --extensions .ts .py     # only include these code extensions
 graft build --no-reuse               # re-parse every file instead of replaying unchanged ones from cache
 graft build --follow-submodules      # include initialized submodules; persist the choice for builds + MCP refresh
 graft build --no-follow-submodules   # exclude submodules again and persist that choice (the default)
+graft build --follow-nested-repos    # include nested git clones the index doesn't track; persist the choice
+graft build --no-follow-nested-repos # exclude nested clones again and persist that choice (the default)
 
 graft ask "<task>" [dir]             # query the graph — ranked nodes + exact file:line (no LLM, no key)
 graft ask "<task>" --json            # machine-readable result
@@ -445,6 +447,7 @@ Graft supports these layouts:
   is saved in `.graft/config.json`, so later no-flag builds and MCP automatic
   refreshes behave the same way. Run `graft build --no-follow-submodules` to
   restore and persist the default boundary.
+- **A git repo with other repos cloned inside it** (no gitlink, no index entry) — the shape multi-repo manifest tools like `west`, `repo`, `gclient` and `tsrc` check dependencies out into, and the shape you get by cloning an upstream into the tree to patch it locally. `--follow-submodules` cannot reach these: they have no `160000` index entry to follow. Run `graft build --follow-nested-repos` to fold them into one graph, prefixing child paths (for example, `external/parser/src/index.ts`) while honoring each clone's own Git ignore rules. A clone at a git-ignored path stays absent, since Git never reports it. The choice is saved in `.graft/config.json` and is independent of `--follow-submodules` — neither flag implies the other. Run `graft build --no-follow-nested-repos` to restore and persist the default boundary. Prefer this over the multi-repo split below when the nested repos import from each other and you want those edges in one graph; prefer the split when you want each repo scored and refreshed on its own.
 - **A folder of separate git repos** (no `.git` at the top) — `graft build`
   auto-splits: each child gets its own (git-ignored) `graft/`, and the parent
   gets a `graft/workspace.json` index. Queries from the parent federate across
