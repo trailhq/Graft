@@ -71,7 +71,7 @@
     "tree-sitter-wasm": "^1.1.4",
     "vscode-jsonrpc": "^8.2.1",
     "vscode-languageserver-protocol": "^3.18.2",
-    "web-tree-sitter": "^0.25.10"
+    "web-tree-sitter": "^0.26.12"
   },
   "devDependencies": {
     "@types/d3-force": "^3.0.10",
