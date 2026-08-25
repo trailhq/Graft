@@ -1,7 +1,7 @@
 name: Blast viewer
 
-# Publishes the interactive viewer for a pull request to GitHub Pages, and links it
-# from the blast-radius comment.
+# Publishes the interactive viewer for a pull request to GitHub Pages, and posts the
+# blast-radius comment that links to it.
 #
 # `pull_request_target`, not `pull_request`, because publishing needs write access to
 # the gh-pages branch and a `pull_request` job on a fork PR has none. That choice
@@ -12,9 +12,18 @@ name: Blast viewer
 # package.json, no postinstall). The graph is built from the PR's source text by a
 # tree-sitter parser, which executes none of it.
 #
-# A dispatch by PR number is the second entry point. It exists because a fork PR's
-# comment job cannot post the link itself (a `pull_request` job on a fork gets a
-# read-only token), so publishing that page has to be startable by hand.
+# It posts the comment as well as the page, because a `pull_request` job on a fork
+# gets a read-only token no matter what its `permissions:` block says: `blast.yml`
+# can compute the radius there and cannot post it, and most of this repo's open pull
+# requests come from forks. So `blast.yml` runs with `comment: false` and this is the
+# single writer — two jobs editing one marked comment would race and overwrite each
+# other. The cost of that choice is honest: graft's own PRs are now described by
+# main's graft rather than by the code in the PR. `blast.yml` still runs the PR's
+# build and writes the body to its step summary, so a renderer a PR breaks still
+# fails visibly; it just no longer speaks on the PR.
+#
+# A dispatch by PR number is the second entry point. It backfills a pull request that
+# was opened before any of this existed, without waiting for a new push.
 on:
   pull_request_target:
     branches: [main]
@@ -22,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       pr:
-        description: "Pull request number to publish the page for."
+        description: "Pull request number to publish the page and comment for."
         required: true
         type: string
 
@@ -123,8 +132,13 @@ jobs:
           # every bubble falls back to its hub symbol, so the page reads `cli.ts` and
           # `exportViz` where the comment reads "CLI Entry Point" and "Visualization
           # Export". The point of the page is that a reviewer recognises the feature.
+          #
+          # `--format markdown`, not text: one run produces both the page and the
+          # comment body, so the two can never describe different radii or word the
+          # same area differently.
           node ../base/dist/cli.js blast . --base "origin/$BASE_REF" \
-            --name --title "PR #$PR_NUMBER" --export-viz ../site --format text > /dev/null
+            --name --title "PR #$PR_NUMBER" --export-viz ../site --format markdown > ../blast.md
+          cat ../blast.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish to gh-pages
         env:
@@ -157,6 +171,43 @@ jobs:
           git add .nojekyll "pr/$PR_NUMBER"
           git commit -m "viz: PR #$PR_NUMBER" || { echo "nothing changed"; exit 0; }
           git push origin gh-pages
+
+      # 3. The comment — posted here, and only here.
+      #
+      # `blast.yml` runs the PR's own code, so it can never hold a write token; on a
+      # fork its comment step would 403, and most of this repo's open pull requests
+      # are forks. Under `pull_request_target` the token belongs to the BASE repo,
+      # so a fork PR is ordinary work. It runs after the page is pushed, so the link
+      # it carries is live by the time anyone can click it.
+      - name: Post or update the blast-radius comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+          # Unset, the comment simply has no link rather than a link that 404s.
+          VIEWER_BASE: ${{ vars.BLAST_VIEWER_BASE }}
+        run: |
+          set -euo pipefail
+          # One comment per PR, edited in place: a new one per push turns a busy PR
+          # into a wall of stale diagrams. The marker is how it is found again and
+          # stays invisible in the rendered body — the same marker the action used,
+          # so a PR that already has a comment from that path is edited, not doubled.
+          marker='<!-- graft-blast-radius -->'
+          printf '%s\n' "$marker" > body.md
+          cat blast.md >> body.md
+          if [ -n "$VIEWER_BASE" ]; then
+            printf '\n[**Open the interactive graph →**](%s/pr/%s/) — click an area to see its dependent symbols at file:line.\n' \
+              "$VIEWER_BASE" "$PR_NUMBER" >> body.md
+          fi
+          # `--paginate` runs the filter once per page, so a match can print more
+          # than one line; the first is the comment we own.
+          existing=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq "map(select(.body | startswith(\"$marker\"))) | .[0].id // empty" | head -1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@body.md >/dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@body.md >/dev/null
+          fi
 
   # A merged or closed PR's page is dead weight — and on a busy repo, thousands of
   # 1 MB files. Removed with the PR, not on a timer.
