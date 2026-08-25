@@ -615,6 +615,10 @@ program
   .option("--title <text>", "subtitle shown beside the repo name in an exported page (e.g. \"PR #151\")")
   .option("--tabs <list>", "tabs the exported page offers, comma separated: context,code,outline (default: all three)")
   .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; export?: string; title?: string; tabs?: string }) => {
+    // Flags are checked before the repository is: a typo'd `--tabs` is a mistake
+    // in the command the caller just typed, and telling them to go build an index
+    // first sends them off to fix the wrong thing.
+    const tabs = parseTabs(opts.tabs);
     const dir = noteQuery(queryRoot(dirArg));
     const { existsSync } = await import("node:fs");
     const { resolve, basename } = await import("node:path");
@@ -640,7 +644,7 @@ program
         outDir: resolve(opts.export),
         repoName: basename(root),
         subtitle: opts.title,
-        tabs: parseTabs(opts.tabs),
+        tabs,
       });
       const kb = Math.round(out.bytes / 1024);
       console.log(
