@@ -13,12 +13,22 @@
 #    without tsc present, and `--ignore-scripts` would skip the native builds
 #    tree-sitter needs. So the compiled node_modules is carried over from the
 #    build stage and pruned in place.
-FROM node:20-bookworm-slim AS build
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
+# node-gyp needs a real toolchain, and the slim image has none: since the repo
+# pinned node-gyp 12, `npm ci` builds tree-sitter's grammars from source and dies
+# on "find Python ... could not be run". Build stage only — the runtime image
+# below never compiles anything and stays slim.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN npm ci
 
-FROM node:20-bookworm-slim
+# node 22, not 20: commander@15 declares `node >=22.12`, and running under 20
+# left `npm ci` warning EBADENGINE on every build. The runtime base must match
+# the build base — the native bindings compiled above are copied, not rebuilt.
+FROM node:22-bookworm-slim
 # git is a runtime dependency here, not a build one: the App fetches each pull
 # request's merge ref.
 RUN apt-get update \
