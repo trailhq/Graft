@@ -17,7 +17,7 @@ import { walkDir } from "../ingest/fs.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
-import { readFollowSubmodules, readIncludeDirs } from "../util/state.js";
+import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
 import type { Summarizer } from "../ai/summarize.js";
 import { LlmFailureGate } from "../ai/failure.js";
 import type { FileSummary, SynthNode, Synthesizer } from "../ai/synthesize.js";
@@ -116,6 +116,7 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
   // Tier-2 concept pipeline sees exactly the same directories and submodules.
   const files = walkDir(root, readIncludeDirs(root), {
     followSubmodules: readFollowSubmodules(root),
+    followNestedRepos: readFollowNestedRepos(root),
   })
     .filter((f) => exts.some((e) => f.toLowerCase().endsWith(e)))
     .filter((f) => !f.startsWith(outDir));

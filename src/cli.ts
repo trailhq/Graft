@@ -290,6 +290,15 @@ program
     "exclude Git submodules; persisted for later builds and automatic refreshes (default)",
   )
   .option(
+    "--follow-nested-repos",
+    "include nested Git clones the index does not track (a multi-repo manifest checkout, or any repo cloned into the tree) " +
+      "as ONE graph, so imports across them resolve; persisted for later builds and automatic refreshes",
+  )
+  .option(
+    "--no-follow-nested-repos",
+    "exclude untracked nested Git clones; persisted for later builds and automatic refreshes (default)",
+  )
+  .option(
     "--include-dir <name>",
     "override SKIP_DIRS for this repo's walks — repeatable (e.g. --include-dir build --include-dir tools); " +
       "persisted, so a later build (and the hooks/refresh path) include it without the flag; dot-dirs are never overridable",
@@ -307,6 +316,7 @@ program
       allowPartial?: boolean;
       includeDir?: string[];
       followSubmodules?: boolean;
+      followNestedRepos?: boolean;
     },
     command: Command,
   ) => {
@@ -342,6 +352,10 @@ program
     const followSubmodulesWasExplicit = command.getOptionValueSource("followSubmodules") === "cli";
     if (followSubmodulesWasExplicit && typeof opts.followSubmodules === "boolean") {
       buildConfigPatch.followSubmodules = opts.followSubmodules;
+    }
+    const followNestedReposWasExplicit = command.getOptionValueSource("followNestedRepos") === "cli";
+    if (followNestedReposWasExplicit && typeof opts.followNestedRepos === "boolean") {
+      buildConfigPatch.followNestedRepos = opts.followNestedRepos;
     }
     if (Object.keys(buildConfigPatch).length > 0) {
       patchBuildConfig(resolve(dir), buildConfigPatch);
@@ -382,6 +396,7 @@ program
         override: buildGlobalDir,
         includeDirs: opts.includeDir,
         followSubmodules: followSubmodulesWasExplicit ? opts.followSubmodules : undefined,
+        followNestedRepos: followNestedReposWasExplicit ? opts.followNestedRepos : undefined,
       });
       return;
     }

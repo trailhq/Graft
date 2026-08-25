@@ -53,17 +53,31 @@ export function shouldSkipDir(name: string, includes?: ReadonlySet<string>): boo
  * `includes`, and files over 1 MB.
  * In a Git worktree, tracked files plus untracked, non-ignored files come from
  * `git ls-files`; this gives indexing exactly Git's nested `.gitignore`,
- * negation, and global-exclude semantics. Initialized submodules are enumerated
- * recursively only when `followSubmodules` is true; the default preserves the
- * historical superproject boundary. Each child keeps its own ignore rules, and
- * uninitialized submodules remain absent. Non-Git directories retain the plain
+ * negation, and global-exclude semantics. Non-Git directories retain the plain
  * filesystem walk. `includes` lifts only the built-in skip list — it never
  * overrides Git's ignore rules (un-ignore or `git add -f` a directory to
  * index it, the same contract as tracked-but-ignored files).
+ *
+ * Two INDEPENDENT opt-ins cross the repository boundary, because Git models two
+ * different relationships and only one of them is a dependency the parent pins:
+ *
+ *   - `followSubmodules` follows a GITLINK — an index entry with mode `160000`,
+ *     a commit the superproject versions.
+ *   - `followNestedRepos` follows a nested clone the parent's index knows
+ *     nothing about. Manifest-driven multi-repo tools (west, repo, gclient,
+ *     tsrc, mr, …) all check dependencies out this way, and so does anyone who
+ *     clones an upstream into the tree to patch it locally.
+ *
+ * Both default to false, preserving the historical superproject boundary. Each
+ * child keeps its own ignore rules; uninitialized submodules and gitignored
+ * nested clones remain absent either way (`--exclude-standard` never emits
+ * them, so there is nothing to follow).
  */
 export interface WalkOptions {
-  /** Include initialized Git submodules recursively. Default false. */
+  /** Include initialized Git submodules (gitlinks) recursively. Default false. */
   followSubmodules?: boolean;
+  /** Include nested Git clones the parent index does not track. Default false. */
+  followNestedRepos?: boolean;
 }
 
 export function walkDir(
@@ -71,7 +85,7 @@ export function walkDir(
   includes?: ReadonlySet<string>,
   opts: WalkOptions = {},
 ): string[] {
-  return gitVisibleFiles(dir, includes, opts.followSubmodules === true) ?? walkFilesystem(dir, includes);
+  return gitVisibleFiles(dir, includes, opts) ?? walkFilesystem(dir, includes);
 }
 
 /** Git's canonical working-tree file set, relative to `dir`. Tracked files are
@@ -80,11 +94,16 @@ export function walkDir(
 function gitVisibleFiles(
   dir: string,
   includes?: ReadonlySet<string>,
-  followSubmodules = false,
+  opts: WalkOptions = {},
   traversal?: { topRoot: string; activeRoots: Set<string> },
 ): string[] | null {
   const root = resolve(dir);
-  if (!followSubmodules) return gitVisibleFilesShallow(root, includes);
+  // The recursive path costs an extra `-t --stage` classification, so take it
+  // only when at least one boundary-crossing opt-in is on. With both off the
+  // walk is byte-for-byte the historical one.
+  if (opts.followSubmodules !== true && opts.followNestedRepos !== true) {
+    return gitVisibleFilesShallow(root, includes);
+  }
 
   const state = traversal ?? { topRoot: root, activeRoots: new Set<string>() };
   const rootKey = process.platform === "win32" ? root.toLowerCase() : root;
@@ -109,8 +128,9 @@ function gitVisibleFiles(
   }
 
   // A path can have multiple stage records during a merge. Collapse those
-  // records and remember if any of them identifies the path as a gitlink.
-  const entries = new Map<string, { gitlink: boolean }>();
+  // records and remember if any of them identifies the path as a gitlink or as
+  // a nested-clone boundary.
+  const entries = new Map<string, { gitlink: boolean; nested: boolean }>();
   for (const record of result.stdout.split("\0")) {
     if (!record) continue;
     if (record.length < 2 || record[1] !== " ") continue;
@@ -119,8 +139,17 @@ function gitVisibleFiles(
     const body = record.slice(2);
     let rel: string;
     let gitlink = false;
+    let nested = false;
     if (tag === "?") {
       rel = body;
+      // Git refuses to descend into a repository it does not own, so `--others`
+      // collapses a nested clone to ONE trailing-slash directory entry while
+      // every other untracked directory is expanded file by file. That slash is
+      // the boundary marker — free, since this is the enumeration we already ran.
+      if (rel.endsWith("/")) {
+        nested = true;
+        rel = rel.slice(0, -1);
+      }
     } else {
       const tab = body.indexOf("\t");
       if (tab === -1) continue;
@@ -129,7 +158,10 @@ function gitVisibleFiles(
     }
     if (!rel) continue;
     const prior = entries.get(rel);
-    entries.set(rel, { gitlink: gitlink || prior?.gitlink === true });
+    entries.set(rel, {
+      gitlink: gitlink || prior?.gitlink === true,
+      nested: nested || prior?.nested === true,
+    });
   }
 
   const out = new Set<string>();
@@ -140,12 +172,16 @@ function gitVisibleFiles(
     // recursion resets its relative root.
     if (skippedPath(relative(state.topRoot, abs), includes)) continue;
 
-    if (entry.gitlink) {
+    const followChild =
+      (entry.gitlink && opts.followSubmodules === true) ||
+      (entry.nested && opts.followNestedRepos === true);
+    if (followChild) {
       // A deinitialized gitlink can resolve upward to the superproject when Git
-      // runs inside it. Requiring the child's own .git prevents duplicate,
-      // mis-prefixed parent files and recursive loops.
+      // runs inside it, and a nested-looking directory may have no repo at all.
+      // Requiring the child's own .git prevents duplicate, mis-prefixed parent
+      // files and recursive loops.
       if (!existsSync(join(abs, ".git"))) continue;
-      let childFiles = gitVisibleFiles(abs, includes, true, state);
+      let childFiles = gitVisibleFiles(abs, includes, opts, state);
       if (childFiles === null) {
         // Do not let one broken child recreate a "healthy but incomplete"
         // graph. Match the top-level fail-soft contract locally: fall back to
