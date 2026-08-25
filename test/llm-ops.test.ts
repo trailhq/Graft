@@ -150,6 +150,10 @@ test("#129: recoverToolArgsFromContent accepts the three issue shapes and refuse
     recoverToolArgsFromContent("```json\n" + JSON.stringify(payload) + "\n```", RECOVER_OPTS)?.nodes,
     payload.nodes,
   );
+  // CodeQL js/polynomial-redos: spaces around a fence must stay linear and still parse.
+  const padded =
+    " ".repeat(8_000) + "```json" + " ".repeat(8_000) + JSON.stringify(payload) + " ".repeat(8_000) + "```";
+  assert.deepEqual(recoverToolArgsFromContent(padded, RECOVER_OPTS)?.nodes, payload.nodes);
   assert.equal(recoverToolArgsFromContent("The architecture is a layered monolith.", RECOVER_OPTS), undefined);
   assert.equal(recoverToolArgsFromContent("", RECOVER_OPTS), undefined);
   assert.equal(

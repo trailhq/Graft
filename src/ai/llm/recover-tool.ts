@@ -11,13 +11,25 @@
  * Callers MUST run the same schema validation they use for real tool calls.
  */
 
+/** Leading/trailing ```json fence, linear in `raw.length` — no quantified-whitespace regex. */
+function unwrapMarkdownFence(raw: string): string {
+  let s = raw;
+  if (s.startsWith("```")) {
+    s = s.slice(3);
+    if (s.length >= 4 && s.slice(0, 4).toLowerCase() === "json") s = s.slice(4);
+    s = s.trimStart();
+  }
+  if (s.endsWith("```")) s = s.slice(0, -3).trimEnd();
+  return s.trim();
+}
+
 export function recoverToolArgsFromContent(
   text: string,
   opts: { toolNames: readonly string[]; payloadKey: string },
 ): Record<string, unknown> | undefined {
   const raw = text?.trim();
   if (!raw) return undefined;
-  const stripped = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const stripped = unwrapMarkdownFence(raw);
   const accepted = new Set(opts.toolNames);
 
   const asPayload = (value: unknown): Record<string, unknown> | undefined => {
