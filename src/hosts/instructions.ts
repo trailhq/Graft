@@ -3,11 +3,18 @@
  * native format. Content changes happen HERE only; renderers just wrap it.
  */
 
+/** How to invoke graft when `graft init` has not put a binary on PATH. */
+export function cliFallbackNote(): string {
+  return `If \`graft\` is not on PATH (\`graft init\` does not install it), use \`npx -y @nanonets/graft\` in its place — e.g. \`npx -y @nanonets/graft ask "<question>" --source\`. \`bunx\`, \`pnpm dlx\`, and \`yarn dlx\` work the same way.`;
+}
+
 export function instructionBody(): string {
   return `## Graft — repo context graph
 
 This repo is indexed in \`graft/\`: small linked markdown nodes that explain each
 system and carry exact file:line spans, kept in sync with the code through git.
+
+${cliFallbackNote()}
 
 For ANY task here — understanding how something works, finding where code lives,
 or scoping a change — get context from the graph before grepping or opening
