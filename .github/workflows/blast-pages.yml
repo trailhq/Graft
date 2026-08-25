@@ -147,30 +147,60 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch gh-pages "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages \
-            || git clone --depth 1 "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages
-          cd pages
-          # `checkout --orphan` keeps the index, so on a repo with no gh-pages yet
-          # (where the fallback clone above landed on the default branch) the first
-          # commit would carry every file of main and Pages would serve the repo.
-          if ! git checkout gh-pages 2>/dev/null; then
-            git checkout --orphan gh-pages
-            git rm -rf --cached . >/dev/null
-            # The exported page lives outside this clone, so clean cannot reach it.
-            git clean -fdq
+          # Every open PR publishes into the same branch, so two runs that overlap
+          # race on the push and the loser is rejected non-fast-forward. They never
+          # conflict on content — each writes only its own pr/<n>/ — so the answer is
+          # to retry against whatever landed. A fresh clone per attempt rather than a
+          # rebase: this clone is `--depth 1`, and rebasing a shallow history is
+          # exactly the kind of thing that half-works.
+          #
+          # It matters beyond politeness: the comment step below runs only if this
+          # one succeeds, so a lost race meant a pull request silently got no comment.
+          #
+          # The loop is flat, not a retried function, because bash suspends `set -e`
+          # inside anything it evaluates as a condition — a `push || retry` helper
+          # would keep going after a failed clone and then "succeed".
+          published=""
+          for i in 1 2 3 4 5; do
+            rm -rf pages
+            git clone --depth 1 --branch gh-pages "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages 2>/dev/null \
+              || git clone --depth 1 "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages
+            cd pages
+            # `checkout --orphan` keeps the index, so on a repo with no gh-pages yet
+            # (where the fallback clone above landed on the default branch) the first
+            # commit would carry every file of main and Pages would serve the repo.
+            if ! git checkout gh-pages 2>/dev/null; then
+              git checkout --orphan gh-pages
+              git rm -rf --cached . >/dev/null
+              # The exported page lives outside this clone, so clean cannot reach it.
+              git clean -fdq
+            fi
+            mkdir -p "pr/$PR_NUMBER"
+            cp ../site/index.html "pr/$PR_NUMBER/index.html"
+            # Pages runs Jekyll over a branch source unless this file exists, and
+            # Jekyll would try to render the export as a template rather than serve
+            # it. Written every time, so a rebuilt or force-pushed branch cannot lose
+            # it and start silently mangling every viewer.
+            touch .nojekyll
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .nojekyll "pr/$PR_NUMBER"
+            # An unchanged page is done, not a retry: there is nothing to push.
+            if ! git commit -m "viz: PR #$PR_NUMBER"; then
+              echo "nothing changed"
+              published=1; cd ..; break
+            fi
+            if git push origin gh-pages; then
+              published=1; cd ..; break
+            fi
+            cd ..
+            echo "gh-pages push lost a race, retry $i" >&2
+            sleep $((i * 5))
+          done
+          if [ -z "$published" ]; then
+            echo "could not publish pr/$PR_NUMBER after 5 attempts" >&2
+            exit 1
           fi
-          mkdir -p "pr/$PR_NUMBER"
-          cp ../site/index.html "pr/$PR_NUMBER/index.html"
-          # Pages runs Jekyll over a branch source unless this file exists, and
-          # Jekyll would try to render the export as a template rather than serve
-          # it. Written every time, so a rebuilt or force-pushed branch cannot lose
-          # it and start silently mangling every viewer.
-          touch .nojekyll
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .nojekyll "pr/$PR_NUMBER"
-          git commit -m "viz: PR #$PR_NUMBER" || { echo "nothing changed"; exit 0; }
-          git push origin gh-pages
 
       # 3. The comment — posted here, and only here.
       #
