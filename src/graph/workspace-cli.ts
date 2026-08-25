@@ -62,6 +62,7 @@ export async function runWorkspaceBuild(root: string, opts: WorkspaceBuildOption
     const g = await engine.graph(childDir, { llm: opts.deep, concurrency: opts.concurrency });
     console.log(`✓ ${childName}/: ${g.nodes} nodes, ${g.edges} edges, ${g.cards} cards [${g.languages.join(", ")}]`);
     for (const e of g.errors) console.error(`✗ ${childName}/: ${e}`);
+    for (const w of g.warnings) console.error(`⚠ ${childName}/: ${w}`);
   };
 
   const { children } = await splitWorkspace(

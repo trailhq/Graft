@@ -20,7 +20,7 @@
 import { resolve } from "node:path";
 import { relPosix } from "../util/paths.js";
 import { contextDirFor } from "../context/node-file.js";
-import { extractFile, languageOf } from "./extract.js";
+import { extractFile, languageOf, wasmFallbackLangs } from "./extract.js";
 import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
 import { listSourceFiles } from "./build.js";
 import { readGraph, wiringPath } from "./write.js";
@@ -80,8 +80,18 @@ export async function checkGraph(
 
   // Freshly extract Tier-1 nodes from the code on disk (same file set as build).
   const sourceFiles = listSourceFiles(root, outDir);
+  const fallback = new Set(wasmFallbackLangs());
   await warmGenericGrammars(
-    new Set(sourceFiles.map((f) => genericLangOf(f)?.name).filter((n): n is string => !!n)),
+    new Set(
+      sourceFiles.flatMap((f) => {
+        const names: string[] = [];
+        const generic = genericLangOf(f)?.name;
+        if (generic) names.push(generic);
+        const lang = languageOf(f);
+        if (lang && fallback.has(lang)) names.push(lang);
+        return names;
+      }),
+    ),
   );
   const current = new Map<string, string>(); // id → body_hash
   for (const file of sourceFiles) {
