@@ -26,7 +26,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -36,6 +36,21 @@ jobs:
           node-version: '20'
           cache: npm
 
+      # The tree-sitter grammars are native addons, so this step compiles C++ on
+      # Windows. Each one builds via `node-gyp-build`, which locates node-gyp with a
+      # plain `require` rather than npm's `node_gyp` config -- so the *local*
+      # node-gyp devDependency wins over the one bundled with npm, and pinning it in
+      # package.json is what actually chooses the compiler toolchain here.
+      #
+      # That pin is load-bearing: `windows-latest` rolled to the windows-2025-vs2026
+      # image, which ships Visual Studio 18 and no VS 2022. npm 10's bundled
+      # node-gyp 10 only maps major versions 15/16/17 to a year, so it found VS at
+      # `...\Microsoft Visual Studio\18\Enterprise`, called it `unknown version
+      # "undefined"`, and failed every PR and every push to main with "Could not find
+      # any Visual Studio installation to use". node-gyp 12.1.0 added the 18 -> 2026
+      # mapping (toolset v145); 12.x is also the newest line that still supports the
+      # Node 20 this matrix pins, since 13.x requires >=22.22. Don't drop node-gyp
+      # from devDependencies, and don't bump it past 12.x without moving Node first.
       - name: Install dependencies
         run: npm ci
 

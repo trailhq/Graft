@@ -1,5 +1,109 @@
 # Changelog
 
+## 0.13.0
+
+### Added
+
+- **Grok (xAI) is a first-class `graft init` host.** Detects `~/.grok` or a
+  repo `.grok/` and writes `.grok/skills/graft/SKILL.md` plus a repo-level
+  `[mcp_servers.graft]` block in `.grok/config.toml` (Grok's MCP config).
+  Select it with `graft init --agents grok`.
+- **R language support.** `tree-sitter-r` (`npm:@davisvaughan/tree-sitter-r`;
+  the unscoped npm name is a squatted placeholder) parses `.R`/`.r` files.
+  Plain functions: every `name <- function(...)` / `name = function(...)` /
+  `function(...) -> name` assignment becomes a `function` node (the grammar's
+  `function_definition` has no name field, so the name comes from the
+  enclosing assignment; right-assign has its own AST shape). Classes — R's
+  class systems are library convention, not syntax, so they are recognised by
+  call idiom: **R6** (`R6::R6Class(...)` — the class node, `public =`/
+  `private =`/`active =` entries as methods, `inherit =` heritage, and `self$`/
+  `private$`/`super$` calls resolving to the class or its parent), **S4**
+  (`setClass()`/`setMethod()` with `contains =` heritage), **S3**
+  (`generic.Class <- function()` only when `generic` is registered locally via
+  `UseMethod()` or is one of a small curated base-R set — false negatives over
+  false positives), and plain-list mixin bundles (`Foo <- list(public =
+  list(...), ...)`) that are spliced across classes instead of inherited. An
+  untyped `obj$method()` resolves by bare name to a uniquely-named method
+  (ambiguous drops). Visibility: a roxygen `#' @export` tag wins; a roxygen
+  block without it means "not exported"; no roxygen falls back to the
+  leading-dot convention; R6 `private =` members are unexported.
+  `library()`/`require()`/`source()` calls are the import edges. Known gaps:
+  S3 generics registered in another file aren't seen (per-file pass); S4
+  `signature()` multiple dispatch isn't handled; R6 active bindings are
+  ordinary methods.
+- **Resumable `graft build --deep`.** The concept phase now checkpoints
+  summaries to disk atomically as it runs, so a build interrupted by a session
+  or rate limit resumes where it stopped on the next run (content-hash cached,
+  no repeated LLM cost) instead of restarting from zero.
+- **Kotlin gets full-fidelity (depth-tier) extraction**, and **Lua** and **Nix**
+  join the breadth tier. **Dart** now indexes top-level functions and consts.
+- **Hermes Agent** is a first-class `graft init` host.
+- **Every reported edge quotes the source line** where the call or reference
+  happens, in the PR comment, the CLI, and one shared helper.
+
+### Fixed
+
+- **PHP.** Enums with array consts stay in the graph; trait-inherited method
+  calls (`$this->traitMethod()`) resolve through the `implements` edge;
+  attribute usage is wired as `references` edges; anonymous classes are minted
+  as nodes with their `implements` edges.
+- **Java.** Generic type arguments (`Base<Item>`) no longer become bogus
+  `extends`/`implements` edges or poison call resolution; anonymous-class
+  methods no longer take the enclosing type's owner, so calls resolve to the
+  real method.
+- **Python.** Constructor calls (`Foo()`) resolve to the class instead of being
+  dropped.
+- **Deep tier.** An empty meaning reply is no longer cached as a permanent
+  `pending` state, and per-file failures surface instead of the build exiting
+  successfully.
+- **`graft ask`.** Distinct files are ranked ahead of one file's sibling spans
+  under bounded output, and multi-scope workspaces score comparably across
+  scopes.
+- **Claude hooks, sync-run, and statusline respect `GRAFT_DIR`**, and the hook
+  timeout is also read from user-level settings.
+- **Ingest** skips the `_build/` directory (the underscore spelling of a build
+  tree).
+
+## 0.12.0
+
+### Added
+
+- **Kotlin moves to full-fidelity extraction.** `.kt` and `.kts` files are now
+  parsed by a hand-written tree-sitter extractor — the same tier as TypeScript,
+  Python, Go, and Java — instead of the generic breadth grammar, so Kotlin
+  symbols, call edges, heritage, and imports resolve with scope awareness. The
+  kind mapping now matches tree-sitter-kotlin's real node types (the earlier
+  attempt reused Java's, which do not exist in the Kotlin grammar and emitted no
+  symbols at all): `class_declaration` is re-read off its own keyword into
+  class / interface / enum / annotation, `object` and `companion object` become
+  classes, secondary constructors and member functions become methods,
+  `typealias` becomes a type, and top-level `val`/`var` become variables.
+- **Kotlin edges.** Calls resolve through `call_expression` (member calls via
+  `navigation_expression`, with `this`/`super` receivers), the `:` heritage
+  clause yields `extends` edges, `import_header` yields import edges, and
+  `internal`/`private`/`protected` visibility maps to the exported flag.
+### Changed
+
+- **graft now collects anonymous usage stats, and the README no longer says it
+  doesn't.** We had no way to tell whether a repo ever got past `graft build`,
+  or whether an agent reaches for graft over grep once it has — npm downloads
+  answer neither. Six events, all buckets and fixed enums: `first_run`,
+  `init_completed`, `build_completed`, `build_failed`, `query`,
+  `session_summary`. Never your code, file paths, repo name, symbols, queries,
+  prompts, or error messages — [`TELEMETRY.md`](TELEMETRY.md) is the complete
+  contract and `src/telemetry/contract.ts` enforces it as a hard allowlist, so
+  a property that is not in the document cannot be sent even by accident.
+
+  Identity is two random UUIDs (one per machine, one per checkout), derived from
+  nothing; events are anonymous in PostHog with no person profile. Nothing is
+  sent from a command you run — events queue locally and a detached process
+  posts them at most once a day, so no query ever waits on the network.
+
+  Off if you uncheck the box in `graft init`, run `graft telemetry disable`, set
+  `DO_NOT_TRACK`, are in CI, or built from source (the key is stamped in only at
+  publish time, so forks never send). `graft telemetry debug` prints the exact
+  batch your machine would send, and sends nothing.
+
 ## 0.11.0
 
 ### Fixed

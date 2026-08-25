@@ -12,7 +12,9 @@
  * against a cap of ten) and told a reviewer nothing per box — `src/graph/write.ts`
  * on its own is not a unit anyone reasons about.
  */
-import type { BlastReport, TestSignal } from "./blast.js";
+import type { BlastReport, Impacted, TestSignal } from "./blast.js";
+import type { Evidence } from "../viz/assemble.js";
+import { fileReader, impactedEvidence, reachTerms } from "./evidence.js";
 
 /** Diagram cap. Everything past it folds into one aggregate circle carrying the
  * dropped counts, so the picture shrinks but never lies. */
@@ -98,8 +100,15 @@ export function mermaidDiagram(r: BlastReport): string | null {
   return lines.join("\n");
 }
 
-/** The PR-comment body: diagram, then one table, then everything else collapsed. */
-export function markdownReport(r: BlastReport): string {
+/**
+ * The PR-comment body: diagram, then one table, then everything else collapsed.
+ *
+ * `root` is the repository the report was taken in. With it, the collapsed symbol
+ * list quotes the line that reaches the diff — the same line the hosted page shows,
+ * from the same helper. Without it the list is unchanged, so a caller that has no
+ * checkout (a test, a piped report) loses nothing but the snippet.
+ */
+export function markdownReport(r: BlastReport, opts: { root?: string } = {}): string {
   const out: string[] = [];
   const symbols = r.modules.reduce((n, m) => n + m.symbols.length, 0);
 
@@ -122,7 +131,9 @@ export function markdownReport(r: BlastReport): string {
   }
 
   out.push("");
-  out.push(...detailSections(r, symbols));
+  const reach = reachTerms(r.seeds, r.changed);
+  const read = fileReader(opts.root);
+  out.push(...detailSections(r, symbols, (s) => impactedEvidence(s, reach, read)));
 
   const caveats = caveatLines(r);
   if (caveats.length > 0) {
@@ -196,7 +207,7 @@ function impactTable(r: BlastReport): string[] {
  * inside a details block without it, and `<strong>` rather than `**` because it
  * processes no emphasis inside `<summary>` either.
  */
-function detailSections(r: BlastReport, symbols: number): string[] {
+function detailSections(r: BlastReport, symbols: number, evidence?: (s: Impacted) => Evidence | null): string[] {
   const out: string[] = [];
 
   if (symbols > 0) {
@@ -210,6 +221,11 @@ function detailSections(r: BlastReport, symbols: number): string[] {
       for (const s of mod.symbols) {
         if (listed++ >= MAX_SYMBOLS_LISTED) break;
         out.push(`- \`${s.path}:${s.span}\` — ${s.name} (${s.relation}, depth ${s.depth})`);
+        // The line that reaches the diff, quoted from the same helper the hosted
+        // panel uses — a comment that disagreed with the page it links to would be
+        // worse than one that said less. Collapsed, so the comment stays short.
+        const [line] = evidence?.(s)?.lines ?? [];
+        if (line) out.push(`  \`\`\`${line.n}: ${line.text.trim()}\`\`\``);
       }
       out.push("");
       if (listed >= MAX_SYMBOLS_LISTED) {

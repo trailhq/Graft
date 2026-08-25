@@ -169,25 +169,39 @@ export async function enrichGraph(
     });
 
     const { results, error } = await collectFileCrux(summarizer, path, source, refs);
-    if (error) {
-      stats.errors.push(`${path}: ${error}`);
-      gate.record(error);
-    } else {
-      gate.succeeded();
+    let fileError = error;
+    if (fileError) {
+      stats.errors.push(`${path}: ${fileError}`);
+      gate.record(fileError);
     }
 
+    let applied = 0;
     for (const node of fileNodes) {
       const r = results.size > 0 ? results.get(node.id) : undefined;
-      if (!r) {
-        // whole-file call failed, or the model skipped this symbol: keep what it had.
+      // Empty / whitespace-only summaries are not success: caching them as
+      // `ready` made the next `--deep` a permanent cache hit (#172).
+      if (!r || !r.summary.trim()) {
+        // whole-file call failed, the model skipped this symbol, or it returned
+        // an empty summary: keep what it had and leave it retryable.
         if (node.summary_state === "stale") stats.stale++;
         else stats.pending++;
         continue;
       }
-      node.summary = r.summary || null;
+      node.summary = r.summary;
       node.crux = buildCrux(r, node, source, lineCount);
       node.summary_state = "ready";
       stats.computed++;
+      applied++;
+    }
+
+    if (!fileError && refs.length > 0 && applied === 0) {
+      // collectFileCrux already labels a total miss; this catches "got entries
+      // but every summary was blank" so the CLI's #127 degraded-exit path fires.
+      fileError = "model returned no usable symbol summaries";
+      stats.errors.push(`${path}: ${fileError}`);
+      gate.record(fileError);
+    } else if (!fileError) {
+      gate.succeeded();
     }
 
     // Report on completion so the counter climbs monotonically under concurrency.
@@ -249,6 +263,13 @@ async function collectFileCrux(
       error = err instanceof Error ? err.message : String(err);
       break;
     }
+  }
+  // A total miss used to return `{ results: ∅ }` with no error — enrich left
+  // every node `pending`, the CLI exited 0, and `graft check` told the user to
+  // re-run `--deep` forever (#172). Surface it as a failure like a thrown error.
+  if (!error && refs.length > 0 && results.size === 0) {
+    error =
+      "model returned no symbol summaries (empty tool response — the provider may ignore forced tool_choice)";
   }
   return { results, error };
 }

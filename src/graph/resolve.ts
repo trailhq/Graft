@@ -15,11 +15,66 @@
 import { posix } from "node:path";
 import { toPosixPath } from "../util/paths.js";
 import type { EdgeV1, Kind, NodeV1, Relation } from "./types.js";
-import type { RawEdge } from "./extract.js";
+import { languageOf, type RawEdge } from "./extract.js";
+import { genericLangOf } from "./generic.js";
 
 const IMPORT_EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py"];
 /** C/C++ source + header extensions, for resolving `#include` targets. */
 const C_EXT = /\.(c|h|cc|cpp|cxx|hpp|hh|hxx|inl|ipp|c\+\+|h\+\+)$/i;
+/** Python source + stub extensions, for the constructor-call fallback below. */
+const PY_EXT = /\.pyi?$/i;
+/** What a bare Python call falls back to when no function of that name exists:
+ * construction. Only `class` — Python enums, dataclasses and NamedTuples are all
+ * classes, so no other kind is reachable this way. */
+const PY_CTOR_KINDS: Kind[] = ["class"];
+
+/**
+ * Languages whose symbols can genuinely reach each other. A call edge may not
+ * cross a family boundary.
+ *
+ * This exists because name resolution is repo-wide and used to be language-blind.
+ * A Go file calling the builtin `make(...)` has nothing in the repo to resolve
+ * against, so the unique-global fallback below matched a TypeScript helper named
+ * `make` in a frontend test file — and then every `make(map[...])` in the backend
+ * became an edge into that file. One symbol collected 1040 in-edges across 476
+ * files, and any pull request touching that test dragged the entire Go backend
+ * into its blast radius. Uniqueness is what made it fire: the rarer the collision,
+ * the more confident the old code was that it had found the right target.
+ *
+ * Only real interop is grouped here. TS/TSX/JS import each other freely; Kotlin,
+ * Scala and Clojure compile against Java on one classpath; C and C++ share
+ * headers. Everything else stands alone.
+ */
+const FAMILIES: ReadonlyArray<readonly string[]> = [
+  ["typescript", "tsx"],
+  ["java", "kotlin", "scala", "clojure"],
+  ["c", "cpp"],
+];
+const FAMILY_OF = new Map<string, string>();
+for (const group of FAMILIES) for (const lang of group) FAMILY_OF.set(lang, group[0]);
+
+/**
+ * The language family a path belongs to, or null when no tier claims the file.
+ * A language of its own is its own family, so the common case needs no entry above.
+ */
+function familyOf(path: string): string | null {
+  const lang = languageOf(path) ?? genericLangOf(path)?.name ?? null;
+  if (!lang) return null;
+  return FAMILY_OF.get(lang) ?? lang;
+}
+
+/**
+ * Could a reference in `file` reach a definition in `candidatePath`?
+ *
+ * An unknown family never filters: absence of data is not evidence of a mismatch,
+ * and refusing edges for every extension graft cannot name would lose real ones.
+ */
+function reachable(file: string, candidatePath: string): boolean {
+  const from = familyOf(file);
+  if (from === null) return true;
+  const to = familyOf(candidatePath);
+  return to === null || from === to;
+}
 
 /** A Go module discovered in the repo: its `module` path from `go.mod` and the repo
  * directory that `go.mod` lives in (posix, `.` for the repo root). A monorepo may hold
@@ -99,8 +154,9 @@ export function resolveEdges(
     let fileMap = perFileName.get(n.path);
     if (!fileMap) perFileName.set(n.path, (fileMap = new Map()));
     push(fileMap, n.name, n);
-    if (n.kind === "method" && n.owner) {
-      push(ownerMethod, `${n.owner}.${n.name}`, n);
+    if (n.kind === "method") {
+      const owner = n.owner ?? ownerFromMethodId(n.id);
+      if (owner) push(ownerMethod, `${owner}.${n.name}`, n);
     }
   }
 
@@ -116,6 +172,17 @@ export function resolveEdges(
     const ownName = byId.get(e.source)?.name;
     if (!ownName) continue;
     push(classParents, ownName, e.name);
+  }
+
+  // classTraits: class name → trait names from raw `implements` edges in PHP files.
+  // PHP models `use SomeTrait;` as implements; trait methods live on the trait owner,
+  // not the using class, so resolveTypedMember walks these after the class lookup fails.
+  const classTraits = new Map<string, string[]>();
+  for (const e of rawEdges) {
+    if (e.relation !== "implements" || !e.name || !e.file.endsWith(".php")) continue;
+    const ownName = byId.get(e.source)?.name;
+    if (!ownName) continue;
+    push(classTraits, ownName, e.name);
   }
 
   const out: EdgeV1[] = [];
@@ -156,10 +223,17 @@ export function resolveEdges(
         // A named import gives both halves needed for sound resolution: the module
         // it came from and the exported name. Resolve inside that file only, so a
         // same-named symbol elsewhere in the repo cannot become a false edge.
-        const targetFile = resolveImport(e.specifier, e.file, byId);
+        const targetFile = e.file.endsWith(".php")
+          ? resolvePhpUse(e.specifier, phpFilesBySuffix)
+          : resolveImport(e.specifier, e.file, byId);
         if (!byId.has(targetFile)) continue; // external or unresolved module
         const candidates = perFileName.get(targetFile)?.get(e.name) ?? [];
         if (candidates.length === 1) add(e.source, candidates[0].id, "references", "extracted");
+      } else if (e.file.endsWith(".php") && byId.get(e.source)?.origin === "ast") {
+        // PHP attribute without a `use` import (same-file or globally unique class).
+        const refKinds: Kind[] = ["class", "interface", "trait", "enum"];
+        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
+        if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
       } else if (byId.get(e.source)?.origin === "generic") {
         // Breadth tier: a bare-name structural reference (extends / implements /
         // object-creation / module alias) the grammar marked but cannot type. Resolve
@@ -173,7 +247,7 @@ export function resolveEdges(
     } else if (e.relation === "calls") {
       if (e.viaMember) {
         if (!e.recvType) continue;
-        const hit = resolveTypedMember(e.recvType, e.name!, e.file, ownerMethod, classParents, e.argCount);
+        const hit = resolveTypedMember(e.recvType, e.name!, e.file, ownerMethod, classParents, classTraits, e.argCount);
         if (hit === "ambiguous") continue; // drop — never guess past an ambiguous owner
         if (hit) add(e.source, hit.id, "calls", hit.confidence);
         // No owner-qualified match means the call is unresolved. A unique bare
@@ -182,6 +256,11 @@ export function resolveEdges(
         // vs a compiler-grade oracle) for a 3x count inflation, i.e. noise. See #35.
         continue;
       }
+      // Every language's bare-name call is a free function, except R (Phase 4):
+      // an untyped `obj$method()` there sets e.kinds to also allow a "method"
+      // match — see extract.ts's calleeName R branch for why (R6 methods are
+      // never kind "function", so without this every such call would be
+      // unconditionally unresolvable rather than just occasionally ambiguous).
       // Three cases, because "a bare call" means something different per tier:
       //
       //  - generic (breadth tier): tags.scm captures ALL calls as bare names, since it
@@ -192,14 +271,27 @@ export function resolveEdges(
       //    extract.ts, so the only bare call reaching here is `new Foo()`, whose target
       //    is a TYPE. Against the function index every constructor edge would drop.
       //  - everything else: functions, exactly as before.
+      //
+      // R (depth tier, Phase 4) sets `e.kinds` itself for an untyped `obj$method()`
+      // (see above), and that explicit choice wins over the per-tier default.
       const srcOrigin = byId.get(e.source)?.origin;
       const callKinds: Kind[] =
-        srcOrigin === "generic"
+        e.kinds ??
+        (srcOrigin === "generic"
           ? ["function", "method"]
           : e.file.endsWith(".java")
             ? ["class", "struct", "enum", "interface"]
-            : ["function"];
-      const hit = resolveName(e.name!, e.file, callKinds, perFileName, globalName);
+            : ["function"]);
+      let hit = resolveName(e.name!, e.file, callKinds, perFileName, globalName);
+      // Python is the Java case without the `new` to mark it: `Widget()` is an
+      // ordinary call node, so a constructor edge dies against the function-only
+      // index. Java can widen to types outright; Python has free functions, so
+      // widening would trade real function edges for type ones. Hence a fallback,
+      // not a swap — types are tried only once functions have found nothing, and
+      // resolveName's same-file-then-unique-global rule still drops the ambiguous.
+      if (!hit && PY_EXT.test(e.file)) {
+        hit = resolveName(e.name!, e.file, PY_CTOR_KINDS, perFileName, globalName);
+      }
       if (hit) add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
     }
   }
@@ -210,6 +302,14 @@ function push<T>(map: Map<string, T[]>, key: string, val: T): void {
   const arr = map.get(key);
   if (arr) arr.push(val);
   else map.set(key, [val]);
+}
+
+/** Derive a method's owner from its dotted id when extract did not stamp `owner`
+ * (PHP trait/interface methods today). `app.php#Loggable.log` → `Loggable`. */
+function ownerFromMethodId(id: string): string | undefined {
+  const post = id.includes("#") ? id.split("#")[1] : id;
+  const segs = post.split(".");
+  return segs.length >= 2 ? segs[segs.length - 2] : undefined;
 }
 
 /**
@@ -224,8 +324,18 @@ function resolveName(
   globalName: Map<string, NodeV1[]>,
 ): { id: string; confidence: EdgeV1["confidence"] } | null {
   const local = (perFileName.get(file)?.get(name) ?? []).filter((n) => kinds.includes(n.kind));
-  if (local.length) return { id: local[0].id, confidence: "extracted" };
-  const global = (globalName.get(name) ?? []).filter((n) => kinds.includes(n.kind));
+  // Same-file requires a UNIQUE match, exactly as the cross-file branch below does.
+  // Returning `local[0]` meant a file holding two same-named types (`Alpha.Builder` and
+  // `Beta.Builder`, `Alpha.Inner` and `Beta.Inner`) silently resolved to whichever came
+  // first in document order — and labelled it `extracted`, i.e. certain. That is the
+  // guess this module's header says it does not make.
+  if (local.length === 1) return { id: local[0].id, confidence: "extracted" };
+  // Cross-file: also require a language that could actually reach this one.
+  // Without it a unique name match ANYWHERE in the repo wins, which is how a Go
+  // builtin ended up resolving into a TypeScript test — see FAMILIES above.
+  const global = (globalName.get(name) ?? []).filter(
+    (n) => kinds.includes(n.kind) && reachable(file, n.path),
+  );
   if (global.length === 1) return { id: global[0].id, confidence: "inferred" };
   return null;
 }
@@ -272,6 +382,7 @@ function resolveTypedMember(
   file: string,
   ownerMethod: Map<string, NodeV1[]>,
   classParents: Map<string, string[]>,
+  classTraits: Map<string, string[]>,
   argCount?: number,
 ): { id: string; confidence: EdgeV1["confidence"] } | "ambiguous" | null {
   const MAX_DEPTH = 3;
@@ -279,16 +390,20 @@ function resolveTypedMember(
   let frontier = [recvType];
   for (let depth = 0; depth <= MAX_DEPTH && frontier.length; depth++) {
     for (const type of frontier) {
-      const all = ownerMethod.get(`${type}.${name}`);
-      if (!all || all.length === 0) continue; // try next ancestor
-      const candidates = narrowByArity(all, argCount);
-      if (candidates.length === 1) {
-        const c = candidates[0];
-        return { id: c.id, confidence: c.path === file ? "extracted" : "inferred" };
+      const all = ownerMethod.get(`${type}.${name}`)?.filter((c) => reachable(file, c.path));
+      if (all && all.length > 0) {
+        const candidates = narrowByArity(all, argCount);
+        if (candidates.length === 1) {
+          const c = candidates[0];
+          return { id: c.id, confidence: c.path === file ? "extracted" : "inferred" };
+        }
+        const sameFile = candidates.find((c) => c.path === file);
+        if (sameFile) return { id: sameFile.id, confidence: "extracted" };
+        return "ambiguous"; // several, none same-file — drop and stop
       }
-      const sameFile = candidates.find((c) => c.path === file);
-      if (sameFile) return { id: sameFile.id, confidence: "extracted" };
-      return "ambiguous"; // several, none same-file — drop and stop
+      const traitHit = resolveTraitMember(type, name, file, ownerMethod, classTraits, argCount);
+      if (traitHit === "ambiguous") return "ambiguous";
+      if (traitHit) return traitHit;
     }
     const next: string[] = [];
     for (const type of frontier) {
@@ -301,6 +416,31 @@ function resolveTypedMember(
     frontier = next;
   }
   return null; // chain exhausted, no candidate anywhere
+}
+
+/** Resolve a member call against methods declared on PHP traits used by `type`. */
+function resolveTraitMember(
+  type: string,
+  name: string,
+  file: string,
+  ownerMethod: Map<string, NodeV1[]>,
+  classTraits: Map<string, string[]>,
+  argCount?: number,
+): { id: string; confidence: EdgeV1["confidence"] } | "ambiguous" | null {
+  const traits = classTraits.get(type);
+  if (!traits?.length) return null;
+  const matches: NodeV1[] = [];
+  for (const trait of traits) {
+    const all = ownerMethod.get(`${trait}.${name}`)?.filter((c) => reachable(file, c.path));
+    if (!all?.length) continue;
+    matches.push(...narrowByArity(all, argCount));
+  }
+  if (matches.length === 0) return null;
+  if (matches.length === 1) {
+    const c = matches[0];
+    return { id: c.id, confidence: c.path === file ? "extracted" : "inferred" };
+  }
+  return "ambiguous";
 }
 
 /**

@@ -12,6 +12,7 @@
  * tool (`src/mcp/tools.ts`), so both surfaces render identical reports.
  */
 import { resolve } from "node:path";
+import { fileReader, referenceLine, wordRe } from "../blast/evidence.js";
 import { contextDirFor } from "../context/node-file.js";
 import { withSavings, savingsFor, type Savings } from "../context/savings.js";
 import { loadGraphCached } from "./load.js";
@@ -40,12 +41,40 @@ export function headerOf(n: NodeV1): string {
 }
 
 /** `showDepth` is set for multi-hop walks (depth > 1), matching the old
- * `graft impact` output which tagged every hit with its BFS depth. */
-export function hitLine(direction: Direction, hit: EdgeHit, showDepth: boolean): string {
+ * `graft impact` output which tagged every hit with its BFS depth.
+ *
+ * `quote`, when given, is the call site itself — the line inside the hit where it
+ * references the symbol. An edge that says "total calls add" is a claim; the line
+ * under it is the evidence, and it saves opening the file to check.
+ */
+export function hitLine(direction: Direction, hit: EdgeHit, showDepth: boolean, quote?: Quote): string {
   const arrow = ARROW[direction];
   const depthTag = showDepth ? ` [depth ${hit.depth}]` : "";
   const label = hit.node ? `${hit.node.name} (${hit.node.path}:${hit.node.span})` : `${hit.id} (unresolved import)`;
-  return `  ${hit.relation} ${arrow} ${label}${depthTag}`;
+  const line = `  ${hit.relation} ${arrow} ${label}${depthTag}`;
+  return quote ? `${line}\n      ${quote.n}: ${quote.text.trim()}` : line;
+}
+
+/** A quoted source line: where the edge actually happens. */
+interface Quote {
+  n: number;
+  text: string;
+}
+
+/**
+ * The call site for one hit, or nothing.
+ *
+ * Only for a resolved hit whose span we can read: an unresolved import has no
+ * file, and a hit at depth 2+ references something in between rather than the
+ * symbol asked about, so quoting it would point at the wrong line.
+ */
+function quoteFor(
+  hit: EdgeHit,
+  name: string,
+  read: (path: string) => string[] | null,
+): Quote | undefined {
+  if (!hit.node || hit.depth > 1) return undefined;
+  return referenceLine(hit.node.path, hit.node.span, [wordRe(name)], read) ?? undefined;
 }
 
 /** Tokens-saved baseline for a callers/callees walk: the files of the matched
@@ -200,10 +229,12 @@ export function runCallersCommand(query: string, dir: string, opts: CallersCliOp
   }
 
   const lines: string[] = [];
+  // One reader for the whole walk: several hits usually live in the same file.
+  const read = fileReader(root);
   for (const { symbol, hits } of results) {
     lines.push(headerOf(symbol));
     if (hits.length === 0) lines.push(looseNoteFor(direction, symbol.name, matches.length));
-    else for (const h of hits) lines.push(hitLine(direction, h, showDepth));
+    else for (const h of hits) lines.push(hitLine(direction, h, showDepth, quoteFor(h, symbol.name, read)));
     lines.push("");
   }
   const body = lines.join("\n").replace(/\n+$/, "\n");
