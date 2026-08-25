@@ -1,38 +1,41 @@
 # The graft GitHub App.
 #
-# Runs anywhere that takes a container — Fly, Cloud Run, ECS, a VM. It needs git
-# on the PATH (it fetches pull request refs) and nothing else at runtime.
+# Runs anywhere that takes a container — a VM, Fly, Cloud Run, App Runner. It
+# needs git on the PATH (it fetches pull request refs) and nothing else at
+# runtime.
 #
-# The build stage keeps devDependencies out of the final image: this process
-# clones code written by strangers, so the less that is installed next to it, the
-# smaller the blast radius of anything that goes wrong.
+# Two constraints shape the stages, and both were found the hard way:
+#
+#  - `npm ci` runs this package's `prepare` script, which IS the build. So the
+#    sources have to be present before the install, not after it — a manifests-
+#    only copy fails with "The specified path does not exist: 'tsconfig.json'".
+#  - The runtime cannot reinstall. `npm ci --omit=dev` would run `prepare` again
+#    without tsc present, and `--ignore-scripts` would skip the native builds
+#    tree-sitter needs. So the compiled node_modules is carried over from the
+#    build stage and pruned in place.
 FROM node:20-bookworm-slim AS build
 WORKDIR /app
-# scripts/ comes along because package.json runs scripts/postinstall.mjs on
-# install. Copying only the manifests means node cannot find that file and exits
-# 1 before the script's own "never fail an install" guard ever runs. Dropping to
-# --ignore-scripts is not the way out: tree-sitter builds its native bindings in
-# exactly those hooks.
-COPY package.json package-lock.json ./
-COPY scripts ./scripts
-RUN npm ci
 COPY . .
-RUN npm run build
+RUN npm ci
 
 FROM node:20-bookworm-slim
-# git is a runtime dependency here, not a build one.
+# git is a runtime dependency here, not a build one: the App fetches each pull
+# request's merge ref.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
-COPY scripts ./scripts
-RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+# devDependencies are dead weight next to a process that clones code written by
+# strangers. Pruning keeps the native bindings that were already compiled;
+# --ignore-scripts stops `prepare` from trying to rebuild without tsc.
+RUN npm prune --omit=dev --ignore-scripts && npm cache clean --force
 
-# Never root: the whole point of the checkout rules is that this process handles
-# untrusted source, and it has no reason to be able to write outside its tree.
+# Never root: this process handles untrusted source and has no reason to be able
+# to write outside its own tree.
 USER node
 ENV PORT=3000
 EXPOSE 3000
