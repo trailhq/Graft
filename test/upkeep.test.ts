@@ -110,6 +110,18 @@ test('a refresh replays the flags init was given, including --no-global', () => 
   assert.deepEqual(readStamp(repo)?.opts, { global: false, mcp: true, hooks: false }, 'and it stays recorded');
 });
 
+test('a refresh replays --runner so a bunx wiring is not rewritten as npx', () => {
+  const repo = tmpRepo('upkeep-runner');
+  writeStamp(repo, '1.0.0', ['cursor'], { runner: 'bunx' });
+  let seen: WiringOpts | null = null;
+  reconcileWiring(repo, '2.0.0', {
+    wired: () => ['cursor'],
+    rewrite: (_repo, _hosts, opts) => { seen = opts; },
+  });
+  assert.equal(seen?.runner, 'bunx');
+  assert.equal(readStamp(repo)?.opts?.runner, 'bunx');
+});
+
 test('by default a refresh DOES reach ~/.codex — nothing else ever would', () => {
   // No skill, rule file, or MCP instruction tells an agent to run `graft init`,
   // so skipping the out-of-repo writes means a Codex user never gets them.

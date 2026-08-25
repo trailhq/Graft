@@ -158,3 +158,10 @@ test('buildGraphIfMissing: an existing graph is left alone', () => {
   // A bogus cliPath would throw if it were reached; the wiring check short-circuits.
   assert.equal(buildGraphIfMissing(dir, { build: true, cliPath: '/nonexistent/cli.js' }), false);
 });
+
+test('runInit --runner bunx writes bunx into .mcp.json', () => {
+  const d = fresh();
+  runInit(d, { build: false, runner: 'bunx' });
+  const mcp = JSON.parse(readFileSync(join(d, '.mcp.json'), 'utf8'));
+  assert.deepEqual(mcp.mcpServers.graft, { command: 'bunx', args: ['@nanonets/graft', 'mcp'] });
+});

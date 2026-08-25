@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`graft init --runner <npx|bunx|pnpm|yarn>`**, and lockfile detection for the
+  same choice. Generated MCP configs (`.mcp.json`, `.cursor/mcp.json`,
+  `.gemini/settings.json`, `.kiro/settings/mcp.json`, `opencode.json`, Codex/Grok
+  TOML) used to hardcode `npx -y`. They now pick `bunx` / `pnpm dlx` / `yarn dlx`
+  / `npx -y` from `bun.lock`/`bun.lockb`, `pnpm-lock.yaml`, `yarn.lock`, or the
+  flag. Re-running `init` updates the existing graft entry. `--runner` is
+  recorded in the wiring stamp so a later refresh replays it.
+
 ## 0.13.0
 
 ### Added
