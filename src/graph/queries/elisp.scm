@@ -33,5 +33,29 @@
 
 ; References
 
-; * function calls — any list headed by a symbol
+; * function calls — any list headed by a symbol. This over-generates (every
+; binding head — a lambda-list parameter, a `let`/`let*` binding name, a bare
+; `cond` clause test — is itself a `(list . (symbol) …)` and would otherwise be
+; minted as a spurious call), so the three known binding-head shapes below are
+; gated off via @reference.call.ignore: same start offset as the call it would
+; otherwise produce, so generic.ts drops that match before emitting an edge.
 (list . (symbol) @name) @reference.call
+
+; * gate: a defun/defsubst/defmacro lambda-list's own parameter names
+(function_definition
+  parameters: (list . (symbol) @reference.call.ignore))
+(macro_definition
+  parameters: (list . (symbol) @reference.call.ignore))
+
+; * gate: let / let* binding names — `(let ((prefix "/usr")) …)` must not read
+; as a call to `prefix`
+(special_form
+  [ "let" "let*" ]
+  (list
+    (list . (symbol) @reference.call.ignore)))
+
+; * gate: a bare `cond` clause test symbol — `(cond (t …))` must not read as
+; a call to `t`
+(special_form
+  "cond"
+  (list . (symbol) @reference.call.ignore))

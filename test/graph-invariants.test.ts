@@ -1,6 +1,6 @@
 /**
  * Tier-0 quality gate as a test: build a real graph over a multi-tier fixture
- * (TS on the depth extractor, Rust + PHP on the generic breadth tier) and assert
+ * (TS + PHP on the depth extractor, Rust on the generic breadth tier) and assert
  * (a) the structural INVARIANTS hold on the output of BOTH tiers together, and
  * (b) the build is DETERMINISTIC — two cold builds of the same source produce the
  * same graph. Both are things every future extraction/resolution change must keep
@@ -20,8 +20,9 @@ import { checkGraphInvariants } from "../src/graph/invariants.js";
 import type { GraphV1 } from "../src/graph/types.js";
 
 // A recursion-free fixture spanning both tiers: main→helper (TS, depth),
-// load→parse (Rust, breadth), Circle implements Shape (PHP, breadth → a
-// `references` edge). No function calls itself, so self-loops must be zero.
+// load→parse (Rust, breadth), Circle implements Shape (PHP, depth → an
+// `implements` edge; PHP has a depth extractor, so it is not on the breadth
+// tier). No function calls itself, so self-loops must be zero.
 function writeFixture(dir: string): void {
   mkdirSync(join(dir, "src"), { recursive: true });
   writeFileSync(
@@ -61,12 +62,12 @@ test("Tier-0: a built multi-tier graph satisfies every structural invariant", as
 
     // both tiers are actually present, or the fixture isn't testing what it claims
     const origins = new Set(g!.nodes.filter((n) => n.kind !== "file").map((n) => n.origin));
-    assert.ok(origins.has("ast"), "TS depth-tier nodes present");
-    assert.ok(origins.has("generic"), "Rust/PHP breadth-tier nodes present");
+    assert.ok(origins.has("ast"), "TS/PHP depth-tier nodes present");
+    assert.ok(origins.has("generic"), "Rust breadth-tier nodes present");
     // and that resolution actually produced the edge kinds this gate is meant to guard
     const rels = new Set(g!.edges.map((e) => e.relation));
     assert.ok(rels.has("calls"), "call edges resolved");
-    assert.ok(rels.has("references"), "a breadth-tier references edge resolved (Circle→Shape)");
+    assert.ok(rels.has("implements"), "a PHP depth-tier implements edge resolved (Circle→Shape)");
     assert.ok(rels.has("contains"), "containment edges present");
 
     const { problems, selfLoopCalls } = checkGraphInvariants(g!);

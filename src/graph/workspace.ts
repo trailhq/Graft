@@ -8,9 +8,13 @@
  *   { "version": 1, "children": ["repoA", "repoB"] }
  *
  * Queries run at the parent federate across the children: `ask` fuses every
- * child's ranked hits with the same RRF `fuseScopes` used inside a single
- * multi-scope repo (so the big repo can't drown the small one), `grep`/`map`/
- * `check`/`callers` run per child and merge, always labeled `<child>/`.
+ * child's ranked hits with `fuseScopes`, reciprocal-rank fusion, so the big
+ * repo can't drown the small one. Scopes INSIDE one repo no longer take that
+ * path — they share corpus statistics and a normalization denominator, so they
+ * are combined by score (see `ask/fuse.ts`). Separate child repositories have
+ * no such shared scale, which is exactly the case rank fusion is for.
+ * `grep`/`map`/`check`/`callers` run per child and merge, always labeled
+ * `<child>/`.
  *
  * This module owns the pure/core pieces (the format, its readers/writers, graph
  * loading, and the federated command bodies that return renderable data). The
@@ -34,6 +38,7 @@ import { edgeWalk, resolveSymbol, type Direction } from "./traverse.js";
 import { wiringPath } from "./write.js";
 import type { GraphV1 } from "./types.js";
 import { ask, type AskHit, type AskResult } from "../ask/ask.js";
+import { fileFirstRoundRobin } from "../ask/file-selection.js";
 import { fuseScopes, STRONG_FLOOR, HIGH_FLOOR, type ScopedDoc } from "../ask/fuse.js";
 import { grepGraph, type GrepGroup, type GrepResult } from "../search/grep.js";
 import { formatGrepResult, zeroHitNote } from "../search/grep-cli.js";
@@ -164,6 +169,12 @@ function prefixPointer(child: string, pointer: string): string {
     .join(", ");
 }
 
+/** The exact child-relative file owning a lexical symbol hit. File nodes use a
+ * bare path; definition hits append `:Lx-Ly`. */
+function hitFile(pointer: string): string {
+  return pointer.match(/^(.*):L\d+-L\d+$/)?.[1] ?? pointer;
+}
+
 export interface FederateAskOptions {
   limit?: number;
   source?: boolean;
@@ -188,18 +199,25 @@ interface ChildRun {
 // STRONG_FLOOR / HIGH_FLOOR (a child federates if its top hit matched a
 // query term in a NAME/PATH field ≥ STRONG_FLOOR, OR its overall name+path+
 // body coverage is broad enough to be real even body-only, ≥ HIGH_FLOOR) are
-// defined ONCE in `../ask/fuse.js` and imported here — `rankScopesAndFuse`
-// (single-graph multi-scope, `src/ask/fuse.ts`) gates on the exact same two
-// floors, so the two paths that solve the identical "a weak scope must not
-// federate beside a strong one" problem can never drift apart again.
+// defined ONCE in `../ask/fuse.js` and imported here. This is now their only
+// caller: a share-of-the-query threshold is the best available signal when the
+// candidates carry no common score scale, which is the situation across child
+// repositories. `rankScopesAndFuse` used to gate on them for the same reason
+// and no longer needs to — within one repo the scores are comparable, so a
+// weak scope is held back by scoring low rather than by a strength floor.
 
 /**
- * Federated `ask` across a workspace: run each child's own per-scope ask
- * pipeline, then fuse ALL the children's scope lists with the same
- * `fuseScopes` used inside a single multi-scope repo. Each child contributes
- * one fusion scope per intra-child scope, labeled `<child>/<scope>` (or just
- * `<child>` for a child's root scope), so a big repo can't drown a small one —
- * rank positions are comparable across repos where raw scores are not.
+ * Federated `ask` across a workspace: run each child's own ask pipeline, then
+ * fuse ALL the children's scope lists with `fuseScopes` (reciprocal rank). Each
+ * child contributes one fusion scope per intra-child scope, labeled
+ * `<child>/<scope>` (or just `<child>` for a child's root scope), so a big repo
+ * can't drown a small one — rank positions are comparable across repos where
+ * raw scores are not.
+ *
+ * Rank fusion is still right HERE, and only here: each child was scored against
+ * its own corpus, so cross-child scores share no scale. Within a single repo
+ * that is no longer true — `rankScopesAndFuse` gives every scope the same
+ * statistics and the same denominator and combines them by score.
  *
  * Returns a normal `AskResult`; `formatAsk` renders it unchanged, labeling each
  * hit `[<child>/…]` via the standard multi-scope path.
@@ -242,6 +260,9 @@ export function federateAsk(
         full: opts.full,
         graphRank: opts.graphRank,
         in: childIn,
+        // The parent owns the final cross-repo ranking. Selecting inside each
+        // child would be undone by fusion and could truncate a hybrid list.
+        fileFirst: false,
       });
     } catch {
       continue; // corrupt child, or a sub-scope --in matching nothing here
@@ -287,10 +308,25 @@ export function federateAsk(
   }
 
   const fused = fuseScopes(docs);
-  const hits: AskHit[] = fused.ranked.slice(0, limit).map((rd) => {
+  const rankedHits = fused.ranked.map((rd) => {
     const { child, hit } = back.get(rd.id)!;
-    return { ...hit, score: rd.score, scope: rd.scope, pointer: prefixPointer(child, hit.pointer) };
+    const value: AskHit = {
+      ...hit,
+      score: rd.score,
+      scope: rd.scope,
+      pointer: prefixPointer(child, hit.pointer),
+    };
+    return {
+      // Lexical symbols share a file queue. Concepts and structural neighbours
+      // remain singleton partitions, so this lexical selection layer cannot
+      // reorder `who calls` / `dependencies of` answers.
+      group: hit.kind === "symbol"
+        ? `file:${child}/${hitFile(hit.pointer)}`
+        : `singleton:${child}:${rd.id}`,
+      value,
+    };
   });
+  const hits = fileFirstRoundRobin(rankedHits, limit);
 
   const alsoMatched = [...fused.alsoMatched, ...gatedOut];
   const note = coverageNote(wg);

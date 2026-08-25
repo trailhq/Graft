@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeStats } from '../src/claude/stats.js';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { computeStats, readWiring } from '../src/claude/stats.js';
 
 const wiring = {
   meta: { version: 1, nodeCount: 3, edgeCount: 2, languages: ['typescript'] },
@@ -26,4 +29,16 @@ test('computeStats tolerates missing meta by counting arrays', () => {
   assert.equal(s.nodeCount, 1);
   assert.equal(s.edgeCount, 0);
   assert.equal(s.readyCount, 0);
+});
+
+test('readWiring reads from a GRAFT_DIR-relocated context dir instead of <projectDir>/graft', () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-stats-dir-'));
+  mkdirSync(join(d, 'elsewhere', '.graph'), { recursive: true });
+  writeFileSync(join(d, 'elsewhere', '.graph', 'wiring.json'), JSON.stringify(wiring));
+  process.env.GRAFT_DIR = 'elsewhere';
+  try {
+    assert.deepEqual(readWiring(d), wiring);
+  } finally {
+    delete process.env.GRAFT_DIR;
+  }
 });

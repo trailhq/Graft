@@ -21,6 +21,9 @@ export interface VizNode {
   type: string;
   summary: string;
   sources: string[];
+  /** Code to show under the node, in place of `sources`. Set by
+   * `blast --export-viz`, where every node stands for real changed lines. */
+  evidence?: Evidence[];
 }
 
 export interface VizEdge {
@@ -30,12 +33,44 @@ export interface VizEdge {
   description?: string;
 }
 
+/**
+ * One line of code shown under a node, with the sign git gave it (` ` for an
+ * unchanged line quoted as context — the affected side has no diff to show).
+ */
+export interface EvidenceLine {
+  /** Post-image line number; a deleted line has none. */
+  n: number | null;
+  sign: "+" | "-" | " ";
+  text: string;
+}
+
+/**
+ * A snippet a panel shows instead of a bare path.
+ *
+ * A reviewer reading "src/blast/blast-cli.ts · L172-L193" has to go and open the
+ * file to learn anything; the same block with four lines of the actual change in
+ * it answers the question where they are standing.
+ */
+export interface Evidence {
+  /** `symbol · path:12-34` — grep-able, because a span alone is not. */
+  label: string;
+  /** Why these lines are here, e.g. `calls blastVizGraph` or `added`. */
+  note?: string;
+  lines: EvidenceLine[];
+  /** Lines the cap dropped, so a folded hunk says so rather than lying. */
+  more?: number;
+}
+
 export interface VizGraph {
   meta: {
     nodeCount: number;
     edgeCount: number;
     skippedFiles: number;
     droppedEdges: number;
+    /** Why there is nothing to draw, when there is nothing to draw. A published
+     * page cannot answer a question a reader asks of the console, so an empty
+     * canvas has to say what it means — see `blastVizGraph`. */
+    emptyNote?: string;
   };
   nodes: VizNode[];
   edges: VizEdge[];

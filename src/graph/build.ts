@@ -283,22 +283,14 @@ export async function buildGraph(
 
   const edges = resolveEdges(nodes, rawEdges, { goModules: readGoModules(root, repoFiles) });
 
-  // graph.json is its own Tier-2 cache: fold in the prior meaning layer so an
-  // unchanged body is never re-summarized (and a Tier-1-only run never wipes it).
-  const prior = readGraph(wiringPath(outDir));
-  const priorById = new Map((prior?.nodes ?? []).map((n) => [n.id, n]));
-  const meaning = await enrichGraph(nodes, priorById, sources, {
-    summarizer: opts.summarizer,
-    concurrency: opts.concurrency,
-    onProgress: ({ index, total, node }) =>
-      opts.onProgress?.({ phase: "enrich", index, total, file: node }),
-  });
-  errors.push(...meaning.errors);
-
   // Guard 5 (minimum-substance): node counts aren't known until nodes are
   // assembled, so the merge-tiny-scopes-into-root guard runs here.
   const scopes = applyMinSubstanceGuard(discoveredScopes, nodes);
 
+  // Assemble the graph BEFORE the meaning pass, so the crux pass can checkpoint it to
+  // disk periodically (#128): crux/summary mutate node objects in place and never
+  // change the node/edge SET, so `meta` stays valid; the opt-in LSP pass below is the
+  // only thing that adds edges, and it runs before the final write.
   const graph: GraphV1 = {
     meta: {
       version: 1,
@@ -310,6 +302,22 @@ export async function buildGraph(
     nodes,
     edges,
   };
+
+  // graph.json is its own Tier-2 cache: fold in the prior meaning layer so an
+  // unchanged body is never re-summarized (and a Tier-1-only run never wipes it).
+  // Read BEFORE the first checkpoint can overwrite wiring.json.
+  const prior = readGraph(wiringPath(outDir));
+  const priorById = new Map((prior?.nodes ?? []).map((n) => [n.id, n]));
+  const meaning = await enrichGraph(nodes, priorById, sources, {
+    summarizer: opts.summarizer,
+    concurrency: opts.concurrency,
+    onProgress: ({ index, total, node }) =>
+      opts.onProgress?.({ phase: "enrich", index, total, file: node }),
+    // Periodic durability flush of partial crux; the next run folds it back in by
+    // body_hash, so an interrupted --deep run never repays the crux it computed.
+    checkpoint: () => writeGraph(graph, outDir),
+  });
+  errors.push(...meaning.errors);
 
   // Opt-in compiler-grade enrichment (adds lsp_resolved call edges in place).
   // Runs on the assembled graph so callee positions map back to nodes; never

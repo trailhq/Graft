@@ -45,13 +45,13 @@ export interface CruxSummarizer {
 
 const SYSTEM_PROMPT = `You explain code definitions for a code graph that helps engineers navigate a codebase.
 
-You are given ONE source file with 1-based line numbers, and a list of TARGET definitions in it. For every target, record its purpose and the line range of its core logic via the record_symbols tool.
+You are given ONE source file with 1-based line numbers, and a list of TARGET definitions in it. Describe EVERY target via the record_symbols tool.
 
 Rules:
-- Emit exactly one entry per target id given, using that id verbatim.
-- summary: ONE sentence — what the symbol is FOR at the business-logic level. Say what problem it solves or rule it enforces, not what its signature already says.
-- crux_start / crux_end: FILE line numbers (as shown), inside that symbol's own line range. Pick the SINGLE most important contiguous span — the core branch, formula, guard, or state change. Keep it TIGHT: at most ~8 lines, and NEVER the whole function. If you can't narrow it below that, the symbol has no distinct crux — use 0/0.
-- Skip boilerplate, logging, and plumbing. If a symbol has no meaningful crux (trivial getter, data holder, one-line delegation, or logic spread evenly with no focal point), use "crux_start": 0 and "crux_end": 0.`;
+- Return EXACTLY ONE entry for EVERY target id, using that id verbatim. The number of entries you return MUST equal the number of targets. Never omit a target: a reply missing any id is invalid and will be re-requested.
+- A trivial symbol is NOT an exception. You still return it — with a one-sentence summary and crux 0/0 (see below). "Skip" means "give it no crux span", NEVER "leave it out".
+- summary: ONE sentence — what the symbol is FOR at the business-logic level (the problem it solves or the rule it enforces), not a restatement of its signature.
+- crux_start / crux_end: FILE line numbers (as shown), inside that symbol's own line range. Pick the SINGLE most important contiguous span — the core branch, formula, guard, or state change — at most ~8 lines, and NEVER the whole function. When there is no single focal span (a trivial getter, a plain data holder, a one-line delegation, or logic spread evenly), use crux_start: 0 and crux_end: 0. That 0/0 IS the answer — do not drop the entry.`;
 
 const RECORD_TOOL = "record_symbols";
 
@@ -95,7 +95,8 @@ function userContent(input: FileCruxInput): string {
         (n.signature ? ` | ${n.signature}` : ""),
     )
     .join("\n");
-  return `FILE: ${input.path}\n\n${numberLines(input.source)}\n\nTARGETS:\n${targets}`;
+  const n = input.nodes.length;
+  return `FILE: ${input.path}\n\n${numberLines(input.source)}\n\nTARGETS (${n} — return all ${n}, one entry per id):\n${targets}`;
 }
 
 /** Normalize the tool's parsed argument object into a {@link NodeCrux} list. */
@@ -111,6 +112,66 @@ function parseResults(obj: { symbols?: unknown } | undefined): NodeCrux[] {
       crux_start: num(s.crux_start),
       crux_end: num(s.crux_end),
     }));
+}
+
+/**
+ * Some OpenAI-compatible gateways ignore forced `tool_choice` and put the tool
+ * payload in `content` instead (plain `{symbols:…}`, fenced JSON, or an emulated
+ * `[{name, parameters}]` array). Without this recovery the meaning pass sees an
+ * empty `toolCalls` list, leaves every node `pending`, and `graft check` loops
+ * on "run --deep" forever (#172; same trigger as #129 for the crux path).
+ */
+function argsFromResponse(res: { text: string; toolCalls: { name: string; args: unknown }[] }): {
+  symbols?: unknown;
+} | undefined {
+  const call = res.toolCalls.find((c) => c.name === RECORD_TOOL) ?? res.toolCalls[0];
+  if (call?.args && typeof call.args === "object" && !Array.isArray(call.args)) {
+    return call.args as { symbols?: unknown };
+  }
+  return recoverArgsFromContent(res.text);
+}
+
+function recoverArgsFromContent(text: string): { symbols?: unknown } | undefined {
+  const raw = text?.trim();
+  if (!raw) return undefined;
+  const stripped = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+
+  const asSymbols = (value: unknown): { symbols?: unknown } | undefined => {
+    if (!value || typeof value !== "object") return undefined;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (!item || typeof item !== "object") continue;
+        const rec = item as Record<string, unknown>;
+        const name = typeof rec.name === "string" ? rec.name : "";
+        // Accept the crux tool, or a generic emit_json wrapper some gateways use.
+        if (name && name !== RECORD_TOOL && name !== "emit_json") continue;
+        const params = rec.parameters ?? rec.arguments ?? rec.args;
+        const hit = asSymbols(params);
+        if (hit) return hit;
+      }
+      return undefined;
+    }
+    const obj = value as Record<string, unknown>;
+    if (Array.isArray(obj.symbols)) return obj as { symbols?: unknown };
+    return undefined;
+  };
+
+  try {
+    const hit = asSymbols(JSON.parse(stripped));
+    if (hit) return hit;
+  } catch {
+    /* try bracket slice below */
+  }
+  const start = stripped.indexOf("{");
+  const end = stripped.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    try {
+      return asSymbols(JSON.parse(stripped.slice(start, end + 1)));
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 /** Crux summarizer backed by any {@link ChatModel} via forced tool calling. */
@@ -135,6 +196,6 @@ export class ChatCruxSummarizer implements CruxSummarizer {
         { role: "user", content: userContent(input) },
       ],
     });
-    return parseResults(res.toolCalls[0]?.args as { symbols?: unknown } | undefined);
+    return parseResults(argsFromResponse(res));
   }
 }

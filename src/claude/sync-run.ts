@@ -1,13 +1,19 @@
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { readWiring, computeStats } from './stats.js';
-import { patchStats, releaseLock } from './state.js';
+import { patchStats, releaseLock, resolveContextDir } from './state.js';
 import { graftCliPath } from './paths.js';
 
 /** MONEY GUARD: plain `graft build` only — structural, $0, offline. Never --deep. */
 function realBuild(dir: string): void {
-  execFileSync(process.execPath, [graftCliPath(), 'build', '.'],
-    { cwd: dir, stdio: 'ignore', timeout: 120000 });
+  // GRAFT_TEST_CLI is the same seam hooks.ts's graftJson uses, so a test can
+  // point this at a stub and inspect the exact argv it was invoked with.
+  const cliPath = process.env.GRAFT_TEST_CLI ?? graftCliPath();
+  const args = [cliPath, 'build', '.'];
+  // Mirrors `withContextDirArg` in hooks.ts: a no-op unless GRAFT_DIR is set, so an
+  // unconfigured repo's rebuild sees byte-identical argv to before this existed.
+  if (process.env.GRAFT_DIR) args.push('--dir', resolveContextDir(dir));
+  execFileSync(process.execPath, args, { cwd: dir, stdio: 'ignore', timeout: 120000 });
 }
 
 export function runSync(dir: string, build: (d: string) => void = realBuild): void {

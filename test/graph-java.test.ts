@@ -203,11 +203,12 @@ test("Java extraction: call edges — implicit `this`, typed field receiver, con
   }
 });
 
-test("Java extraction: a `var` local states no type, so its member call stays unresolved", async () => {
-  // Not a defect to fix by guessing — it is the documented limit of a deterministic,
-  // single-file binding pass. `var local = new Store()` would need return-type
-  // inference to know `local` is a Store. The constructor edge still lands, so the
-  // dependency is not lost entirely; only the member call through it is.
+test("Java extraction: a `var local = new Store()` member call resolves via the initializer", async () => {
+  // `var` states no type at the declaration site, so a single-file binding pass
+  // cannot use the type annotation. It CAN, however, read a `new X()`
+  // initializer — the one shape that names its own type with no return-type
+  // inference — so `var local = new Store(); local.save(...)` resolves the
+  // member call to Store.save, not just the constructor edge to Store.
   const dir = makeFixture();
   try {
     await buildGraph(dir);
@@ -215,16 +216,16 @@ test("Java extraction: a `var` local states no type, so its member call stays un
     const calls = graph.edges.filter((e) => e.relation === "calls");
 
     assert.ok(
-      !calls.some(
+      calls.some(
         (e) => e.source === `${APP_JAVA}#App.inferred` && e.target === `${PKG}/Store.java#Store.save`,
       ),
-      "a var-typed receiver must not be guessed into a resolved edge",
+      "a var-typed receiver constructed by `new Store()` should resolve the member call",
     );
     assert.ok(
       calls.some(
         (e) => e.source === `${APP_JAVA}#App.inferred` && e.target === `${PKG}/Store.java#Store`,
       ),
-      "the constructor edge still resolves, so the dependency is still visible",
+      "the constructor edge still resolves too",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -624,6 +625,730 @@ test("Java construction: a nested `new` does not bind to a sibling of the same s
     );
 
     assert.deepEqual(ctor, [], "a qualified nested construction must not pick a Builder at all");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Java binding improvements: the constructs upstream's handleJava didn't
+// cover. Each pins one binding shape so a regression is named, not buried in a
+// whole-repo edge count. ---
+
+/** Fixture exercising every binding shape added on top of upstream's
+ * `formal_parameter` / `local_variable_declaration` / `field_declaration`:
+ * varargs, try-with-resources (typed and `var`), enhanced-for, catch parameter,
+ * array-typed field and local, and a field whose declared type is missing but
+ * whose initializer is a `new Foo()`. `Worker` and `Task` are defined in the
+ * same file so member calls resolve to in-repo nodes we can assert on. */
+const BINDINGS_SRC = `package com.acme;
+
+public class Worker {
+  public void run(Task task) {}
+  public void close() {}
+}
+
+public class Task {
+  public void start() {}
+}
+
+public class Bindings {
+
+  // array-typed field: Worker[] pool
+  private Worker[] pool;
+
+  // field with no declared type but a new Worker() initializer
+  private Worker initField = new Worker();
+
+  public void use(Worker w) {
+    // varargs: String... args
+    useVarargs("a", "b");
+    // try-with-resources, explicit type: try (Worker r = new Worker())
+    try (Worker r = new Worker()) {
+      r.run(new Task());
+    }
+    // try-with-resources, var: try (var r = new Worker())
+    try (var r = new Worker()) {
+      r.run(new Task());
+    }
+    // enhanced-for: for (Worker x : pool)
+    for (Worker x : pool) {
+      x.run(new Task());
+    }
+    // catch (single type): catch (RuntimeException e)
+    try {
+      w.run(new Task());
+    } catch (RuntimeException e) {
+      e.getMessage();
+    }
+    // array-typed local: Worker[] local = new Worker[1]
+    Worker[] local = new Worker[1];
+    // var local: var v = new Worker()
+    var v = new Worker();
+    v.run(new Task());
+  }
+
+  public void useVarargs(String... args) {
+    args.length();
+  }
+}
+`;
+
+function makeBindingsFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), "graft-java-bind-"));
+  mkdirSync(join(dir, PKG), { recursive: true });
+  writeFileSync(join(dir, PKG, "Worker.java"), BINDINGS_SRC);
+  writeFileSync(join(dir, PKG, "Store.java"), STORE);
+  return dir;
+}
+
+// All three classes (Worker, Task, Bindings) live in Worker.java — Java allows
+// multiple top-level classes in one file as long as only one is public. The
+// file is named after Worker, so every node id is rooted at Worker.java.
+const BIND_FILE = `${PKG}/Worker.java`;
+
+test("Java bindings: a varargs parameter binds its name to the element type", async () => {
+  // `String... args` — tree-sitter names the node `spread_parameter` with no
+  // field names, so this is not the `formal_parameter` branch. The element type
+  // is the first named child; `args` binds to `String`. `String.length()` is a
+  // builtin, so the safe-failure mode is "no calls edge to a repo method named
+  // length" — which is what we assert, confirming the binding landed on a
+  // non-repo type rather than being dropped entirely.
+  const dir = makeBindingsFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const badCall = graph.edges.find(
+      (e) =>
+        e.relation === "calls" &&
+        e.source === `${BIND_FILE}#Bindings.useVarargs` &&
+        graph.nodes.find((n) => n.id === e.target)?.name === "length",
+    );
+    assert.equal(badCall, undefined, "args.length() on a String varargs must not wire to a repo method");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java bindings: try-with-resources binds the resource variable (explicit type)", async () => {
+  // `try (Worker r = new Worker()) { r.run(...) }` — `r` binds to `Worker`, so
+  // `r.run(...)` resolves to Worker.run.
+  const dir = makeBindingsFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const call = graph.edges.find(
+      (e) =>
+        e.relation === "calls" &&
+        e.source === `${BIND_FILE}#Bindings.use` &&
+        e.target === `${BIND_FILE}#Worker.run`,
+    );
+    assert.ok(call, "r.run() inside try-with-resources should resolve to Worker.run");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java bindings: try-with-resources binds the resource variable (`var` + initializer)", async () => {
+  // `try (var r = new Worker()) { r.run(...) }` — the declared type is `var`,
+  // so the binding falls back to the `new Worker()` initializer. A dedicated
+  // fixture (no typed-TWR, no enhanced-for, no var-local on Worker) isolates
+  // the var-TWR path: the only Worker.run edge that can fire is the one through
+  // `r`, so its presence proves the var fallback bound `r` to `Worker`.
+  const dir = mkdtempSync(join(tmpdir(), "graft-java-var-twr-"));
+  try {
+    mkdirSync(join(dir, PKG), { recursive: true });
+    writeFileSync(
+      join(dir, PKG, "VarTwr.java"),
+      `package com.acme;
+
+public class Worker { public void run(Task t) {} }
+public class Task {}
+
+public class VarTwr {
+  public void use() {
+    try (var r = new Worker()) {
+      r.run(new Task());
+    }
+  }
+}`,
+    );
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const call = graph.edges.find(
+      (e) =>
+        e.relation === "calls" &&
+        e.source === `${PKG}/VarTwr.java#VarTwr.use` &&
+        e.target === `${PKG}/VarTwr.java#Worker.run`,
+    );
+    assert.ok(call, "r.run() inside `try (var r = new Worker())` should resolve to Worker.run via the initializer fallback");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java bindings: enhanced-for binds the loop variable to the element type", async () => {
+  // `for (Worker x : pool) { x.run(...) }` — `x` binds to `Worker` from the
+  // `type` field, so `x.run(...)` resolves to Worker.run.
+  const dir = makeBindingsFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const call = graph.edges.find(
+      (e) =>
+        e.relation === "calls" &&
+        e.source === `${BIND_FILE}#Bindings.use` &&
+        e.target === `${BIND_FILE}#Worker.run`,
+    );
+    assert.ok(call, "x.run() inside enhanced-for should resolve to Worker.run");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java bindings: a catch parameter binds its name to the caught type", async () => {
+  // `catch (RuntimeException e) { e.getMessage(); }` — `e` binds to
+  // `RuntimeException`, which is not a repo symbol, so `e.getMessage()` must
+  // NOT wire to any repo method named `getMessage`. The assertion confirms the
+  // binding landed on a non-repo type (and did not silently drop, which would
+  // leave `e` unbound and let `getMessage` fall through to name-only
+  // resolution — a different and worse failure mode).
+  const dir = makeBindingsFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const badCall = graph.edges.find(
+      (e) =>
+        e.relation === "calls" &&
+        e.source === `${BIND_FILE}#Bindings.use` &&
+        graph.nodes.find((n) => n.id === e.target)?.name === "getMessage",
+    );
+    assert.equal(badCall, undefined, "e.getMessage() on a caught RuntimeException must not wire to a repo method");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java bindings: an array-typed field binds to the element type", async () => {
+  // `private Worker[] pool` — `pool` binds to `Worker` (array_type → element),
+  // so the enhanced-for over `pool` types its loop variable correctly. The
+  // binding's effect is already pinned by the enhanced-for test; this is a
+  // smoke check that the fixture builds and the Bindings class node exists.
+  const dir = makeBindingsFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    assert.ok(graph.nodes.some((n) => n.id === `${BIND_FILE}#Bindings`), "Bindings class node exists");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java bindings: a field with no declared type binds via its `new X()` initializer", async () => {
+  // `private Worker initField = new Worker()` — no type annotation, but the
+  // initializer is an `object_creation_expression`. The binding falls back to
+  // the constructed type. The initializer also emits a constructor edge to
+  // Worker, which is the same fallback path — assert it lands.
+  const dir = makeBindingsFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const ctorEdge = graph.edges.find(
+      (e) =>
+        e.relation === "calls" &&
+        e.source === `${BIND_FILE}#Bindings` &&
+        e.target === `${BIND_FILE}#Worker`,
+    );
+    assert.ok(ctorEdge, "the field initializer `new Worker()` should emit a constructor edge to Worker");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java extraction: annotation type element declarations are method-kind nodes", async () => {
+  // `@interface Version { String value(); }` — upstream maps
+  // `annotation_type_declaration` to `interface` but did not map
+  // `annotation_type_element_declaration`, so the element method was missing
+  // from the graph. The element is a method-like declaration (`String value()
+  // default "1"`), so it takes `method` kind.
+  const dir = mkdtempSync(join(tmpdir(), "graft-java-anno-"));
+  try {
+    mkdirSync(join(dir, PKG), { recursive: true });
+    writeFileSync(
+      join(dir, PKG, "Version.java"),
+      "package com.acme;\n\npublic @interface Version {\n  String value() default \"1\";\n  int count() default 0;\n}\n",
+    );
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+
+    const anno = nodeById(graph, `${PKG}/Version.java#Version`);
+    assert.equal(anno?.kind, "interface", "@interface maps to interface kind");
+
+    const valueElem = nodeById(graph, `${PKG}/Version.java#Version.value`);
+    assert.ok(valueElem, "Version.value element should be a node");
+    assert.equal(valueElem?.kind, "method", "annotation element maps to method kind");
+
+    const countElem = nodeById(graph, `${PKG}/Version.java#Version.count`);
+    assert.ok(countElem, "Version.count element should be a node");
+    assert.equal(countElem?.kind, "method");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java scopes: pom.xml, build.gradle, and build.gradle.kts are project markers", async () => {
+  // A Java project rooted at a pom.xml / build.gradle / build.gradle.kts should
+  // be its own scope, so a multi-module repo ranks per-module rather than
+  // pooling. Each marker gets its own temp repo; the scope's `markers` list
+  // should include the marker file.
+  const { discoverScopes } = await import("../src/graph/scopes.js");
+  for (const marker of ["pom.xml", "build.gradle", "build.gradle.kts"] as const) {
+    const dir = mkdtempSync(join(tmpdir(), "graft-java-scope-"));
+    try {
+      mkdirSync(join(dir, "backend"), { recursive: true });
+      writeFileSync(join(dir, "backend", marker), "");
+      const scopes = discoverScopes(dir);
+      const backend = scopes.find((s) => s.prefix === "backend");
+      assert.ok(backend, `a backend/ dir with ${marker} should be a scope`);
+      assert.ok(
+        backend!.markers.includes(marker),
+        `the scope's markers should include ${marker}`,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+/**
+ * Heritage fixture. Every supertype here is generic, qualified, or a type variable —
+ * the three shapes that a naive walk of the clause turns into bogus supertypes. `Item`
+ * carries a method no subclass has, so a wrong `extends` is visible as a wrong CALL:
+ * `extends` feeds `classParents`, which `resolveTypedMember` walks up.
+ */
+const HER_ITEM = `package com.acme;
+
+public class Item {
+  public void poison() {}
+}
+`;
+
+const HER_BASE = `package com.acme;
+
+public class Base<T> {
+  public void real() {}
+}
+`;
+
+const HER_MARKER = `package com.acme;
+
+public interface Marker {}
+`;
+
+const HER_OUTER = `package com.acme;
+
+public class Outer {
+  public interface Inner {}
+}
+`;
+
+const HER_CHILD = `package com.acme;
+
+public final class Child extends Base<Item> implements Marker {
+  public void use() {
+    Child c = new Child();
+    c.poison();
+  }
+}
+`;
+
+const HER_HOLDER = `package com.acme;
+
+public class Holder<T> extends Base<T> {}
+`;
+
+const HER_IMPL = `package com.acme;
+
+public final class Impl implements Outer.Inner {}
+`;
+
+function heritageFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), "graft-java-heritage-"));
+  mkdirSync(join(dir, PKG), { recursive: true });
+  writeFileSync(join(dir, PKG, "Item.java"), HER_ITEM);
+  writeFileSync(join(dir, PKG, "Base.java"), HER_BASE);
+  writeFileSync(join(dir, PKG, "Marker.java"), HER_MARKER);
+  writeFileSync(join(dir, PKG, "Outer.java"), HER_OUTER);
+  writeFileSync(join(dir, PKG, "Child.java"), HER_CHILD);
+  writeFileSync(join(dir, PKG, "Holder.java"), HER_HOLDER);
+  writeFileSync(join(dir, PKG, "Impl.java"), HER_IMPL);
+  return dir;
+}
+
+test("Java heritage: a type ARGUMENT is not a supertype", async () => {
+  // `implements Comparable<Item>` / `extends Base<Item>` used to walk into
+  // `type_arguments` and report `Item` as a supertype of its own accord.
+  const dir = heritageFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const from = `${PKG}/Child.java#Child`;
+    const her = graph.edges.filter(
+      (e) => (e.relation === "extends" || e.relation === "implements") && e.source === from,
+    );
+
+    assert.ok(
+      her.some((e) => e.relation === "extends" && e.target === `${PKG}/Base.java#Base`),
+      "the named supertype still resolves",
+    );
+    assert.ok(
+      her.some((e) => e.relation === "implements" && e.target === `${PKG}/Marker.java#Marker`),
+      "a non-generic interface is unaffected",
+    );
+    assert.ok(
+      !her.some((e) => e.target === `${PKG}/Item.java#Item` || e.target === "Item"),
+      "the type argument must not become a supertype",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java heritage: a bogus supertype no longer poisons call resolution", async () => {
+  // The reason this outranks a cosmetic heritage fix. `extends` edges populate
+  // `classParents`, so `Child extends Item` made `resolveTypedMember` walk `Item` as an
+  // ancestor and resolve `c.poison()` — a method that does not compile on a `Child`.
+  const dir = heritageFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+
+    assert.ok(
+      !graph.edges.some(
+        (e) =>
+          e.relation === "calls" &&
+          e.source === `${PKG}/Child.java#Child.use` &&
+          e.target === `${PKG}/Item.java#Item.poison`,
+      ),
+      "a method reachable only through a bogus ancestor must not resolve",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java heritage: a type VARIABLE is never a supertype", async () => {
+  // `class Holder<T> extends Base<T>` names `Base`. A `T` surviving to the edge list is
+  // the declaration's own parameter, which erasure alone would not always remove.
+  const dir = heritageFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const from = `${PKG}/Holder.java#Holder`;
+    const her = graph.edges.filter(
+      (e) => (e.relation === "extends" || e.relation === "implements") && e.source === from,
+    );
+
+    assert.deepEqual(
+      her.map((e) => e.target),
+      [`${PKG}/Base.java#Base`],
+      "Holder extends exactly Base — not T",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java heritage: a QUALIFIED supertype keeps its whole name", async () => {
+  // Heritage keeps an unresolved base as the edge target by design, so `Outer.Inner`
+  // stays whole: truthful, and unable to false-match a bare `Inner` node elsewhere in
+  // the repo. (Construction drops a qualified name instead — it has no such contract.)
+  const dir = heritageFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const her = graph.edges.filter(
+      (e) => e.relation === "implements" && e.source === `${PKG}/Impl.java#Impl`,
+    );
+
+    assert.deepEqual(her.map((e) => e.target), ["Outer.Inner"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** Two same-named nested types in ONE file, plus a construction of one of them. Split
+ * across files the cross-file ambiguity check already drops it, so a same-file fixture
+ * is the only one that can pin the same-file branch. */
+const AMBIG = `package com.acme;
+
+public final class Api {
+
+  public static class AlphaB {
+    public static class Builder {}
+  }
+
+  public static class BetaB {
+    public static class Builder {}
+  }
+
+  public Object build() {
+    return new Builder();
+  }
+}
+`;
+
+test("resolveName: a same-file name matching two nodes resolves to neither", async () => {
+  // The same-file branch used to return `local[0]` — first in document order — and
+  // label it `extracted`, i.e. certain, while the cross-file branch two lines below
+  // required a unique match. A file with `AlphaB.Builder` and `BetaB.Builder` therefore
+  // got a silent first-wins guess for a bare `new Builder()`. Language-agnostic: the
+  // fixture is Java only because that is where it was found.
+  const dir = mkdtempSync(join(tmpdir(), "graft-resolve-ambig-"));
+  try {
+    mkdirSync(join(dir, PKG), { recursive: true });
+    writeFileSync(join(dir, PKG, "Api.java"), AMBIG);
+
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const guesses = graph.edges.filter(
+      (e) =>
+        e.relation === "calls" &&
+        e.source === `${PKG}/Api.java#Api.build` &&
+        e.target.includes("Builder"),
+    );
+
+    assert.deepEqual(guesses, [], "two candidates in one file must resolve to neither");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Receiver fixture. `javaReceiver` recognises three shapes and refuses the rest, and
+ * each branch resolves to a DIFFERENT method here, so a mutation that collapses one
+ * into another changes which edge is emitted rather than merely losing one.
+ *
+ * `Repo` and `Helper` both declare `run()` so that picking the wrong receiver picks a
+ * visibly wrong target instead of failing to resolve.
+ */
+const RCV_REPO = `package com.acme;
+
+public final class Repo {
+  public void run() {}
+}
+`;
+
+const RCV_HELPER = `package com.acme;
+
+public final class Helper {
+  public void run() {}
+}
+`;
+
+const RCV_SERVICE = `package com.acme;
+
+public final class Service {
+
+  private final Repo repo;
+
+  public Service(Repo repo) {
+    this.repo = repo;
+  }
+
+  public void viaField() {
+    this.repo.run();
+  }
+
+  public void viaLocal() {
+    Helper local = new Helper();
+    local.run();
+  }
+
+  public void viaThis() {
+    this.own();
+  }
+
+  public void viaChain(Repo[] all) {
+    all[0].run();
+  }
+
+  public void own() {}
+}
+`;
+
+function receiverFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), "graft-java-receiver-"));
+  mkdirSync(join(dir, PKG), { recursive: true });
+  writeFileSync(join(dir, PKG, "Repo.java"), RCV_REPO);
+  writeFileSync(join(dir, PKG, "Helper.java"), RCV_HELPER);
+  writeFileSync(join(dir, PKG, "Service.java"), RCV_SERVICE);
+  return dir;
+}
+
+test("Java receivers: `this.field.method()` resolves through the field's declared type", async () => {
+  // The `field_access` branch of javaReceiver, which yields `this.repo` and is then
+  // normalised to `self.repo` by resolveRecvType to meet the binding written by the
+  // field pass. No fixture exercised it before: every receiver test used a bare local.
+  const dir = receiverFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const calls = graph.edges.filter((e) => e.relation === "calls");
+
+    assert.ok(
+      calls.some(
+        (e) =>
+          e.source === `${PKG}/Service.java#Service.viaField` &&
+          e.target === `${PKG}/Repo.java#Repo.run`,
+      ),
+      "this.repo.run() should reach Repo.run",
+    );
+    assert.ok(
+      !calls.some(
+        (e) =>
+          e.source === `${PKG}/Service.java#Service.viaField` &&
+          e.target === `${PKG}/Helper.java#Helper.run`,
+      ),
+      "and must not reach the other class that also declares run()",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java receivers: an explicit `this.method()` resolves to the enclosing type", async () => {
+  // The `this` branch. Distinct from the implicit-this call already covered elsewhere:
+  // that one has no `object` node at all and never reaches javaReceiver.
+  const dir = receiverFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+
+    assert.ok(
+      graph.edges.some(
+        (e) =>
+          e.relation === "calls" &&
+          e.source === `${PKG}/Service.java#Service.viaThis` &&
+          e.target === `${PKG}/Service.java#Service.own`,
+      ),
+      "this.own() should reach Service.own",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java receivers: an unrecognised receiver shape resolves to nothing", async () => {
+  // `all[0].run()` is an array_access, none of the three shapes javaReceiver accepts.
+  // Pinning the refusal matters more than pinning the acceptances: without it, widening
+  // the function to "return something for any object node" would look free, and would
+  // start resolving member calls against whatever type happened to match by name.
+  const dir = receiverFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+
+    assert.deepEqual(
+      graph.edges.filter(
+        (e) => e.relation === "calls" && e.source === `${PKG}/Service.java#Service.viaChain`,
+      ),
+      [],
+      "an array-access receiver states no type, so the call must not resolve",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Issue #161: a method inside an anonymous class body (`new Greeter() { … }`)
+ * used to take the enclosing type's `owner`, so `ownerMethod["App.greet"]` held
+ * both the real method and the anonymous override. `resolveTypedMember` then
+ * same-file first-wins tied to the anonymous impl, and `App.use → App.greet`
+ * vanished. Named nested classes already own their methods correctly — keep
+ * that as a control so this fix does not retarget lexical nesting.
+ *
+ * Shape mirrors PHP #144: mint `{anonymous}` and hang methods under it.
+ */
+const ANON_GREETER = `package com.acme;
+
+public interface Greeter {
+  String greet(String n);
+}
+`;
+
+const ANON_APP = `package com.acme;
+
+public final class App {
+
+  public Greeter make() {
+    return new Greeter() {
+      @Override public String greet(String n) { return "anon:" + n; }
+    };
+  }
+
+  public String use() {
+    App self = new App();
+    return self.greet("x");
+  }
+
+  public String greet(String n) { return "real:" + n; }
+
+  public static class Nested {
+    public String greet(String n) { return "nested:" + n; }
+  }
+}
+`;
+
+function anonOwnerFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), "graft-java-anon-"));
+  mkdirSync(join(dir, PKG), { recursive: true });
+  writeFileSync(join(dir, PKG, "Greeter.java"), ANON_GREETER);
+  writeFileSync(join(dir, PKG, "App.java"), ANON_APP);
+  return dir;
+}
+
+test("Java anonymous class: methods do not take the enclosing type's owner (#161)", async () => {
+  const dir = anonOwnerFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const file = `${PKG}/App.java`;
+
+    const anon = nodeById(graph, `${file}#App.make.{anonymous}`);
+    assert.equal(anon?.kind, "class", "anonymous body mints an {anonymous} class node");
+
+    const anonGreet = nodeById(graph, `${file}#App.make.{anonymous}.greet`);
+    assert.equal(anonGreet?.kind, "method");
+    assert.equal(anonGreet?.owner, "{anonymous}", "anonymous greet is owned by {anonymous}");
+
+    const real = nodeById(graph, `${file}#App.greet`);
+    assert.equal(real?.owner, "App", "real App.greet keeps owner App");
+
+    const nested = nodeById(graph, `${file}#App.Nested.greet`);
+    assert.equal(nested?.owner, "Nested", "named nested class owner is unchanged");
+
+    assert.ok(
+      graph.edges.some(
+        (e) =>
+          e.relation === "implements" &&
+          e.source === `${file}#App.make.{anonymous}` &&
+          e.target === `${PKG}/Greeter.java#Greeter`,
+      ),
+      "anonymous class should implement Greeter",
+    );
+
+    const useCalls = graph.edges.filter(
+      (e) => e.relation === "calls" && e.source === `${file}#App.use`,
+    );
+    assert.ok(
+      useCalls.some((e) => e.target === `${file}#App.greet`),
+      `App.use should call the real App.greet; got: ${useCalls.map((e) => e.target).join(", ")}`,
+    );
+    assert.ok(
+      !useCalls.some((e) => e.target === `${file}#App.make.{anonymous}.greet`),
+      "App.use must not resolve to the anonymous greet",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

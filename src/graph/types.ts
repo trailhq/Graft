@@ -19,8 +19,9 @@ export type Kind =
   | "method"
   | "interface" // TS + Go
   | "type" // TS + Go (type alias / named type)
-  | "enum" // TS only
+  | "enum" // TS + PHP + Java
   | "struct" // Go only
+  | "trait" // PHP only
   // The generic (tags.scm) breadth tier also emits these — every tree-sitter
   // grammar's tags.scm uses the tree-sitter tags @definition.<X> vocabulary, and
   // module/constant/variable are common across the long tail (Ruby modules,

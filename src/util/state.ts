@@ -10,7 +10,7 @@
  * outside had to change when it moved.
  */
 import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, isAbsolute } from 'node:path';
 
 export interface Stats {
   nodeCount: number; edgeCount: number; languages: string[];
@@ -28,7 +28,25 @@ export function emptyStats(): Stats {
 
 const LOCK_FILE = '.sync.lock';
 
-export function cacheDir(projectDir: string): string { return join(projectDir, 'graft', '.cache'); }
+/**
+ * Where the pieces this module manages (the stats cache, the sync lock,
+ * per-session state, the upkeep stamp) actually live when no caller-supplied
+ * override is available. The Claude Code hooks, `sync-run`, the statusline,
+ * and `upkeep` all resolve a bare project dir and never see an explicit
+ * `--dir` — unlike a direct CLI invocation, which threads one through
+ * `contextDirFor` (`context/node-file.ts`). This mirrors that same override
+ * precedence for those entry points: `GRAFT_DIR` wins over the default
+ * `<projectDir>/graft`, the same env var `resolveConfig` already honors for
+ * the `--deep` LLM path. A relative `GRAFT_DIR` resolves against `projectDir`
+ * so it holds regardless of the caller's cwd.
+ */
+export function resolveContextDir(projectDir: string): string {
+  const override = process.env.GRAFT_DIR;
+  if (!override) return join(projectDir, 'graft');
+  return isAbsolute(override) ? override : join(projectDir, override);
+}
+
+export function cacheDir(projectDir: string): string { return join(resolveContextDir(projectDir), '.cache'); }
 function statsPath(d: string): string { return join(cacheDir(d), 'stats.json'); }
 
 export function readJson<T>(p: string): T | null {

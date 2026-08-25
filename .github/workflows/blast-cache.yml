@@ -1,0 +1,63 @@
+name: Blast cache
+
+# Primes the graph + area-name cache that PR runs read.
+#
+# This job exists because of how GitHub scopes caches: one saved by a pull-request
+# job belongs to that PR's branch and no other PR can read it, while one saved on
+# the default branch is readable by every branch and PR in the repo. So PR-to-PR
+# reuse of area names can only come from here — a PR restores main's cache, pays for
+# the clusters its own diff changed, and nothing else.
+on:
+  push:
+    branches: [main]
+  # graft/ holds the LLM-written area names, keyed by content hash; a manual run is
+  # the way to refill the cache after the 7-day eviction window on a quiet repo.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blast-cache
+  cancel-in-progress: true
+
+jobs:
+  prime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Enough history for a wide diff below: naming only ever sees the clusters
+          # a walk produces, so a one-commit window would fill the cache one area at
+          # a time and most PRs would still miss.
+          fetch-depth: 60
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      - name: Build the CLI from this commit
+        run: npm ci && npm run build
+
+      - name: Build the graph, the concept layer, and name every area
+        env:
+          GRAFT_API_KEY: ${{ secrets.GRAFT_API_KEY }}
+          GRAFT_BASE_URL: ${{ secrets.GRAFT_BASE_URL }}
+          GRAFT_MODEL: ${{ secrets.GRAFT_MODEL }}
+        run: |
+          set -euo pipefail
+          node dist/cli.js build .
+          # A wide window on purpose: the blast radius of the last fifty commits
+          # covers most of what any PR will reach, and naming batches them. Falls
+          # back to the root commit when the history is shorter than the window.
+          base=$(git rev-parse HEAD~50 2>/dev/null || git rev-list --max-parents=0 HEAD | head -1)
+          # `|| true`: this job's product is the cache, and a naming hiccup on a
+          # single batch must not turn main red.
+          node dist/cli.js blast . --base "$base" --depth 2 --name --format text > /dev/null || true
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: graft
+          key: graft-${{ github.sha }}

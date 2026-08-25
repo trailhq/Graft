@@ -156,6 +156,14 @@ export function mcpTargets(
       case 'kiro':
         out.push(jsonTarget(id, id, join(repo, '.kiro', 'settings', 'mcp.json'), 'mcpServers', entry));
         break;
+      case 'grok':
+        // Grok reads MCP from repo-level `.grok/config.toml` (`[mcp_servers.<name>]`),
+        // the same TOML shape Codex uses at ~/.codex/config.toml.
+        out.push({
+          hostId: id, id: 'grok', path: join(repo, '.grok', 'config.toml'),
+          scope: 'repo', kind: 'mcp', what: '[mcp_servers.graft]', format: 'toml',
+        });
+        break;
       case 'agents':
         // Guarded on the CLI actually being installed, so a plan only ever
         // lists files a real run would touch.

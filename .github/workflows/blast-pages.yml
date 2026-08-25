@@ -1,0 +1,182 @@
+name: Blast viewer
+
+# Publishes the interactive viewer for a pull request to GitHub Pages, and links it
+# from the blast-radius comment.
+#
+# `pull_request_target`, not `pull_request`, because publishing needs write access to
+# the gh-pages branch and a `pull_request` job on a fork PR has none. That choice
+# carries the standard hazard: this workflow runs with the BASE repo's permissions
+# while the PR's code is attacker-controlled on a fork. So it checks out the base
+# ref for the tooling, builds the CLI from the BASE commit, and only ever reads the
+# PR's files as data — never runs a script from the PR (no `npm ci` on the PR's
+# package.json, no postinstall). The graph is built from the PR's source text by a
+# tree-sitter parser, which executes none of it.
+#
+# A dispatch by PR number is the second entry point. It exists because a fork PR's
+# comment job cannot post the link itself (a `pull_request` job on a fork gets a
+# read-only token), so publishing that page has to be startable by hand.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number to publish the page for."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blast-pages-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # 0. Which pull request. An event carries it; a dispatch names it by number,
+      # and everything below reads these outputs so the two entry points cannot
+      # drift apart.
+      - name: Resolve the pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+        run: |
+          set -euo pipefail
+          # This number becomes a path under pr/ and a git ref. Digits only, so a
+          # dispatch cannot write outside its own directory.
+          case "$NUMBER" in
+            "" | *[!0-9]*) echo "not a pull request number: $NUMBER" >&2; exit 1 ;;
+          esac
+          gh api "repos/$REPO/pulls/$NUMBER" --jq \
+            '"number=\(.number)", "base_ref=\(.base.ref)", "base_sha=\(.base.sha)"' >> "$GITHUB_OUTPUT"
+
+      # 1. The tooling, from the base branch — never from the PR.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: base
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      - name: Build the CLI from the base commit
+        working-directory: base
+        run: npm ci && npm run build
+
+      # 2. The PR's code, as data only.
+      #
+      # actions/checkout refuses a fork's PR ref under `pull_request_target` unless
+      # the workflow opts in — the review that opt-in asks for is the header of this
+      # file: the checkout is credential-less, lands in its own directory, and
+      # nothing below executes anything from it (the CLI that reads it was built
+      # from the base commit above). Without the flag every fork PR fails here.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/merge
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+
+      # Same cache the comment job reads (see blast-cache.yml). Both jobs name the
+      # same clusters, so sharing the cache is what keeps the page's bubbles worded
+      # exactly like the comment's — two independent LLM calls could word them
+      # differently and make the link look like a different analysis.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: pr/graft
+          key: graft-${{ steps.pr.outputs.base_sha }}
+          restore-keys: |
+            graft-
+
+      - name: Build the graph and export the radius
+        working-directory: pr
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          # `--name` reads a key, so the page gets the same concept names the comment
+          # shows instead of hub-symbol fallbacks. The PR's code is never executed
+          # here (see the header) — naming only sends its source text to the model,
+          # and every returned label is sanitised before it reaches the page.
+          GRAFT_API_KEY: ${{ secrets.GRAFT_API_KEY }}
+          GRAFT_BASE_URL: ${{ secrets.GRAFT_BASE_URL }}
+          GRAFT_MODEL: ${{ secrets.GRAFT_MODEL }}
+        run: |
+          set -euo pipefail
+          node ../base/dist/cli.js build .
+          # `blast --export-viz`, not `viz --export`: the page a reviewer opens from
+          # the comment should be THIS PR's radius — the areas it changed and the
+          # areas that depend on them — not the whole repository map.
+          #
+          # `--name` is not optional here even though it costs one call: without it
+          # every bubble falls back to its hub symbol, so the page reads `cli.ts` and
+          # `exportViz` where the comment reads "CLI Entry Point" and "Visualization
+          # Export". The point of the page is that a reviewer recognises the feature.
+          node ../base/dist/cli.js blast . --base "origin/$BASE_REF" \
+            --name --title "PR #$PR_NUMBER" --export-viz ../site --format text > /dev/null
+
+      - name: Publish to gh-pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch gh-pages "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages \
+            || git clone --depth 1 "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages
+          cd pages
+          # `checkout --orphan` keeps the index, so on a repo with no gh-pages yet
+          # (where the fallback clone above landed on the default branch) the first
+          # commit would carry every file of main and Pages would serve the repo.
+          if ! git checkout gh-pages 2>/dev/null; then
+            git checkout --orphan gh-pages
+            git rm -rf --cached . >/dev/null
+            # The exported page lives outside this clone, so clean cannot reach it.
+            git clean -fdq
+          fi
+          mkdir -p "pr/$PR_NUMBER"
+          cp ../site/index.html "pr/$PR_NUMBER/index.html"
+          # Pages runs Jekyll over a branch source unless this file exists, and
+          # Jekyll would try to render the export as a template rather than serve
+          # it. Written every time, so a rebuilt or force-pushed branch cannot lose
+          # it and start silently mangling every viewer.
+          touch .nojekyll
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .nojekyll "pr/$PR_NUMBER"
+          git commit -m "viz: PR #$PR_NUMBER" || { echo "nothing changed"; exit 0; }
+          git push origin gh-pages
+
+  # A merged or closed PR's page is dead weight — and on a busy repo, thousands of
+  # 1 MB files. Removed with the PR, not on a timer.
+  cleanup:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Remove this PR's page
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch gh-pages "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages || exit 0
+          cd pages
+          [ -d "pr/$PR_NUMBER" ] || exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -r --quiet "pr/$PR_NUMBER"
+          git commit -m "viz: drop PR #$PR_NUMBER" && git push origin gh-pages

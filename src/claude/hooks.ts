@@ -1,13 +1,15 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { join, basename, isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
 import { readWiring } from './stats.js';
 import { formatBlastRadius, relevantRetrieval, formatOrientation } from './format.js';
 import { indexFreshness, staleBanner } from '../context/check.js';
-import { patchStats, readStats, acquireLock, readSession, writeSession } from './state.js';
+import { patchStats, readStats, acquireLock, readSession, writeSession, resolveContextDir } from './state.js';
 import { graftCliPath, claudeScriptPath } from './paths.js';
 import { runUpkeep } from '../upkeep-run.js';
 import { runningVersion } from '../upkeep.js';
+import { flushClosedSessions } from '../telemetry/sessions.js';
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
@@ -58,11 +60,26 @@ export function promptAskTimeout(dir: string): number {
   return Math.max(MIN_CHILD_TIMEOUT_MS, installed - HOOK_OVERHEAD_MS);
 }
 
-/** The timeout on this repo's graft hook entry for `event`, or null if it can't be
- * read (no settings file, hand-edited shape, unparseable JSON). */
-function installedHookTimeout(dir: string, event: string): number | null {
+/**
+ * Every settings file Claude Code merges hook definitions from, for a session
+ * rooted at `dir`. The per-repo file is not the only place graft's hooks can be
+ * installed: declaring them once at the user level wires every repo on the
+ * machine at once, and such a repo has no `.claude/settings.json` at all.
+ */
+function hookSettingsFiles(dir: string): string[] {
+  const user = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+  return [
+    join(dir, '.claude', 'settings.json'),
+    join(dir, '.claude', 'settings.local.json'),
+    join(user, 'settings.json'),
+  ];
+}
+
+/** The timeout on one settings file's graft hook entry for `event`, or null if it
+ * can't be read (no settings file, hand-edited shape, unparseable JSON). */
+function hookTimeoutIn(file: string, event: string): number | null {
   try {
-    const settings = JSON.parse(readFileSync(join(dir, '.claude', 'settings.json'), 'utf8')) as any;
+    const settings = JSON.parse(readFileSync(file, 'utf8')) as any;
     const blocks = settings?.hooks?.[event];
     if (!Array.isArray(blocks)) return null;
     for (const block of blocks) {
@@ -76,6 +93,39 @@ function installedHookTimeout(dir: string, event: string): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The budget this hook is actually running under, or null when no settings file
+ * declares one.
+ *
+ * The smallest declared timeout wins rather than the nearest, because when more
+ * than one file declares the hook Claude Code runs every matching entry and this
+ * process cannot tell which one launched it. Guessing high is the expensive
+ * mistake: an overrunning child gets the whole hook SIGKILLed, so `emit()` and
+ * `writeSession()` never run and the turn silently gets no retrieval at all.
+ * Guessing low only shortens one query.
+ */
+function installedHookTimeout(dir: string, event: string): number | null {
+  let smallest: number | null = null;
+  for (const file of hookSettingsFiles(dir)) {
+    const timeout = hookTimeoutIn(file, event);
+    if (timeout === null) continue;
+    if (smallest === null || timeout < smallest) smallest = timeout;
+  }
+  return smallest;
+}
+
+/**
+ * Append `--dir <contextDir>` for the hooks' own `graft ask`/`graft check`
+ * children — the one place in this file that spawns the CLI itself rather
+ * than reading `graft/` off disk (which already resolves through
+ * `resolveContextDir` inside `util/state.ts` and `claude/stats.ts`). A no-op
+ * when `GRAFT_DIR` isn't set, so an unconfigured repo's spawned CLI sees
+ * byte-identical argv to before this existed.
+ */
+function withContextDirArg(dir: string, args: string[]): string[] {
+  return process.env.GRAFT_DIR ? [...args, '--dir', resolveContextDir(dir)] : args;
 }
 
 function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_MS): any | null {
@@ -98,7 +148,7 @@ function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_
   }
 }
 function checkStaleCount(dir: string): number {
-  const r = graftJson(dir, ['check', '.', '--json']);
+  const r = graftJson(dir, withContextDirArg(dir, ['check', '.', '--json']));
   const g = r?.graph ?? {};
   return (g.changed?.length ?? 0) + (g.added?.length ?? 0) + (g.removed?.length ?? 0);
 }
@@ -223,8 +273,11 @@ export async function main(event: string): Promise<void> {
     // background:false — a hook must never touch the network; the CLI and the MCP
     // server fill that cache, this only reads it.
     const upkeep = runUpkeep(dir, runningVersion(), { background: false }).lines;
+    // Roll up any session that ended since we were last here. Queue-only — the
+    // hook still touches no network; the CLI or the MCP server sends it later.
+    flushClosedSessions(dir);
     try {
-      const idx = readFileSync(join(dir, 'graft', 'INDEX.md'), 'utf8');
+      const idx = readFileSync(join(resolveContextDir(dir), 'INDEX.md'), 'utf8');
       const banner = staleBanner(indexFreshness(dir)) ?? undefined;
       const orientation = formatOrientation(idx, undefined, banner);
       emit('SessionStart', upkeep.length ? `${upkeep.join('\n')}\n\n${orientation}` : orientation);
@@ -252,7 +305,7 @@ export async function main(event: string): Promise<void> {
     // pulls spans itself via `graft ask --source` when a pointer looks right.
     // relevantRetrieval then drops the pack entirely when the prompt barely
     // overlaps the top hit or when every hit was already injected this session.
-    const askArgs = ['ask', prompt, '.', '--json', '-n', '3'];
+    const askArgs = withContextDirArg(dir, ['ask', prompt, '.', '--json', '-n', '3']);
     // "You're working in backend/, weight it": only fires on a multi-scope
     // repo whose lastFile resolves cleanly to one scope — see lastFileScopeHint.
     const scopeHint = lastFileScopeHint(dir, readStats(dir)?.lastFile);

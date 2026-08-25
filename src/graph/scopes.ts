@@ -3,7 +3,7 @@
  * stay per-scope instead of pooling a monorepo's biggest sub-project against
  * everything else. A "scope" is rooted at a directory that carries a
  * project-marker file (`package.json`, `go.mod`, `pyproject.toml`, `setup.py`,
- * `Cargo.toml`).
+ * `Cargo.toml`, `pom.xml`, `build.gradle`, `build.gradle.kts`).
  *
  * Discovery rules (see task brief for the numbered spec):
  *  1. Any directory with >=1 marker file is a scope candidate.
@@ -29,7 +29,7 @@ import { readFollowSubmodules, readIncludeDirs } from "../util/state.js";
 import type { GraphV1, ScopeV1 } from "./types.js";
 
 /** Project-marker files, checked in this order (also the order `markers` is built in). */
-const MARKERS = ["package.json", "go.mod", "pyproject.toml", "setup.py", "Cargo.toml"];
+const MARKERS = ["package.json", "go.mod", "pyproject.toml", "setup.py", "Cargo.toml", "composer.json", "pom.xml", "build.gradle", "build.gradle.kts"];
 
 const CANONICAL_ROOT: ScopeV1[] = [{ prefix: "", label: "", markers: [] }];
 
