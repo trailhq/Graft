@@ -8,7 +8,13 @@
 # smaller the blast radius of anything that goes wrong.
 FROM node:20-bookworm-slim AS build
 WORKDIR /app
+# scripts/ comes along because package.json runs scripts/postinstall.mjs on
+# install. Copying only the manifests means node cannot find that file and exits
+# 1 before the script's own "never fail an install" guard ever runs. Dropping to
+# --ignore-scripts is not the way out: tree-sitter builds its native bindings in
+# exactly those hooks.
 COPY package.json package-lock.json ./
+COPY scripts ./scripts
 RUN npm ci
 COPY . .
 RUN npm run build
@@ -21,6 +27,7 @@ RUN apt-get update \
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
+COPY scripts ./scripts
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 
