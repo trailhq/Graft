@@ -15,7 +15,8 @@
 import { posix } from "node:path";
 import { toPosixPath } from "../util/paths.js";
 import type { EdgeV1, Kind, NodeV1, Relation } from "./types.js";
-import type { RawEdge } from "./extract.js";
+import { languageOf, type RawEdge } from "./extract.js";
+import { genericLangOf } from "./generic.js";
 
 const IMPORT_EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py"];
 /** C/C++ source + header extensions, for resolving `#include` targets. */
@@ -26,6 +27,54 @@ const PY_EXT = /\.pyi?$/i;
  * construction. Only `class` — Python enums, dataclasses and NamedTuples are all
  * classes, so no other kind is reachable this way. */
 const PY_CTOR_KINDS: Kind[] = ["class"];
+
+/**
+ * Languages whose symbols can genuinely reach each other. A call edge may not
+ * cross a family boundary.
+ *
+ * This exists because name resolution is repo-wide and used to be language-blind.
+ * A Go file calling the builtin `make(...)` has nothing in the repo to resolve
+ * against, so the unique-global fallback below matched a TypeScript helper named
+ * `make` in a frontend test file — and then every `make(map[...])` in the backend
+ * became an edge into that file. One symbol collected 1040 in-edges across 476
+ * files, and any pull request touching that test dragged the entire Go backend
+ * into its blast radius. Uniqueness is what made it fire: the rarer the collision,
+ * the more confident the old code was that it had found the right target.
+ *
+ * Only real interop is grouped here. TS/TSX/JS import each other freely; Kotlin,
+ * Scala and Clojure compile against Java on one classpath; C and C++ share
+ * headers. Everything else stands alone.
+ */
+const FAMILIES: ReadonlyArray<readonly string[]> = [
+  ["typescript", "tsx"],
+  ["java", "kotlin", "scala", "clojure"],
+  ["c", "cpp"],
+];
+const FAMILY_OF = new Map<string, string>();
+for (const group of FAMILIES) for (const lang of group) FAMILY_OF.set(lang, group[0]);
+
+/**
+ * The language family a path belongs to, or null when no tier claims the file.
+ * A language of its own is its own family, so the common case needs no entry above.
+ */
+function familyOf(path: string): string | null {
+  const lang = languageOf(path) ?? genericLangOf(path)?.name ?? null;
+  if (!lang) return null;
+  return FAMILY_OF.get(lang) ?? lang;
+}
+
+/**
+ * Could a reference in `file` reach a definition in `candidatePath`?
+ *
+ * An unknown family never filters: absence of data is not evidence of a mismatch,
+ * and refusing edges for every extension graft cannot name would lose real ones.
+ */
+function reachable(file: string, candidatePath: string): boolean {
+  const from = familyOf(file);
+  if (from === null) return true;
+  const to = familyOf(candidatePath);
+  return to === null || from === to;
+}
 
 /** A Go module discovered in the repo: its `module` path from `go.mod` and the repo
  * directory that `go.mod` lives in (posix, `.` for the repo root). A monorepo may hold
@@ -281,7 +330,12 @@ function resolveName(
   // first in document order — and labelled it `extracted`, i.e. certain. That is the
   // guess this module's header says it does not make.
   if (local.length === 1) return { id: local[0].id, confidence: "extracted" };
-  const global = (globalName.get(name) ?? []).filter((n) => kinds.includes(n.kind));
+  // Cross-file: also require a language that could actually reach this one.
+  // Without it a unique name match ANYWHERE in the repo wins, which is how a Go
+  // builtin ended up resolving into a TypeScript test — see FAMILIES above.
+  const global = (globalName.get(name) ?? []).filter(
+    (n) => kinds.includes(n.kind) && reachable(file, n.path),
+  );
   if (global.length === 1) return { id: global[0].id, confidence: "inferred" };
   return null;
 }
@@ -336,7 +390,7 @@ function resolveTypedMember(
   let frontier = [recvType];
   for (let depth = 0; depth <= MAX_DEPTH && frontier.length; depth++) {
     for (const type of frontier) {
-      const all = ownerMethod.get(`${type}.${name}`);
+      const all = ownerMethod.get(`${type}.${name}`)?.filter((c) => reachable(file, c.path));
       if (all && all.length > 0) {
         const candidates = narrowByArity(all, argCount);
         if (candidates.length === 1) {
@@ -377,7 +431,7 @@ function resolveTraitMember(
   if (!traits?.length) return null;
   const matches: NodeV1[] = [];
   for (const trait of traits) {
-    const all = ownerMethod.get(`${trait}.${name}`);
+    const all = ownerMethod.get(`${trait}.${name}`)?.filter((c) => reachable(file, c.path));
     if (!all?.length) continue;
     matches.push(...narrowByArity(all, argCount));
   }
