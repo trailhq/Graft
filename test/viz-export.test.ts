@@ -193,8 +193,14 @@ test("viz --tabs: a bad tab name fails loudly rather than exporting a page missi
     }
   };
 
-  const bad = run(["viz", ".", "--export", out(), "--tabs", "context,graph"]);
+  // Deliberately run where there is NO graft index — CI is such a checkout, and
+  // the first version of this test only passed on a machine that happened to have
+  // one, so it broke main the day it merged.
+  const bare = out();
+  const bad = run(["viz", bare, "--export", out(), "--tabs", "context,graph"]);
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /--tabs takes a comma-separated subset of context, code, outline — got "graph"/);
-  assert.equal(run(["viz", ".", "--export", out(), "--tabs", ""]).status, 1, "an empty list is a mistake too");
+  assert.equal(run(["viz", bare, "--export", out(), "--tabs", ""]).status, 1, "an empty list is a mistake too");
+  // …and the flag is judged on its own: an unbuilt repo is a different complaint.
+  assert.match(run(["viz", bare, "--export", out()]).stderr, /no context graph/);
 });
