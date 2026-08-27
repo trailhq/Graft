@@ -33,6 +33,7 @@ import {
 } from "./graph/workspace-cli.js";
 import { formatInitEpilogue } from "./cli-epilogue.js";
 import { planInit, selectedWrites } from "./hosts/plan.js";
+import { planRetract, runRetract, changed, type Retraction } from "./hosts/retract.js";
 import { formatNonInteractiveHelp, formatPlan, runPicker } from "./cli-picker.js";
 import { homedir } from "node:os";
 import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurrentVersion, runUpgrade } from "./cli-meta.js";
@@ -732,8 +733,10 @@ program
   .option("--name", "name the affected areas with one cached LLM call (needs GRAFT_API_KEY); without it, areas are named after their hub symbol")
   .option("--export-viz <dir>", "also write the interactive page for this radius (one self-contained index.html — for CI, GitHub Pages, or an artifact)")
   .option("--title <text>", "subtitle beside the repo name on the exported page (e.g. \"PR #171\")")
+  .option("--no-owners", "do not suggest who to tag (by default, git history names the people behind each affected area)")
+  .option("--pr-author <who...>", "GitHub login, git name or email of the PR author, so they are left out of their own suggestions")
   .option(...NO_REFRESH_FLAG)
-  .action(async (dirArg: string | undefined, opts: { base?: string; depth?: string; format?: string; name?: boolean; exportViz?: string; title?: string; refresh?: boolean }) => {
+  .action(async (dirArg: string | undefined, opts: { base?: string; depth?: string; format?: string; name?: boolean; exportViz?: string; title?: string; owners?: boolean; prAuthor?: string[]; refresh?: boolean }) => {
     const dir = noteQuery(queryRoot(dirArg));
     await refreshBefore(dir, opts);
     const { runBlastCommand } = await import("./blast/blast-cli.js");
@@ -744,6 +747,8 @@ program
       name: opts.name,
       exportViz: opts.exportViz,
       title: opts.title,
+      owners: opts.owners,
+      prAuthor: opts.prAuthor,
       globalDir: program.opts<GlobalOpts>().dir,
     });
   });
@@ -969,6 +974,17 @@ function wireTarget(
 ): void {
     const { home, cliPath, plan, wantClaude, opts } = ctx;
 
+    // Converge, don't just add. init writes the selected hosts; without this it
+    // never touches the rest, so a repo wired by an older version (or by the same
+    // version with different --agents) keeps that run's files forever — and
+    // `reconcileWiring` then keeps them *up to date*, which is worse than stale.
+    // Retract every host NOT being written now; `exclude` spares the ones about to
+    // be rewritten, and the graph cache is kept (init is one step from using it).
+    const retracted = changed(
+      runRetract(repo, { home, apply: true, global: opts.global, cache: false, exclude: ids }),
+    ).filter((r) => r.action !== "skipped-unparseable");
+    for (const r of retracted) console.error(`- removed ${r.path} (${r.what}) — agent not selected`);
+
     if (wantClaude) {
       const res = runInit(repo, { build: opts.build, cliPath });
       console.error(`✓ wrote ${res.settingsPath}`);
@@ -1025,6 +1041,69 @@ function wireTarget(
     }
 
 }
+
+/** Group a retraction report by host, so the output reads as "what leaves each agent". */
+function formatRetractions(rs: Retraction[], apply: boolean): string {
+  const hit = changed(rs);
+  if (hit.length === 0) return "· nothing to remove — no graft wiring found here";
+  const verb = apply ? "removed" : "would remove";
+  const lines: string[] = [];
+  const byHost = new Map<string, Retraction[]>();
+  for (const r of hit) {
+    const k = byHost.get(r.hostId) ?? [];
+    k.push(r);
+    byHost.set(r.hostId, k);
+  }
+  for (const [host, items] of byHost) {
+    lines.push(`\n${host}:`);
+    for (const r of items) {
+      const mark =
+        r.action === "skipped-unparseable"
+          ? "⚠"
+          : r.action === "deleted"
+            ? "-"
+            : "~";
+      const note =
+        r.action === "skipped-unparseable"
+          ? " — not valid JSON, left untouched (remove the graft entry by hand)"
+          : r.action === "deleted"
+            ? ` (${r.what} — deleted)`
+            : ` (${r.what})`;
+      const scope = r.scope === "global" ? " [machine-wide]" : "";
+      lines.push(`  ${mark} ${verb}: ${r.path}${scope}${note}`);
+    }
+  }
+  return lines.join("\n").replace(/^\n/, "");
+}
+
+program
+  .command("uninstall")
+  .description("Remove every file and config entry graft has written to this repo (the inverse of init)")
+  .argument("[dir]", "target repo directory", ".")
+  .option("-y, --yes", "actually remove (without this, prints what it would remove and exits)")
+  .option("--keep-cache", "keep graft/ and the .gitignore entries — wiring only")
+  .option("--no-global", "leave out-of-repo files alone (~/.codex, ~/.gemini)")
+  .action((dir: string, opts: { yes?: boolean; keepCache?: boolean; global?: boolean }) => {
+    const repo = resolve(dir);
+    const home = homedir();
+    const common = { home, global: opts.global, cache: opts.keepCache ? false : true };
+
+    if (!opts.yes) {
+      console.error(formatRetractions(planRetract(repo, common), false));
+      console.error("\nDry run — nothing was touched. Re-run with -y to remove.");
+      if (opts.global !== false)
+        console.error("Entries marked [machine-wide] affect every project; --no-global skips them.");
+      return;
+    }
+    const done = runRetract(repo, { ...common, apply: true });
+    console.error(formatRetractions(done, true));
+    const bad = changed(done).filter((r) => r.action === "skipped-unparseable");
+    console.error(
+      bad.length
+        ? `\n⚠ ${bad.length} file(s) could not be parsed and were left as-is — see above.`
+        : "\n✓ graft fully removed. `graft init` re-wires from scratch.",
+    );
+  });
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof Error ? err.message : err);

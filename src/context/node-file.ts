@@ -253,15 +253,39 @@ export interface ParsedNode {
   links: NodeLink[];
 }
 
-/** Read and parse every `.md` node file in a context dir (skips the manifest). */
+/**
+ * Stems of per-file wiring cards that sit at the graft/ top level — i.e. cards
+ * for source files in the repo root. Those cards share a directory with concept
+ * nodes (`graft/<stem>.md`) but are recorded in `manifest.files`, not
+ * `manifest.nodes`. Nested file cards live in subdirs and are never scanned here.
+ */
+function rootFileCardStems(dir: string): Set<string> {
+  const manifest = readManifest(dir);
+  if (!manifest) return new Set();
+  const stems = new Set<string>();
+  for (const f of manifest.files) {
+    if (f.path.includes("/")) continue;
+    stems.add(f.path.replace(/\.[^./]+$/, ""));
+  }
+  return stems;
+}
+
+/** Read and parse every concept-node `.md` in a context dir (skips INDEX.md
+ * and root-level per-file cards already recorded in `manifest.files`). */
 export function readNodes(dir: string): ParsedNode[] {
   if (!existsSync(dir)) return [];
+  const fileCardStems = rootFileCardStems(dir);
   const out: ParsedNode[] = [];
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith(".md") || entry === "INDEX.md") continue;
     const fm = matter(readFileSync(join(dir, entry), "utf8")).data as Record<string, unknown>;
+    const fallbackSlug = entry.replace(/\.md$/, "");
+    // A root-level file card has no concept `slug` and its stem matches a
+    // recorded source file. Skipping it here (instead of all slug-less `.md`)
+    // keeps a hand-dropped notes.md visible to check's indexDrift detector.
+    if (fileCardStems.has(fallbackSlug) && fm.slug == null) continue;
     out.push({
-      slug: String(fm.slug ?? entry.replace(/\.md$/, "")),
+      slug: String(fm.slug ?? fallbackSlug),
       name: String(fm.name ?? ""),
       type: String(fm.type ?? ""),
       sources: Array.isArray(fm.sources) ? (fm.sources as SourceRef[]) : [],

@@ -11,8 +11,10 @@ import { execFileSync } from "node:child_process";
 import { buildContext } from "../src/context/build.js";
 import { checkContext, indexFreshness, staleBanner } from "../src/context/check.js";
 import { contextDirFor, ensureGitignored, ensureSearchable } from "../src/context/node-file.js";
+import { buildGraph } from "../src/graph/build.js";
 import { writeBuildConfig } from "../src/util/state.js";
-import { fakeProviders } from "./helpers.js";
+import { fakeProviders, PassthroughSummarizer } from "./helpers.js";
+import type { Synthesizer } from "../src/index.js";
 
 // CLI-spawn helper (same pattern as test/graph-traverse-cli.test.ts) — these tests
 // exercise the real process boundary (exit codes), which a unit-level call into
@@ -85,6 +87,47 @@ test("check passes immediately after init", async () => {
     const r = checkContext(dir);
     assert.equal(r.ok, true);
     assert.equal(r.missing, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #213 — per-file cards for root-level sources land in graft/<stem>.md, the same
+// directory readNodes() scans for concept nodes. Nested cards (graft/src/…) are
+// not scanned. After a deep context build + wiring cards, check must not treat
+// the root file card as a missing concept node.
+test("check: root-level file card is not indexDrift after build (#213)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxgraph-root-card-"));
+  try {
+    writeFileSync(
+      join(dir, "main.ts"),
+      `export function rootFn(a: number): number { return a * 2; }\n`,
+    );
+    mkdirSync(join(dir, "src"));
+    writeFileSync(
+      join(dir, "src", "foo.ts"),
+      `export function nestedFn(a: number): number { return a + 1; }\n`,
+    );
+
+    await buildContext(dir, buildOpts());
+    await buildGraph(dir);
+
+    assert.ok(existsSync(join(dir, "graft", "main.md")), "root source gets a top-level file card");
+    assert.ok(existsSync(join(dir, "graft", "src", "foo.md")), "nested source card stays in a subdir");
+
+    const r = checkContext(dir);
+    assert.equal(r.ok, true, `expected clean check, got ${JSON.stringify(r)}`);
+    assert.deepEqual(r.indexDrift, []);
+
+    // A hand-dropped .md in graft/ is still an orphaned node — the detector
+    // must not go silent for anything that is not a recorded per-file card.
+    writeFileSync(join(dir, "graft", "notes.md"), "# stray notes\n");
+    const stray = checkContext(dir);
+    assert.equal(stray.ok, false);
+    assert.ok(
+      stray.indexDrift.some((s) => s.startsWith("notes:")),
+      `expected stray notes.md to be indexDrift, got ${JSON.stringify(stray.indexDrift)}`,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -426,6 +469,67 @@ test("ensureSearchable: no-op when the graph dir is outside the repo root", () =
   try {
     ensureSearchable(dir, join(tmpdir(), "somewhere-else-graft"));
     assert.equal(existsSync(join(dir, ".ignore")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#129: an empty synthesis batch is not cached — the next build retries", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctx-empty-synth-"));
+  try {
+    writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+    let calls = 0;
+    const synthesizer: Synthesizer = {
+      async synthesize() {
+        calls++;
+        return [];
+      },
+    };
+    const opts = { model: "fake", summarizer: new PassthroughSummarizer(), synthesizer };
+    await buildContext(dir, opts);
+    await buildContext(dir, opts);
+    assert.equal(calls, 2, "[] must not become a cache hit the way #177 refused empty meaning replies");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#129: synthesis logs per-batch counts and warns when a multi-batch run has 0 links", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctx-zero-links-"));
+  const blob = (name: string) => `export const ${name} = 1;\n// ${"x".repeat(30_000)}\n`;
+  try {
+    writeFileSync(join(dir, "a.ts"), blob("a"));
+    writeFileSync(join(dir, "b.ts"), blob("b"));
+    const synthesizer: Synthesizer = {
+      async synthesize(files) {
+        return files.map((f) => ({
+          name: f.path,
+          type: "file",
+          summary: "s",
+          sources: [f.path],
+          links: [],
+        }));
+      },
+    };
+    const err: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => {
+      err.push(args.map(String).join(" "));
+    };
+    try {
+      const r = await buildContext(dir, {
+        model: "fake",
+        summarizer: new PassthroughSummarizer(),
+        synthesizer,
+      });
+      assert.ok(r.batches > 1, `need multiple batches to trigger the summary warning, got ${r.batches}`);
+      assert.equal(r.links, 0);
+      assert.ok(err.some((l) => /synthesis batch 1\/\d+: \d+ nodes, 0 links/.test(l)));
+      assert.ok(err.some((l) => /synthesis batch 2\/\d+:/.test(l)));
+      assert.ok(err.some((l) => /0 links across \d+ batches/.test(l)));
+    } finally {
+      console.error = orig;
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
