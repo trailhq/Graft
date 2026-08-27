@@ -22,6 +22,7 @@ import { relPosix } from "../util/paths.js";
 import { contextDirFor } from "../context/node-file.js";
 import { extractFile, languageOf } from "./extract.js";
 import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
+import { containerLangOf, extractContainer, warmContainerGrammars } from "./container.js";
 import { listSourceFiles } from "./build.js";
 import { readGraph, wiringPath } from "./write.js";
 import { readSourceFile } from "../util/source.js";
@@ -49,10 +50,11 @@ export interface GraphCheckOptions {
   contextDir?: string;
 }
 
-// async: the breadth tier's WASM grammars load asynchronously and must be warmed
-// before the (synchronous) re-extraction below, exactly as buildGraph does — else
-// breadth-tier files (.rs, …) would re-extract as empty here and read as `removed`
-// against a graph that built them, so `graft check` would never report OK.
+// async: the breadth and container tiers' WASM grammars load asynchronously and
+// must be warmed before the (synchronous) re-extraction below, exactly as
+// buildGraph does — else those files (.rs, .vue, …) would re-extract as empty
+// here and read as `removed` against a graph that built them, so `graft check`
+// would never report OK.
 export async function checkGraph(
   dir: string,
   opts: GraphCheckOptions = {},
@@ -83,10 +85,23 @@ export async function checkGraph(
   await warmGenericGrammars(
     new Set(sourceFiles.map((f) => genericLangOf(f)?.name).filter((n): n is string => !!n)),
   );
+  await warmContainerGrammars(
+    new Set(sourceFiles.map((f) => containerLangOf(f)?.name).filter((n): n is string => !!n)),
+  );
   const current = new Map<string, string>(); // id → body_hash
   for (const file of sourceFiles) {
     const lang = languageOf(file);
-    const generic = lang ? null : genericLangOf(file);
+    const container = lang ? null : containerLangOf(file);
+    const generic = lang || container ? null : genericLangOf(file);
+    // listSourceFiles only yields files one of the three tiers claims, so this is
+    // unreachable today. It is a throw rather than a `continue` because the silent
+    // path is precisely how #236 hid: a tier added to buildGraph and forgotten here
+    // re-extracts every one of its files as empty, and they read as `removed`
+    // against a graph that built them — forever, with `graft build` unable to
+    // repair it. Outside the try below, so the catch cannot swallow it.
+    if (!lang && !container && !generic) {
+      throw new Error(`graft check: no extractor tier claims ${relPosix(root, file)}`);
+    }
     let source: string | null;
     try {
       source = readSourceFile(file);
@@ -95,9 +110,12 @@ export async function checkGraph(
     }
     if (source === null) continue; // unsupported encoding (e.g. UTF-16BE)
     try {
+      const rel = relPosix(root, file);
       const { nodes } = lang
-        ? extractFile(relPosix(root, file), source, lang)
-        : extractGeneric(relPosix(root, file), source, generic!.name);
+        ? extractFile(rel, source, lang)
+        : container
+          ? extractContainer(rel, source, container)
+          : extractGeneric(rel, source, generic!.name);
       for (const n of nodes) current.set(n.id, n.body_hash);
     } catch {
       // parse failure → skip; the committed nodes for this file become `removed`.

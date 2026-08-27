@@ -26,6 +26,7 @@ import {
 } from "../src/graph/container.js";
 import { supportedExtensions } from "../src/graph/source-files.js";
 import { buildGraph } from "../src/graph/build.js";
+import { checkGraph } from "../src/graph/check.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 
 const VUE = containerLangOf("Any.vue")!;
@@ -245,4 +246,40 @@ test("container: a .vue file goes through a real build end to end", async () => 
     graph.edges.some((e) => e.source === label.id && e.target === greet.id && e.relation === "calls"),
     "the SFC's call into the .ts helper resolved",
   );
+});
+
+// #236: checkGraph mirrored buildGraph's depth and breadth tiers but not the
+// container tier, so `.vue` hit `generic!.name` on a null, the catch swallowed the
+// TypeError as a parse failure, and every committed .vue node read as `removed` —
+// permanently, since the `graft build` the report tells you to run rebuilt them
+// exactly as before. A false STALE that no rebuild can clear makes `graft check`
+// unusable as the CI drift gate it exists to be.
+test("container: check agrees with build on a .vue repo, so a fresh graph is not STALE", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-container-check-"));
+  mkdirSync(join(dir, "src"), { recursive: true });
+
+  writeFileSync(
+    join(dir, "src", "Hello.vue"),
+    sfc([
+      "<template><div @click=\"greet\">{{ msg }}</div></template>",
+      '<script setup lang="ts">',
+      "const msg = 'hi';",
+      "function greet(): void {",
+      "  console.log(msg);",
+      "}",
+      "</script>",
+    ]),
+  );
+
+  const outDir = join(dir, "graft");
+  await buildGraph(dir, outDir, { reuse: false });
+  const graph = readGraph(wiringPath(outDir));
+  const vue = graph.nodes.filter((n) => n.path.endsWith(".vue"));
+  assert.ok(vue.length >= 2, `the build indexed the .vue file (got ${vue.length} nodes)`);
+
+  // Nothing changed between the build and the check, so nothing may be drift.
+  const chk = await checkGraph(dir, { contextDir: outDir });
+  assert.deepEqual(chk.removed, [], "no .vue node may read as removed right after a build");
+  assert.deepEqual(chk.changed, [], "no .vue node may read as changed right after a build");
+  assert.equal(chk.ok, true, `check OK on a container-tier repo (added=${chk.added.length})`);
 });
