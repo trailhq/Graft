@@ -94,3 +94,27 @@ test('an empty session still counts — installed but unused is the signal we wa
   const [ev] = peek(home) as { properties: Record<string, string> }[];
   assert.equal(ev.properties.graft_reads_bucket, '0');
 });
+
+test('the saved-vs-said turn counts ride along, bucketed', () => {
+  const { repo, home } = fixture('sess-tally');
+  writeSessionFile(repo, 's1',
+    { graftReads: 6, sourceReads: 1, savedTokens: 7400, graftTurns: 9, reportedTurns: 3 },
+    SESSION_IDLE_MS + 1000);
+  assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
+  const [ev] = peek(home) as { properties: Record<string, string> }[];
+  assert.equal(ev.properties.graft_turns_bucket, '5-19');
+  assert.equal(ev.properties.reported_turns_bucket, '1-4');
+  const values = Object.values(ev.properties);
+  for (const raw of ['9', '3']) {
+    assert.equal(values.includes(raw), false, `the raw turn count ${raw} was sent as a property value`);
+  }
+});
+
+test('a session file written before the turn counters exist reports zero, not undefined', () => {
+  const { repo, home } = fixture('sess-tally-old');
+  writeSessionFile(repo, 's1', { graftReads: 4, sourceReads: 0, savedTokens: 500 }, SESSION_IDLE_MS + 1000);
+  assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
+  const [ev] = peek(home) as { properties: Record<string, string> }[];
+  assert.equal(ev.properties.graft_turns_bucket, '0');
+  assert.equal(ev.properties.reported_turns_bucket, '0');
+});

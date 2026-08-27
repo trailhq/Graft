@@ -67,6 +67,12 @@ export function flushClosedSessions(
           graft_reads_bucket: countBucket(s.graftReads ?? 0),
           source_reads_bucket: countBucket(s.sourceReads ?? 0),
           saved_tokens_bucket: savedTokensBucket(s.savedTokens ?? 0),
+          // Saved vs *said*: the gap between these two is value the user never
+          // heard about. Only turns whose reply was actually readable are in
+          // either count (claude/tally.ts), so a host that exposes no transcript
+          // reports 0/0 rather than a misleading 0-out-of-many.
+          graft_turns_bucket: countBucket(s.graftTurns ?? 0),
+          reported_turns_bucket: countBucket(s.reportedTurns ?? 0),
         },
         { repo, host: 'claude-code', home, env },
       );

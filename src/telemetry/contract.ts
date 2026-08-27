@@ -43,8 +43,13 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
   /** One query, from any surface. The DAU backbone and the dead-command detector. */
   query: new Set<string>(['command', 'surface', 'hit']),
   /** One closed agent session, summarised. `graft_reads` vs `source_reads` is
-   *  the single number that says whether an agent prefers graft to grep. */
-  session_summary: new Set<string>(['graft_reads_bucket', 'source_reads_bucket', 'saved_tokens_bucket']),
+   *  the single number that says whether an agent prefers graft to grep; the two
+   *  `*_turns` buckets are the follow-up question — of the turns that used graft,
+   *  how many told the user what it saved. Both are counts of turns, never text. */
+  session_summary: new Set<string>([
+    'graft_reads_bucket', 'source_reads_bucket', 'saved_tokens_bucket',
+    'graft_turns_bucket', 'reported_turns_bucket',
+  ]),
 };
 
 /** Stamped on every event by `track()`; not listed per event above. */

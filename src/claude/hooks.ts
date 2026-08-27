@@ -10,6 +10,7 @@ import { graftCliPath, claudeScriptPath } from './paths.js';
 import { runUpkeep } from '../upkeep-run.js';
 import { runningVersion } from '../upkeep.js';
 import { flushClosedSessions } from '../telemetry/sessions.js';
+import { hasSavingsTally, lastAssistantTurn } from './tally.js';
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
@@ -244,10 +245,47 @@ function handleToolSavings(input: any, dir: string): void {
   const id = input?.session_id || 'default';
   const s = readSession(dir, id);
   s.savedTokens = (s.savedTokens ?? 0) + total;
+  // This turn used graft, so it is owed a tally in the reply. countTallyTurn()
+  // at Stop resolves whether it got one; a flag rather than a count because a
+  // turn with four graft calls is still one reply to the user.
+  s.turnUsedGraft = true;
   writeSession(dir, id, s);
 }
 
-function handleStop(dir: string): void {
+/**
+ * At turn end: did the reply the user just read say what graft saved?
+ *
+ * Runs only on turns the tool-savings hook flagged, so a conversational turn
+ * costs nothing. A turn we cannot observe — a host whose Stop hook names no
+ * transcript, an unreadable file, or a Stop that fires before the final prose
+ * is on disk — is counted in NEITHER total: the ratio these two numbers form
+ * has to mean "of the turns we could check", not "of the turns we tried to".
+ */
+function countTallyTurn(input: any, dir: string): void {
+  try {
+    const id = input?.session_id || 'default';
+    const s = readSession(dir, id);
+    if (!s.turnUsedGraft) return;
+    const turn = lastAssistantTurn(input?.transcript_path);
+    // Same reply as last time we looked: no new prose has landed, so this Stop
+    // is a duplicate or a race with the transcript write. Drop the turn rather
+    // than judge it on a stale message.
+    if (!turn || turn.uuid === s.lastTallyUuid) {
+      writeSession(dir, id, { ...s, turnUsedGraft: false });
+      return;
+    }
+    s.graftTurns = (s.graftTurns ?? 0) + 1;
+    if (hasSavingsTally(turn.text)) s.reportedTurns = (s.reportedTurns ?? 0) + 1;
+    s.turnUsedGraft = false;
+    s.lastTallyUuid = turn.uuid;
+    writeSession(dir, id, s);
+  } catch {
+    // A turn-end metric is never worth failing the graph sync over.
+  }
+}
+
+function handleStop(input: any, dir: string): void {
+  countTallyTurn(input, dir);
   // sync-run.js ships next to this module inside the package, so it resolves in
   // any repo that installs graft (not just graft's own). Defensive existsSync:
   // if the package is somehow incomplete, skip rather than wedge on syncing:true.
@@ -292,9 +330,9 @@ export async function main(event: string): Promise<void> {
 
   if (event === 'tool-savings') { handleToolSavings(input, dir); return; }
 
-  if (event === 'stop') { handleStop(dir); return; }
+  if (event === 'stop') { handleStop(input, dir); return; }
 
-  if (event === 'post-edit-sync') { await handlePostEdit(input, dir); handleStop(dir); return; }
+  if (event === 'post-edit-sync') { await handlePostEdit(input, dir); handleStop(input, dir); return; }
 
   if (event === 'prompt') {
     const prompt = String(input?.prompt ?? '').trim();

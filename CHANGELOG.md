@@ -17,6 +17,33 @@
 
 ### Added
 
+- **Telemetry can now tell "graft saved tokens" apart from "the user was told".**
+  `saved_tokens_bucket` counted what graft *computed* — every
+  `[graft] tokens saved ≈ N` footer the PostToolUse accumulator swept up — so a
+  turn that saved 20,000 tokens in silence and a turn that saved nothing were the
+  same number. `session_summary` now also carries `graft_turns_bucket` and
+  `reported_turns_bucket`: of the turns that used graft, how many closed with the
+  one-line tally `SKILL.md` and `SAVINGS_TURN_NUDGE` both ask for.
+
+  The agent's own prose lives in one place a hook can reach, so at the end of a
+  turn that used graft the Stop hook reads the tail of the host transcript named
+  on its stdin and checks the reply for a "graft saved ~N tokens" line. Only a
+  count of turns is kept, and only as a bucket — no reply, no fragment, not even a
+  length. `TELEMETRY.md` documents the local read in full.
+
+  A turn that can't be checked — a host whose Stop hook names no transcript, an
+  unreadable file, a Stop racing the transcript write — is counted in *neither*
+  total, so the ratio means "of the turns we could read" rather than deflating to
+  zero on every editor but Claude Code. One reply is one turn however often Stop
+  fires, guarded by the id of the last reply examined.
+
+- **`scripts/tally-audit.mjs`**, the same ratio offline and at full resolution:
+  which turns were silent, whether the number the agent reported matched graft's
+  own footers, and whether it named the call count. Run it when the aggregate says
+  something surprising. It also flags per-turn savings estimates large enough to be
+  artifacts rather than savings.
+
+
 - **`graft init` converges instead of accumulating, and `graft uninstall` removes
   graft entirely.** `init` wrote the files the selected agents needed and never
   looked at the rest, so a repo wired by an older version — or by the same version
