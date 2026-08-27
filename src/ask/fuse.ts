@@ -50,6 +50,18 @@ export interface ScopedDoc {
   score: number;
 }
 
+/** Components preserved until immediately before comparable-scope combination.
+ * Optional ranking experiments can adjust lexical evidence without having to
+ * reconstruct it from the already blended scalar score. */
+export interface ScopeRankCandidate extends ScopedDoc {
+  /** Repo-global-normalized lexical component. */
+  lexical: number;
+  /** Scope-local normalized PPR component. */
+  graph: number;
+  /** Query-aware final multiplier, such as test-file de-ranking. */
+  rankFactor: number;
+}
+
 export interface FusionResult {
   /** fused order, best first; carries per-doc scope label + fused score.
    * Normalized so the top MULTI-scope fused doc is 1 — but the single-scoring-
@@ -278,6 +290,13 @@ export interface ScopeRankOps {
    * graph blending. Use this for priors (such as test-file de-ranking) that
    * normalization must not erase. */
   rankFactor?(scope: string, id: string): number;
+  /** Optional candidate collapse after lexical + graph components are known
+   * but before comparable scopes are gated and combined. File-aware ranking uses this
+   * to supply exactly one real representative per file. The default path omits
+   * the hook and remains byte-identical. */
+  collapseCandidates?(
+    candidates: readonly ScopeRankCandidate[],
+  ): readonly ScopedDoc[];
 }
 
 /**
@@ -318,7 +337,7 @@ export function rankScopesAndFuse(
   }
 
   const alsoMatched: FusionResult["alsoMatched"] = [];
-  const scoped: ScopedDoc[] = [];
+  const candidatesWithComponents: ScopeRankCandidate[] = [];
 
   // Per-scope raw best, plus the best raw score anywhere in the repo. That
   // repo-wide maximum is the shared denominator every scope normalizes by.
@@ -364,11 +383,29 @@ export function rankScopesAndFuse(
     for (const [id, p] of pr) if (p >= rescueFloor) candidates.add(id);
     for (const id of candidates) {
       const lexN = globalMaxLex > 0 ? (lex.get(id) ?? 0) / globalMaxLex : 0;
-      const blended = (lexN + graphWeight * (pr.get(id) ?? 0)) * (ops.rankFactor?.(scope, id) ?? 1);
-      if (blended > 0) scoped.push({ id, scope, score: blended });
+      const graph = pr.get(id) ?? 0;
+      const rankFactor = ops.rankFactor?.(scope, id) ?? 1;
+      const blended = (lexN + graphWeight * graph) * rankFactor;
+      if (blended > 0) {
+        candidatesWithComponents.push({
+          id,
+          scope,
+          score: blended,
+          lexical: lexN,
+          graph,
+          rankFactor,
+        });
+      }
     }
   }
 
+  const scoped: ScopedDoc[] = ops.collapseCandidates
+    ? [...ops.collapseCandidates(candidatesWithComponents)]
+    : candidatesWithComponents.map((candidate) => ({
+        id: candidate.id,
+        scope: candidate.scope,
+        score: candidate.score,
+      }));
   const combined = combineComparableScopes(scoped);
   return {
     ranked: combined.ranked,

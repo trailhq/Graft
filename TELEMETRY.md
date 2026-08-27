@@ -102,7 +102,7 @@ Any one of these fully disables telemetry:
    immediately and is remembered for this machine.
 2. **`graft telemetry disable`** at any time. `graft telemetry status` shows the
    current state, and `graft telemetry enable` turns it back on.
-3. **Set [`DO_NOT_TRACK`](https://consoledonottrack.com)** to any value other
+3. **Set [`DO_NOT_TRACK`](https://web.archive.org/web/20251005054121/https://consoledonottrack.com/)** to any value other
    than `0`. Respected unconditionally — it outranks graft's own setting.
 4. **Run in CI.** `CI`, `GITHUB_ACTIONS`, `GITLAB_CI` and friends switch it off
    without being asked. A build server is not a user.

@@ -43,3 +43,29 @@ export function fileFirstRoundRobin<T>(
   }
   return out;
 }
+
+/** Project already-grouped queues directly. Unlike {@link fileFirstRoundRobin}
+ * this does not flatten and rebuild a grouping map, so a file-aware ranker can
+ * stop as soon as `limit` hits without materializing every tail span twice. */
+export function roundRobinQueues<T>(
+  queues: readonly (readonly T[])[],
+  limit = Number.POSITIVE_INFINITY,
+): T[] {
+  const cap = Number.isFinite(limit)
+    ? Math.max(0, Math.floor(limit))
+    : Number.POSITIVE_INFINITY;
+  if (cap === 0) return [];
+
+  const out: T[] = [];
+  for (let depth = 0; out.length < cap; depth += 1) {
+    let added = false;
+    for (const queue of queues) {
+      if (depth >= queue.length) continue;
+      out.push(queue[depth]);
+      added = true;
+      if (out.length >= cap) break;
+    }
+    if (!added) break;
+  }
+  return out;
+}

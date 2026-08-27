@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fileFirstRoundRobin } from "../src/ask/file-selection.js";
+import {
+  fileFirstRoundRobin,
+  roundRobinQueues,
+} from "../src/ask/file-selection.js";
 
 test("file-first projection preserves file order and emits leaders before sibling spans", () => {
   const ranked = [
@@ -45,4 +48,21 @@ test("file-first projection treats concepts as singleton partitions", () => {
     ranked.map((value) => ({ group: value.group, value })),
   );
   assert.deepEqual(projected.map((value) => value.id), ["A1", "concept", "B1", "A2"]);
+});
+
+test("pre-grouped queue projection is equivalent and stops at the requested prefix", () => {
+  const queues = [
+    ["alpha-1", "alpha-2", "alpha-3"],
+    ["beta-1", "beta-2"],
+    ["gamma-1"],
+  ];
+  assert.deepEqual(
+    roundRobinQueues(queues),
+    ["alpha-1", "beta-1", "gamma-1", "alpha-2", "beta-2", "alpha-3"],
+  );
+  assert.deepEqual(
+    roundRobinQueues(queues, 4),
+    ["alpha-1", "beta-1", "gamma-1", "alpha-2"],
+  );
+  assert.deepEqual(roundRobinQueues(queues, 0), []);
 });

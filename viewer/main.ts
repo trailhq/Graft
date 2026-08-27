@@ -91,6 +91,24 @@ function renderLegend(): void {
     });
     host.appendChild(chip);
   }
+
+  // A decoration toggle, not a type filter: it sits after the type chips, carries
+  // its own class, and deliberately does NOT feed `updateShownCount` — hiding a
+  // face hides no node.
+  const graphHasOwners = graph.nodes.some((n) => n.owners?.length);
+  if (graphHasOwners) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "lchip lchip-people" + (view.showOwners ? "" : " off");
+    chip.innerHTML = `<span class="sw" style="background:${cvar("--con")}"></span>people`;
+    chip.title = "Show who has worked on each area";
+    chip.addEventListener("click", () => {
+      view.showOwners = !view.showOwners;
+      renderLegend();
+      view.restyle();
+    });
+    host.appendChild(chip);
+  }
 }
 
 function updateShownCount(): void {

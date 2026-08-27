@@ -18,9 +18,10 @@
  * affected side shows the line that reaches the diff. Both come from data already
  * on hand — git's patch, and the file on disk — so the panel costs nothing.
  */
-import type { Evidence, VizEdge, VizGraph, VizNode } from "../viz/assemble.js";
+import type { Evidence, NodeOwner, VizEdge, VizGraph, VizNode } from "../viz/assemble.js";
 import type { BlastReport, ChangedArea, ImpactedModule, Seed, TestSignal } from "./blast.js";
 import type { ChangedFile } from "./diff.js";
+import { isoDay, type Owner } from "./owners.js";
 import {
   MAX_EVIDENCE,
   type ReachTerms,
@@ -31,6 +32,13 @@ import {
 } from "./evidence.js";
 
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+
+/** Owners as the page carries them: no scores, since a weight nobody can check is
+ * not evidence — the commit count and the date are what a reader can verify. */
+function nodeOwners(owners: Owner[] | undefined): NodeOwner[] | undefined {
+  if (owners === undefined || owners.length === 0) return undefined;
+  return owners.map((o) => ({ name: o.name, handle: o.handle, commits: o.commits, last: isoDay(o.last) }));
+}
 
 /** Kinds that carry behaviour — what "did a test reach it" is asked of. */
 const BEHAVIOURAL = new Set(["function", "method", "class", "constructor"]);
@@ -101,6 +109,7 @@ function changedNode(a: ChangedArea, seeds: Seed[], byPath: Map<string, ChangedF
     summary: changedSummary(a, mine),
     sources: a.files,
     evidence: evidence.length > 0 ? evidence : undefined,
+    owners: nodeOwners(a.owners),
   };
 }
 
@@ -125,6 +134,7 @@ function affectedNode(
     summary: `Not edited by this PR. ${plural(m.symbols.length, "symbol")} here ${m.symbols.length === 1 ? "reaches" : "reach"} code it changed${how}`,
     sources: m.symbols.map((s) => `${s.path} · ${s.span}`),
     evidence: evidence.length > 0 ? evidence : undefined,
+    owners: nodeOwners(m.owners),
   };
 }
 

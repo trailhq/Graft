@@ -50,7 +50,6 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   // These ship a tags.scm (calls + symbols); ocaml/zig have none and use the
   // node-kind walker fallback (symbols only) — still one row, zero query.
   { name: "scala", exts: [".scala", ".sc"], wasm: "scala" },
-  { name: "swift", exts: [".swift"], wasm: "swift" },
   { name: "elixir", exts: [".ex", ".exs"], wasm: "elixir" },
   { name: "solidity", exts: [".sol"], wasm: "solidity" },
   { name: "ocaml", exts: [".ml", ".mli"], wasm: "ocaml" },

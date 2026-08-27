@@ -104,13 +104,19 @@ test("Tier-0: the invariant checker actually catches malformed graphs (not vacuo
   assert.ok(problems.some((p) => p.includes("dangling calls target")), "flags the dangling target");
   assert.ok(problems.some((p) => p.includes("dangling source")), "flags the dangling source");
   assert.ok(problems.some((p) => p.includes("bad confidence")), "flags the bad confidence");
-  // an unresolved imports/extends/implements target is NOT flagged (drop-rather-than-guess)
+  // an unresolved imports/extends/implements/references target is NOT flagged
   const okExternal = checkGraphInvariants({
     ...bad,
     nodes: [bad.nodes[0]],
     edges: [{ source: "a.ts#Foo", target: "com.external.Base", relation: "extends", confidence: "inferred" }],
   });
   assert.deepEqual(okExternal.problems, [], "an external heritage/import string target is allowed, not dangling");
+  const okAnno = checkGraphInvariants({
+    ...bad,
+    nodes: [bad.nodes[0]],
+    edges: [{ source: "a.ts#Foo", target: "Override", relation: "references", confidence: "inferred" }],
+  });
+  assert.deepEqual(okAnno.problems, [], "an external annotation string target is allowed, not dangling");
 });
 
 test("Tier-0: the build is deterministic — two cold builds produce the identical graph", async () => {

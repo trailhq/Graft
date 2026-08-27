@@ -8,6 +8,18 @@ const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
 test('not-built state', () => {
   const lines = renderStatusline(null, null, { ctxPct: null });
   assert.match(strip(lines[0]), /not built/);
+  assert.match(strip(lines[0]), /graft build/);
+});
+
+test('empty graph (0 nodes) is built, not "not built"', () => {
+  // A successful `graft build` on a docs-only repo writes a real graph with
+  // zero symbols. nodeCount === 0 must not be treated as "never built".
+  const stats = { ...emptyStats(), nodeCount: 0, edgeCount: 0 };
+  const line = strip(renderStatusline(stats, null, { ctxPct: null })[0]);
+  assert.doesNotMatch(line, /not built/);
+  assert.doesNotMatch(line, /graft build/);
+  assert.match(line, /0 nodes \/ 0 edges/);
+  assert.match(line, /✓ synced/);
 });
 
 test('two-line bar: size + freshness + ctx + last', () => {

@@ -193,13 +193,15 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
 - **Full-fidelity** — hand-written extractors with scope-aware, cross-file call
   and import resolution:
   **TypeScript / JavaScript** (incl. JSX & TSX), **Python**, **Go**, **Java**,
-  **R** (`.R`/`.r` — plain functions, S3/S4/R6 classes and methods, roxygen
-  `@export`, `library()`/`source()` imports).
+  **Kotlin**, **PHP**, **Swift** (classes, structs, enums, actors, protocols;
+  extension members attach to the extended type), **R** (`.R`/`.r` — plain
+  functions, S3/S4/R6 classes and methods, roxygen `@export`,
+  `library()`/`source()` imports).
 
 - **Broad** — symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
-  **Rust, C, C++, C#, Ruby, PHP, Kotlin, Scala, Swift, Elixir, Solidity,
-  OCaml, Zig, Dart, Clojure, Lua**.
+  **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
+  OCaml, Zig, Dart, Clojure, Nix, Lua**.
 
 - **Compiler-grade edges (opt-in)** — `graft build --lsp` adds precise
   `lsp_resolved` call edges (member calls the static pass can't type) when a
@@ -207,7 +209,7 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
   **gopls** (Go), **pyright** (Python), **typescript-language-server** (TS/JS).
   It's best-effort — with no server installed the graph is unchanged.
 
-Twenty-two languages in total. A file whose language isn't listed is skipped, not
+Twenty-three languages in total. A file whose language isn't listed is skipped, not
 indexed. Adding a broad-tier language is a small contribution — see
 [CREDITS.md](CREDITS.md) for the folks who added the current set.
 
@@ -358,6 +360,7 @@ graft blast --base origin/main       # diff against the merge base with HEAD —
 graft blast --format markdown        # a PR comment: the areas a change can reach, per-symbol detail collapsed under it
 graft blast --base origin/main --name  # name those areas with one cached LLM call, instead of a full --deep build
 graft blast --export-viz site/       # also write the interactive page for this radius (what a PR comment links to)
+graft blast --no-owners              # skip "who to tag" — by default git history names the people behind each area
 graft blast --depth all --format json  # the full transitive closure, machine-readable
 
 graft check [dir]                    # fail (exit 1) if graft/ has drifted from the code (never auto-refreshes — it's the drift report)
@@ -380,6 +383,11 @@ graft init --no-global               # skip writes outside this repo (~/.codex/ 
 graft init --no-build                # wire the files only; don't build the graph
 graft init --all-agents              # wire every known agent, detected or not
 graft init --list-agents             # list known agent ids and exit
+
+graft uninstall [dir]                # remove every file and config entry graft wrote here (the inverse of init)
+graft uninstall -y                   # actually remove (without -y it prints what it would remove and exits)
+graft uninstall --keep-cache         # wiring only; leave graft/ and the .gitignore entry
+graft uninstall --no-global          # leave out-of-repo files alone (~/.codex, ~/.gemini)
 
 graft version                        # print the installed + latest published npm version
 graft upgrade                        # npm install -g the latest published version

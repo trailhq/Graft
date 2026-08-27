@@ -45,6 +45,8 @@ export interface GraphRunOptions {
   reuse?: boolean;
   /** Opt-in compiler-grade LSP edge enrichment (`graft build --lsp`). */
   lsp?: boolean;
+  /** Repo-relative directory prefixes to limit the build to (`--only-dir`). */
+  onlyDirs?: string[];
   onProgress?: GraphBuildOptions["onProgress"];
 }
 
@@ -90,6 +92,7 @@ export class Graft {
       concurrency: opts.concurrency,
       reuse: opts.reuse,
       lsp: opts.lsp,
+      onlyDirs: opts.onlyDirs,
       onProgress: opts.onProgress,
     });
   }

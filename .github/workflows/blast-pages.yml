@@ -66,8 +66,10 @@ jobs:
           case "$NUMBER" in
             "" | *[!0-9]*) echo "not a pull request number: $NUMBER" >&2; exit 1 ;;
           esac
+          # `author` is the login only — an email is not in this payload, and the
+          # commits in the range carry the identity `blast` really matches on.
           gh api "repos/$REPO/pulls/$NUMBER" --jq \
-            '"number=\(.number)", "base_ref=\(.base.ref)", "base_sha=\(.base.sha)"' >> "$GITHUB_OUTPUT"
+            '"number=\(.number)", "base_ref=\(.base.ref)", "base_sha=\(.base.sha)", "author=\(.user.login)"' >> "$GITHUB_OUTPUT"
 
       # 1. The tooling, from the base branch — never from the PR.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -114,6 +116,7 @@ jobs:
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          PR_AUTHOR: ${{ steps.pr.outputs.author }}
           # `--name` reads a key, so the page gets the same concept names the comment
           # shows instead of hub-symbol fallbacks. The PR's code is never executed
           # here (see the header) — naming only sends its source text to the model,
@@ -136,8 +139,14 @@ jobs:
           # `--format markdown`, not text: one run produces both the page and the
           # comment body, so the two can never describe different radii or word the
           # same area differently.
+          #
+          # `--pr-author` is belt to `blast`'s own braces: it already drops everyone
+          # who authored a commit in the range, which covers the author under the
+          # name and email git actually records. The login is passed too for the one
+          # case that misses — a squash merge attributed to a different identity.
           node ../base/dist/cli.js blast . --base "origin/$BASE_REF" \
-            --name --title "PR #$PR_NUMBER" --export-viz ../site --format markdown > ../blast.md
+            --name --title "PR #$PR_NUMBER" --pr-author "$PR_AUTHOR" \
+            --export-viz ../site --format markdown > ../blast.md
           cat ../blast.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish to gh-pages

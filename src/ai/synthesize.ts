@@ -7,6 +7,7 @@
  * grounded in, so provenance (and staleness) stays exact.
  */
 import type { ChatModel } from "./llm/types.js";
+import { recoverToolArgsFromContent, warnToolChoiceIgnored } from "./llm/recover-tool.js";
 
 /** A directed edge to another node, by node name (resolved to a slug later). */
 export interface SynthLink {
@@ -146,10 +147,26 @@ export class ChatSynthesizer implements Synthesizer {
         { role: "user", content: userContent(files) },
       ],
     });
-    const call = res.toolCalls[0];
-    if (!call) return [];
-    // `args` is already a parsed object — no JSON.parse.
-    return clean((call.args as { nodes?: unknown })?.nodes);
+    return clean(nodesFromResponse(res)?.nodes);
   }
+}
+
+/**
+ * Prefer a real tool call; if the gateway ignored `tool_choice` (#129), recover
+ * the same payload from `content`. Recovered args still go through {@link clean}.
+ */
+function nodesFromResponse(res: { text: string; toolCalls: { name: string; args: unknown }[] }): {
+  nodes?: unknown;
+} | undefined {
+  const call = res.toolCalls.find((c) => c.name === RECORD_TOOL) ?? res.toolCalls[0];
+  if (call?.args && typeof call.args === "object" && !Array.isArray(call.args)) {
+    return call.args as { nodes?: unknown };
+  }
+  const recovered = recoverToolArgsFromContent(res.text, {
+    toolNames: [RECORD_TOOL, "emit_json"],
+    payloadKey: "nodes",
+  });
+  if (!recovered) warnToolChoiceIgnored("synthesize", res.text?.trim() ? "unparsed" : "empty");
+  return recovered as { nodes?: unknown } | undefined;
 }
 

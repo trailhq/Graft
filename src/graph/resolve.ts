@@ -27,6 +27,13 @@ const PY_EXT = /\.pyi?$/i;
  * construction. Only `class` — Python enums, dataclasses and NamedTuples are all
  * classes, so no other kind is reachable this way. */
 const PY_CTOR_KINDS: Kind[] = ["class"];
+/** Swift is Python's case with more nominal kinds: `Animal(legs: 4)` is an ordinary
+ * call node with no `new` to mark construction, and struct/enum initializers are as
+ * routine as class ones (a struct gets a memberwise init for free). Same fallback
+ * shape — types are tried only once functions (and methods, see extract.ts's
+ * implicit-self widening) have found nothing. */
+const SWIFT_EXT = /\.swift$/i;
+const SWIFT_CTOR_KINDS: Kind[] = ["class", "struct", "enum"];
 
 /**
  * Languages whose symbols can genuinely reach each other. A call edge may not
@@ -234,6 +241,22 @@ export function resolveEdges(
         const refKinds: Kind[] = ["class", "interface", "trait", "enum"];
         const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
         if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
+      } else if (e.file.endsWith(".java") && byId.get(e.source)?.origin === "ast") {
+        // Java annotation without a specifier (same-file or globally unique
+        // `@interface`). Annotation types are `interface` kind — a class of the
+        // same name is not a match, so `@Entity` cannot collapse onto an in-repo
+        // `class Entity` (#103). Kind alone still cannot tell `@interface Service`
+        // from `interface Service`, so only accept a candidate whose header
+        // contains the literal `@interface` (`includes`, not `startsWith`: a
+        // meta-annotated type is `@Documented @Retention(...) public @interface
+        // JsonAdapter`). Unresolved targets keep the bare name, matching
+        // heritage, rather than dropping the way PHP attributes do.
+        const refKinds: Kind[] = ["interface"];
+        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
+        const anno = hit ? byId.get(hit.id) : undefined;
+        if (hit && hit.id !== e.source && anno?.signature?.includes("@interface"))
+          add(e.source, hit.id, "references", hit.confidence);
+        else add(e.source, e.name, "references", "inferred");
       } else if (byId.get(e.source)?.origin === "generic") {
         // Breadth tier: a bare-name structural reference (extends / implements /
         // object-creation / module alias) the grammar marked but cannot type. Resolve
@@ -249,12 +272,24 @@ export function resolveEdges(
         if (!e.recvType) continue;
         const hit = resolveTypedMember(e.recvType, e.name!, e.file, ownerMethod, classParents, classTraits, e.argCount);
         if (hit === "ambiguous") continue; // drop — never guess past an ambiguous owner
-        if (hit) add(e.source, hit.id, "calls", hit.confidence);
+        if (hit) {
+          add(e.source, hit.id, "calls", hit.confidence);
+          continue;
+        }
         // No owner-qualified match means the call is unresolved. A unique bare
         // method name is not evidence that this receiver has that method — a
         // name-fallback here was measured to HALVE call-edge precision (73%→37%
         // vs a compiler-grade oracle) for a 3x count inflation, i.e. noise. See #35.
-        continue;
+        //
+        // One carve-out, which is NOT that fallback: a Swift `implicitSelf` edge
+        // carries two readings of one bare call — member (tried above, in
+        // Swift's own inner-scope-first order) and free function. Zero members
+        // on the whole owner chain means the call was a free-function call after
+        // all, so it falls through to bare-name resolution; an ambiguous member
+        // set has already dropped it above, and a resolved member never reaches
+        // here — a name defined as both member and free function yields the
+        // member edge alone, exactly as Swift dispatches it.
+        if (!e.implicitSelf) continue;
       }
       // Every language's bare-name call is a free function, except R (Phase 4):
       // an untyped `obj$method()` there sets e.kinds to also allow a "method"
@@ -291,6 +326,9 @@ export function resolveEdges(
       // resolveName's same-file-then-unique-global rule still drops the ambiguous.
       if (!hit && PY_EXT.test(e.file)) {
         hit = resolveName(e.name!, e.file, PY_CTOR_KINDS, perFileName, globalName);
+      }
+      if (!hit && SWIFT_EXT.test(e.file)) {
+        hit = resolveName(e.name!, e.file, SWIFT_CTOR_KINDS, perFileName, globalName);
       }
       if (hit) add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
     }
@@ -397,6 +435,12 @@ function resolveTypedMember(
           const c = candidates[0];
           return { id: c.id, confidence: c.path === file ? "extracted" : "inferred" };
         }
+        // Swift: several candidates surviving arity narrowing are a genuine
+        // overload set distinguished only by parameter TYPES (`save(Int)` vs
+        // `save(String)`), which this pass cannot read — the same-file tiebreak
+        // below would pick whichever overload appears first in the file and
+        // stamp it `extracted`, a confidently wrong edge. Drop instead.
+        if (SWIFT_EXT.test(file)) return "ambiguous";
         const sameFile = candidates.find((c) => c.path === file);
         if (sameFile) return { id: sameFile.id, confidence: "extracted" };
         return "ambiguous"; // several, none same-file — drop and stop

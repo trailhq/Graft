@@ -26,6 +26,7 @@ import {
 } from "../src/graph/container.js";
 import { supportedExtensions } from "../src/graph/source-files.js";
 import { buildGraph } from "../src/graph/build.js";
+import { checkGraph } from "../src/graph/check.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 
 const VUE = containerLangOf("Any.vue")!;
@@ -245,4 +246,47 @@ test("container: a .vue file goes through a real build end to end", async () => 
     graph.edges.some((e) => e.source === label.id && e.target === greet.id && e.relation === "calls"),
     "the SFC's call into the .ts helper resolved",
   );
+});
+
+/**
+ * The check has to see every tier the build writes (#236).
+ *
+ * `checkGraph` re-extracts and diffs against the committed graph, so a tier it
+ * cannot extract reads as `removed` — and because the remedy it prints is
+ * `graft build`, which wrote those very nodes, the drift can never be cleared.
+ * That made `graft check` exit non-zero forever on any repo holding a `.vue`
+ * file, which is fatal for the CI drift gate it exists to be.
+ *
+ * Asserted on a clean build with NOTHING changed in between: the only correct
+ * answer there is "in sync", so any drift at all is the bug.
+ */
+test("container: a clean build of a .vue file checks as in sync", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-container-check-"));
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(
+    join(dir, "src", "Hello.vue"),
+    sfc([
+      "<template><div @click=\"greet\">{{ msg }}</div></template>",
+      '<script setup lang="ts">',
+      "const msg = 'hi';",
+      "function greet(): void {",
+      "  console.log(msg);",
+      "}",
+      "</script>",
+    ]),
+  );
+
+  const outDir = join(dir, "graft");
+  await buildGraph(dir, outDir, { reuse: false });
+  const built = readGraph(wiringPath(outDir));
+  assert.ok(
+    built.nodes.some((n) => n.path.endsWith("Hello.vue")),
+    "precondition: the build extracted the .vue file",
+  );
+
+  const check = await checkGraph(dir, { contextDir: outDir });
+  assert.deepEqual(check.removed, [], "a tier the build wrote must not read as removed");
+  assert.deepEqual(check.added, []);
+  assert.deepEqual(check.changed, []);
+  assert.equal(check.ok, true, "a clean build checks OK");
 });
