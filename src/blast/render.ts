@@ -12,7 +12,10 @@
  * against a cap of ten) and told a reviewer nothing per box — `src/graph/write.ts`
  * on its own is not a unit anyone reasons about.
  */
-import type { BlastReport, TestSignal } from "./blast.js";
+import type { BlastReport, ChangedArea, ImpactedModule, Impacted, TestSignal } from "./blast.js";
+import type { Evidence } from "../viz/assemble.js";
+import { fileReader, impactedEvidence, reachTerms } from "./evidence.js";
+import { MAX_REVIEWERS, mention, sinceLabel, type Owner } from "./owners.js";
 
 /** Diagram cap. Everything past it folds into one aggregate circle carrying the
  * dropped counts, so the picture shrinks but never lies. */
@@ -21,6 +24,9 @@ const MAX_MODULE_BOXES = 5;
 const MAX_TABLE_ROWS = 6;
 /** Symbols listed in the one collapsed list of everything. */
 const MAX_SYMBOLS_LISTED = 60;
+/** Rows in the collapsed ownership table. Past this it is a `git shortlog`, not a
+ * hint about who to ask. */
+const MAX_OWNER_ROWS = 8;
 
 /**
  * A quoted Mermaid label. Every line is escaped on its own and only then joined
@@ -98,8 +104,15 @@ export function mermaidDiagram(r: BlastReport): string | null {
   return lines.join("\n");
 }
 
-/** The PR-comment body: diagram, then one table, then everything else collapsed. */
-export function markdownReport(r: BlastReport): string {
+/**
+ * The PR-comment body: diagram, then one table, then everything else collapsed.
+ *
+ * `root` is the repository the report was taken in. With it, the collapsed symbol
+ * list quotes the line that reaches the diff — the same line the hosted page shows,
+ * from the same helper. Without it the list is unchanged, so a caller that has no
+ * checkout (a test, a piped report) loses nothing but the snippet.
+ */
+export function markdownReport(r: BlastReport, opts: { root?: string } = {}): string {
   const out: string[] = [];
   const symbols = r.modules.reduce((n, m) => n + m.symbols.length, 0);
 
@@ -108,6 +121,10 @@ export function markdownReport(r: BlastReport): string {
   out.push(headline(r, symbols));
   const testLine = testHeadline(r);
   if (testLine) out.push(testLine);
+  // Above the diagram on purpose: it is the one line in this comment the author
+  // ACTS on rather than reads, and it costs a single row before the picture.
+  const tag = tagLine(r);
+  if (tag) out.push(tag);
 
   if (symbols > 0) {
     const diagram = mermaidDiagram(r);
@@ -121,8 +138,16 @@ export function markdownReport(r: BlastReport): string {
     out.push(...impactTable(r));
   }
 
+  const owners = ownerSection(r);
+  if (owners.length > 0) {
+    out.push("");
+    out.push(...owners);
+  }
+
   out.push("");
-  out.push(...detailSections(r, symbols));
+  const reach = reachTerms(r.seeds, r.changed);
+  const read = fileReader(opts.root);
+  out.push(...detailSections(r, symbols, (s) => impactedEvidence(s, reach, read)));
 
   const caveats = caveatLines(r);
   if (caveats.length > 0) {
@@ -190,13 +215,99 @@ function impactTable(r: BlastReport): string[] {
 }
 
 /**
+ * The tag line: who to ask, and why them.
+ *
+ * A handle is printed only where git carried one — `mention` never invents an
+ * `@`, because a guessed mention pings a stranger who has nothing to do with the
+ * change. A bare name is bolded instead, so it still reads as a person.
+ *
+ * Null on a repository where the author is the only name in the history: an
+ * empty "Tag:" is worse than no line, and every solo project would carry one.
+ */
+function tagLine(r: BlastReport): string | null {
+  const people = r.reviewers ?? [];
+  if (people.length === 0) return null;
+  const total = r.areas.length + r.modules.length;
+  const bits = people.map((p) => {
+    const who = p.handle !== undefined ? `@${p.handle}` : `**${p.name}**`;
+    // Three or more areas is a count, not a list: naming eleven of them turns the
+    // one actionable line in the comment into the longest paragraph in it.
+    const why = p.areas.length >= 3 ? `${p.areas.length} of ${total} areas` : p.areas.join(", ");
+    return `${who} — ${why}`;
+  });
+  return `Tag: ${bits.join(" · ")}`;
+}
+
+/** `Shrish Dwivedi — 57 commits, last 9d ago`, for one cell of the table. */
+function ownerCell(owners: Owner[] | undefined, now: number): string {
+  if (owners === undefined || owners.length === 0) {
+    // Said in words rather than left blank: "nobody else" is a real answer, and an
+    // empty cell reads as a renderer that failed.
+    return "_only you — nobody else has touched these files_";
+  }
+  return owners
+    .map((o) => `${mention(o)} — ${plural(o.commits, "commit")}, last ${sinceLabel(o.last, now)}`)
+    .join(" · ");
+}
+
+/**
+ * The collapsed evidence behind the tag line: one row per area, both sides.
+ *
+ * Kept collapsed and kept below the impact table because it justifies a decision
+ * the author has already been handed at the top. Nothing here is a gate — the
+ * caveat says so, since a table of names next to a diff invites being read as
+ * CODEOWNERS.
+ */
+function ownerSection(r: BlastReport): string[] {
+  if (r.reviewers === undefined) return []; // taken outside a git repository
+  const rows: { label: string; side: string; owners?: Owner[] }[] = [
+    ...r.areas.map((a: ChangedArea) => ({ label: a.label, side: "changed", owners: a.owners })),
+    ...r.modules.map((m: ImpactedModule) => ({ label: m.label, side: "affected", owners: m.owners })),
+  ];
+  const named = rows.filter((row) => (row.owners?.length ?? 0) > 0);
+  if (named.length === 0) return [];
+
+  const now = Date.now();
+  const people = new Set<string>();
+  for (const row of rows) for (const o of row.owners ?? []) people.add(o.handle ?? o.name);
+
+  const out = ["<details>"];
+  out.push(
+    `<summary><strong>Who knows this code</strong> — ${plural(people.size, "person", "people")} ` +
+      `across ${plural(rows.length, "area")}</summary>`,
+  );
+  out.push("");
+  out.push("| Area | Who knows it |");
+  out.push("| --- | --- |");
+  // Areas with names first: a row saying "only you" is context, not an answer, so
+  // it must never be what the cap spends its budget on.
+  const ordered = [...named, ...rows.filter((row) => !named.includes(row))];
+  for (const row of ordered.slice(0, MAX_OWNER_ROWS)) {
+    out.push(`| **${row.label}** · ${row.side} | ${ownerCell(row.owners, now)} |`);
+  }
+  if (ordered.length > MAX_OWNER_ROWS) {
+    out.push(`| _…${plural(ordered.length - MAX_OWNER_ROWS, "further area")}_ | |`);
+  }
+  out.push("");
+  out.push(
+    "_Ownership is git history over each area's own files, weighted towards recent work " +
+      "(120-day half-life). Merge commits and bots are dropped, and you are dropped from your own PR. " +
+      "A name with no `@` has no GitHub handle in its commit email — tag them by hand, or add a " +
+      "`.mailmap` entry. A suggestion from history, not a CODEOWNERS rule._",
+  );
+  out.push("");
+  out.push("</details>");
+  return out;
+}
+
+/**
  * Everything a reviewer might want and nobody reads by default, in three sections.
  *
  * The blank line after each `</summary>` is required: GitHub renders no markdown
  * inside a details block without it, and `<strong>` rather than `**` because it
  * processes no emphasis inside `<summary>` either.
  */
-function detailSections(r: BlastReport, symbols: number): string[] {
+function detailSections(r: BlastReport, symbols: number, evidence?: (s: Impacted) => Evidence | null): string[] {
   const out: string[] = [];
 
   if (symbols > 0) {
@@ -210,6 +321,11 @@ function detailSections(r: BlastReport, symbols: number): string[] {
       for (const s of mod.symbols) {
         if (listed++ >= MAX_SYMBOLS_LISTED) break;
         out.push(`- \`${s.path}:${s.span}\` — ${s.name} (${s.relation}, depth ${s.depth})`);
+        // The line that reaches the diff, quoted from the same helper the hosted
+        // panel uses — a comment that disagreed with the page it links to would be
+        // worse than one that said less. Collapsed, so the comment stays short.
+        const [line] = evidence?.(s)?.lines ?? [];
+        if (line) out.push(`  \`\`\`${line.n}: ${line.text.trim()}\`\`\``);
       }
       out.push("");
       if (listed >= MAX_SYMBOLS_LISTED) {
@@ -319,6 +435,15 @@ export function textReport(r: BlastReport): string {
   if (r.testModules.length > 0) {
     const files = new Set(r.testModules.flatMap((m) => m.files));
     lines.push(`${plural(files.size, "test suite")} also ${files.size === 1 ? "references" : "reference"} this code (not listed)`, "");
+  }
+  if (r.reviewers !== undefined && r.reviewers.length > 0) {
+    const now = Date.now();
+    lines.push("who to tag");
+    for (const p of r.reviewers.slice(0, MAX_REVIEWERS)) {
+      const why = p.areas.length >= 3 ? `${p.areas.length} areas` : p.areas.join(", ");
+      lines.push(`  ${mention(p)} — ${why} · ${plural(p.commits, "commit")}, last ${sinceLabel(p.last, now)}`);
+    }
+    lines.push("");
   }
   for (const line of caveatLines(r)) lines.push(line.replace(/⚠️ /, "⚠ "), "");
   return lines.join("\n").replace(/\n+$/, "\n");

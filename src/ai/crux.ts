@@ -15,6 +15,7 @@
  * consumed once, at write time, to slice the crux text verbatim from source.
  */
 import type { ChatModel } from "./llm/types.js";
+import { recoverToolArgsFromContent, warnToolChoiceIgnored } from "./llm/recover-tool.js";
 import type { Kind } from "../graph/types.js";
 
 /** One definition we want described, located by its line span within the file. */
@@ -114,6 +115,28 @@ function parseResults(obj: { symbols?: unknown } | undefined): NodeCrux[] {
     }));
 }
 
+/**
+ * Some OpenAI-compatible gateways ignore forced `tool_choice` and put the tool
+ * payload in `content` instead (plain `{symbols:…}`, fenced JSON, or an emulated
+ * `[{name, parameters}]` array). Without this recovery the meaning pass sees an
+ * empty `toolCalls` list, leaves every node `pending`, and `graft check` loops
+ * on "run --deep" forever (#172; same trigger as #129 for the crux path).
+ */
+function argsFromResponse(res: { text: string; toolCalls: { name: string; args: unknown }[] }): {
+  symbols?: unknown;
+} | undefined {
+  const call = res.toolCalls.find((c) => c.name === RECORD_TOOL) ?? res.toolCalls[0];
+  if (call?.args && typeof call.args === "object" && !Array.isArray(call.args)) {
+    return call.args as { symbols?: unknown };
+  }
+  const recovered = recoverToolArgsFromContent(res.text, {
+    toolNames: [RECORD_TOOL, "emit_json"],
+    payloadKey: "symbols",
+  });
+  if (!recovered) warnToolChoiceIgnored("crux", res.text?.trim() ? "unparsed" : "empty");
+  return recovered as { symbols?: unknown } | undefined;
+}
+
 /** Crux summarizer backed by any {@link ChatModel} via forced tool calling. */
 export class ChatCruxSummarizer implements CruxSummarizer {
   constructor(private model: ChatModel) {}
@@ -136,6 +159,6 @@ export class ChatCruxSummarizer implements CruxSummarizer {
         { role: "user", content: userContent(input) },
       ],
     });
-    return parseResults(res.toolCalls[0]?.args as { symbols?: unknown } | undefined);
+    return parseResults(argsFromResponse(res));
   }
 }

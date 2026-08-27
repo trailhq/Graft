@@ -10,6 +10,16 @@ export interface VizNode {
   summary: string;
   sources: string[];
   evidence?: Evidence[];
+  owners?: NodeOwner[];
+}
+
+/** A contributor on a node — see `NodeOwner` in src/viz/assemble.ts. */
+export interface NodeOwner {
+  name: string;
+  handle?: string;
+  commits: number;
+  /** `YYYY-MM-DD`; the viewer turns it into "9d ago" when it renders. */
+  last: string;
 }
 
 export interface VizEdge {

@@ -58,6 +58,8 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     }
     return null;
   }
+  if (lang === "r") return rDefName(node);
+  if (lang === "swift") return swiftDefName(node);
   if (lang === "php") {
     const phpDefTypes = new Set([
       "class_declaration",
@@ -71,6 +73,8 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     // Closures push a scope segment in extract.ts too — mirror it so a typed
     // parameter bound inside a closure is keyed under the same scope path.
     if (node.type === "anonymous_function" || node.type === "arrow_function") return phpClosureName(node);
+    // Anonymous classes likewise mint an `{anonymous}` scope segment (#144).
+    if (node.type === "anonymous_class") return "{anonymous}";
     return null;
   }
   const defTypes =
@@ -90,6 +94,77 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
   if ((lang === "typescript" || lang === "tsx") && node.type === "variable_declarator") {
     const value = node.childForFieldName("value");
     if (value && FN_VALUE_TYPES.has(value.type)) return node.childForFieldName("name")?.text ?? null;
+  }
+  return null;
+}
+
+/** The scope segment a Swift definition pushes, mirroring extract.ts's
+ * `describeSwift` (duplicated, not imported, per this file's
+ * no-value-import-of-extract rule): types and extensions push the type's name
+ * (an extension is named after the type it extends), functions their own name,
+ * and an `init` the enclosing type's name — extract.ts names initializers after
+ * their type, so the two scope stacks stay in lockstep inside an init body.
+ * Typealias and top-level properties DO mint nodes in extract.ts but are
+ * deliberately absent here: neither has a body a binding could be set in (a
+ * property initializer's closure is the one vanishing exception, mis-keying
+ * only bindings set inside itself). */
+function swiftDefName(node: Parser.SyntaxNode): string | null {
+  if (node.type === "class_declaration") {
+    if (node.children.some((c) => c.type === "extension")) {
+      const ut = node.namedChildren.find((c) => c.type === "user_type");
+      const ids = ut?.namedChildren.filter((c) => c.type === "type_identifier") ?? [];
+      return ids.at(-1)?.text ?? null;
+    }
+    return node.namedChildren.find((c) => c.type === "type_identifier")?.text ?? null;
+  }
+  if (node.type === "protocol_declaration") {
+    return node.namedChildren.find((c) => c.type === "type_identifier")?.text ?? null;
+  }
+  if (node.type === "function_declaration" || node.type === "protocol_function_declaration") {
+    return node.namedChildren.find((c) => c.type === "simple_identifier")?.text ?? null;
+  }
+  if (node.type === "init_declaration") {
+    const owner = node.parent?.parent; // class_body / protocol_body → the declaration
+    return owner ? swiftDefName(owner) : null;
+  }
+  return null;
+}
+
+const R_ASSIGN_OPS = new Set(["<-", "<<-", "="]);
+const R_RIGHT_ASSIGN_OPS = new Set(["->", "->>"]);
+
+/**
+ * The bare name a `binary_operator` (left-assign) or `function_definition`
+ * (right-assign) node defines, for R's two plain-function assignment shapes —
+ * this file's own `defName` uses it directly. extract.ts's `describeR`
+ * duplicates the same op-filtering check rather than importing this (same
+ * reasoning as the Go receiver helpers below: bindings.ts can't take a value
+ * import back on extract.ts), and additionally needs to distinguish an S3
+ * `generic.Class` method and R6/S4 class/method shapes this function doesn't
+ * know about — bindings.ts has no equivalent need since no `handleR` binding
+ * collector exists yet (R6/S4/S3 don't get a member/receiver-type table in
+ * this pass; `self`/`private` resolve directly via `ctx.enclosingClass`
+ * instead, needing no lookup). See `describeR`'s doc comment for why
+ * right-assign's AST shape needs its own branch rather than mirroring
+ * left-assign's (empirically, not assumed — `->`'s low precedence means it's
+ * absorbed into the function's own `body` field, not an outer wrapper).
+ * Null if `node` isn't one of these two shapes.
+ */
+export function rDefName(node: Parser.SyntaxNode): string | null {
+  if (node.type === "binary_operator") {
+    const op = node.childForFieldName("operator")?.text;
+    if (!op || !R_ASSIGN_OPS.has(op)) return null;
+    const lhs = node.childForFieldName("lhs");
+    const rhs = node.childForFieldName("rhs");
+    return lhs?.type === "identifier" && rhs?.type === "function_definition" ? lhs.text : null;
+  }
+  if (node.type === "function_definition") {
+    const body = node.childForFieldName("body");
+    if (body?.type !== "binary_operator") return null;
+    const op = body.childForFieldName("operator")?.text;
+    if (!op || !R_RIGHT_ASSIGN_OPS.has(op)) return null;
+    const rhs = body.childForFieldName("rhs");
+    return rhs?.type === "identifier" ? rhs.text : null;
   }
   return null;
 }
@@ -116,14 +191,19 @@ function goReceiverTypeOf(node: Parser.SyntaxNode): string | null {
 
 /** Resolves a call site's receiver text (from `calleeName`) to a bound type
  * name, given the enclosing walk state. `self`/`cls`/`this`/the Go receiver
- * var resolve directly to the enclosing class; anything else is a bindings-map
- * lookup, normalizing `this.` to `self.` since both are stored the same way. */
+ * var resolve directly to the enclosing class; `super` — R6's `super$` and
+ * Swift's `super.` alike — resolves to the PARENT class instead
+ * (`ctx.rSuperClass`, not `ctx.enclosingClass` — a super call must climb past
+ * the current class's own same-named override, not find it); anything else is
+ * a bindings-map lookup, normalizing `this.` to `self.` since both are stored
+ * the same way. */
 export function resolveRecvType(
   receiver: string | undefined,
-  ctx: Pick<WalkCtx, "scope" | "enclosingClass" | "goReceiverVar" | "lang" | "bindings">,
+  ctx: Pick<WalkCtx, "scope" | "enclosingClass" | "goReceiverVar" | "lang" | "bindings" | "rSuperClass">,
 ): string | undefined {
   if (!receiver) return undefined;
   if (receiver === "self" || receiver === "cls" || receiver === "this") return ctx.enclosingClass ?? undefined;
+  if (receiver === "super") return ctx.rSuperClass ?? undefined;
   if (receiver.startsWith("self.") || receiver.startsWith("this.")) {
     return (
       ctx.bindings.lookup(ctx.scope, receiver) ??
@@ -137,6 +217,10 @@ export function resolveRecvType(
   return (
     (ctx.lang === "go" && receiver === ctx.goReceiverVar ? ctx.enclosingClass : undefined) ??
     ctx.bindings.lookup(ctx.scope, receiver) ??
+    // Swift type-member call `Animal.staticThing()`: an uppercase receiver with no
+    // local binding is the type itself (Swift naming: types are UpperCamelCase,
+    // values lowerCamelCase — and a shadowing binding was already tried above).
+    (ctx.lang === "swift" && /^[A-Z]/.test(receiver) ? receiver : undefined) ??
     undefined
   );
 }
@@ -146,6 +230,11 @@ function isClassNode(node: Parser.SyntaxNode, lang: Language): boolean {
   if (lang === "java") return JAVA_TYPE_DECLS.has(node.type);
   if (lang === "typescript" || lang === "tsx") {
     return node.type === "class_declaration" || node.type === "abstract_class_declaration";
+  }
+  // Swift: class_declaration covers class/struct/enum/actor/extension — all can
+  // hold members whose `self.field` bindings live at the type's scope.
+  if (lang === "swift") {
+    return node.type === "class_declaration" || node.type === "protocol_declaration";
   }
   return false;
 }
@@ -212,7 +301,11 @@ function visit(
 ): void {
   if (lang === "python") handlePy(node, scope, classScope, bindings, aliases);
   else if (lang === "go") handleGo(node, scope, bindings);
+  // R Phase 1 has no classes, so there's no member/receiver-type binding to
+  // collect yet (see extract.ts's calleeName R branch) — no handleR needed.
+  else if (lang === "r") void 0;
   else if (lang === "java") handleJava(node, scope, classScope, bindings);
+  else if (lang === "swift") handleSwift(node, scope, classScope, bindings);
   else if (lang === "php") handlePhp(node, scope, bindings);
   else handleTs(node, scope, classScope, bindings, aliases);
 
@@ -249,6 +342,75 @@ function callTypeName(node: Parser.SyntaxNode | null | undefined, aliases: Map<s
   const fn = node.childForFieldName("function");
   if (fn?.type !== "identifier") return null;
   return aliases.get(fn.text) ?? fn.text;
+}
+
+/** Swift variable->type bindings from the confident, syntax-local clues:
+ * a typed parameter (`func feed(animal: Animal)`, `init(keeper k: Keeper)` —
+ * the LAST simple_identifier before the `:` is the local name, the first may be
+ * an external argument label), a typed property (`var d: Doctor`), and an
+ * initializer-call assignment (`let vet = Vet()` — an initializer call is an
+ * ordinary call whose callee is the type's own UpperCamelCase name; Swift's
+ * naming convention makes the case split reliable, the same way Go's `NewX`
+ * convention is trusted in handleGo). A property directly inside a type body is
+ * a field: bound at the type's scope, both bare (`repo.save()`) and
+ * `self.`-prefixed (`self.repo.save()`), like Java's fields. */
+function handleSwift(
+  node: Parser.SyntaxNode,
+  scope: string[],
+  classScope: string | null,
+  bindings: FileBindings,
+): void {
+  const scopePath = scope.join(".");
+  if (node.type === "parameter") {
+    const ids = node.namedChildren.filter((c) => c.type === "simple_identifier");
+    const name = ids.at(-1)?.text;
+    const type = swiftTypeName(
+      node.namedChildren.find((c) => c.type === "user_type" || c.type === "optional_type"),
+    );
+    if (name && type) bindings.set(scopePath, name, type);
+    return;
+  }
+  if (node.type !== "property_declaration") return;
+  const name = node.namedChildren
+    .find((c) => c.type === "pattern")
+    ?.namedChildren.find((c) => c.type === "simple_identifier")?.text;
+  if (!name) return;
+  const annotated = node.namedChildren
+    .find((c) => c.type === "type_annotation")
+    ?.namedChildren.find((c) => c.type === "user_type" || c.type === "optional_type");
+  const type =
+    swiftTypeName(annotated) ??
+    swiftCtorTypeName(node.namedChildren.find((c) => c.type === "call_expression"));
+  if (!type) return;
+  const isField = node.parent?.type === "class_body" || node.parent?.type === "protocol_body";
+  const target = isField ? (classScope ?? scopePath) : scopePath;
+  bindings.set(target, name, type);
+  if (isField) bindings.set(target, `self.${name}`, type);
+}
+
+/** A Swift type node's bare name: a `user_type`'s LAST type_identifier (so a
+ * module-qualified `Foundation.Date` binds as `Date`, generic arguments live in
+ * nested nodes and never leak in), unwrapping one level of optional (`Animal?`).
+ * Collections, tuples, and function types bind nothing — no single confident
+ * receiver type to name. */
+function swiftTypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "optional_type") {
+    return swiftTypeName(node.namedChildren.find((c) => c.type === "user_type"));
+  }
+  if (node.type !== "user_type") return null;
+  const ids = node.namedChildren.filter((c) => c.type === "type_identifier");
+  return ids.at(-1)?.text ?? null;
+}
+
+/** The type constructed by an initializer call (`Vet()` → `Vet`), or null when
+ * the callee isn't a bare UpperCamelCase name — a lowercase callee is an
+ * ordinary function whose return type a single-file pass cannot know. */
+function swiftCtorTypeName(call: Parser.SyntaxNode | null | undefined): string | null {
+  if (call?.type !== "call_expression") return null;
+  const fn = call.namedChildren[0];
+  if (fn?.type !== "simple_identifier") return null;
+  return /^[A-Z]/.test(fn.text) ? fn.text : null;
 }
 
 /** PHP variable->type bindings from the two confident, syntax-local clues:

@@ -9,12 +9,21 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { warmGenericGrammars, extractGeneric, genericLangOf, isWarm } from "../src/graph/generic.js";
+import {
+  warmGenericGrammars,
+  extractGeneric,
+  genericLangOf,
+  isWarm,
+  loadWasmLanguage,
+  parseWasm,
+  type TsNode,
+} from "../src/graph/generic.js";
 import { resolveEdges } from "../src/graph/resolve.js";
 import { buildGraph } from "../src/graph/build.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import { checkGraph } from "../src/graph/check.js";
 import { contextDirFor } from "../src/context/node-file.js";
+import { skeleton } from "../src/ask/ask.js";
 
 const RUST = `pub struct Config {
     name: String,
@@ -36,6 +45,7 @@ fn helper() -> String {
 
 test("genericLangOf routes .rs to the breadth tier (and not depth-tier extensions)", () => {
   assert.equal(genericLangOf("src/main.rs")?.name, "rust");
+  assert.equal(genericLangOf("src/init.lua")?.name, "lua");
   assert.equal(genericLangOf("src/app.ts"), null); // depth tier owns .ts
   assert.equal(genericLangOf("README.md"), null);
 });
@@ -105,6 +115,21 @@ const SNIPPETS: Array<{ lang: string; file: string; src: string; defs: string[];
     lang: "clojure", file: "a.clj",
     src: `(ns my.core)\n\n(defn helper [] 1)\n\n(defn run [] (helper))\n`,
     defs: ["function:helper", "function:run", "module:my.core"], call: ["run", "helper"],
+  },
+  {
+    // Lua functions can be declarations, assigned expressions, or table fields;
+    // colon syntax defines and calls methods.
+    lang: "lua", file: "a.lua",
+    src: `local function helper()\n  return 1\nend\n\nlocal assigned = function()\n  return helper()\nend\n\nlocal handlers = { draw = function() return helper() end }\n\nfunction Widget:run()\n  return helper()\nend\n\nlocal function launch()\n  return Widget:run()\nend\n`,
+    defs: ["function:assigned", "function:draw", "function:helper", "function:launch", "method:run"], call: ["launch", "run"],
+  },
+  {
+    // Nix: a binding whose value is a lambda (let-bound or attrset field) becomes
+    // a function def; a non-function binding (`version`) is not emitted, and an
+    // application of one binding by another resolves as a call.
+    lang: "nix", file: "a.nix",
+    src: `let\n  helper = x: x + 1;\nin {\n  greet = name: helper 2;\n  version = "1.0";\n}\n`,
+    defs: ["function:greet", "function:helper"], call: ["greet", "helper"],
   },
 ];
 
@@ -235,43 +260,6 @@ test("breadth tier: Rust use crate::… resolves to the in-repo module (longest-
   assert.deepEqual(fromTest.map((e) => e.target), ["crate::error::Error"], "test-binary crate:: never resolves into the lib");
 });
 
-// PHP `use App\Models\User` → a file→class-file import, resolved to the in-repo class by
-// the longest namespace-tail suffix (PSR-4 root is unknown). Groups expand; `use function`
-// is skipped; a vendor/unknown class or an ambiguous tail stays a string, never guessed.
-test("breadth tier: PHP use resolves to the class file (namespace-suffix, groups, drop-rather-than-guess)", async () => {
-  await warmGenericGrammars(["php"]);
-  const files: Record<string, string> = {
-    "src/Models/User.php": "<?php\nnamespace App\\Models;\nclass User {}\n",
-    "src/Http/Request.php": "<?php\nnamespace App\\Http;\nclass Request {}\n",
-    "src/Http/Response.php": "<?php\nnamespace App\\Http;\nclass Response {}\n",
-    "a/Dup.php": "<?php\nclass Dup {}\n",
-    "b/Dup.php": "<?php\nclass Dup {}\n",
-    "src/App.php":
-      "<?php\nnamespace App;\n" +
-      "use App\\Models\\User;\n" +              // → src/Models/User.php
-      "use App\\Http\\{Request, Response};\n" +  // group → both Http files
-      "use App\\Support\\Str as S;\n" +          // in-namespace but no file → string
-      "use function App\\helpers\\tap;\n" +      // function import → skipped, no edge
-      "use Psr\\Log\\LoggerInterface;\n" +       // external vendor → string
-      "use Whatever\\Dup;\n" +                   // ambiguous basename → drop
-      "class App {}\n",
-  };
-  const nodes = [], raw = [];
-  for (const [rel, src] of Object.entries(files)) {
-    const r = extractGeneric(rel, src, "php");
-    nodes.push(...r.nodes); raw.push(...r.rawEdges);
-  }
-  const imports = resolveEdges(nodes, raw).filter((e) => e.relation === "imports" && e.source === "src/App.php");
-  const targets = imports.map((e) => e.target).sort();
-
-  assert.ok(targets.includes("src/Models/User.php"), "use App\\Models\\User → Models/User.php");
-  assert.ok(targets.includes("src/Http/Request.php") && targets.includes("src/Http/Response.php"), "group expands to both");
-  assert.ok(targets.includes("App\\Support\\Str"), "in-namespace but fileless → kept as string");
-  assert.ok(targets.includes("Psr\\Log\\LoggerInterface"), "external vendor class → kept as string");
-  assert.ok(targets.includes("Whatever\\Dup"), "ambiguous basename → kept as string, never guessed");
-  assert.ok(!targets.some((t) => /tap|helpers/.test(t)), "use function … is skipped (symbol import, not a class file)");
-});
-
 test("buildGraph + checkGraph handle a breadth-tier (.rs) repo end-to-end", async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft-rust-"));
   mkdirSync(join(dir, "src"), { recursive: true });
@@ -289,4 +277,138 @@ test("buildGraph + checkGraph handle a breadth-tier (.rs) repo end-to-end", asyn
   // identically, so a fresh graph reads as in-sync, not perpetually stale.
   const chk = await checkGraph(dir);
   assert.equal(chk.ok, true, `check OK on a breadth-tier repo (added=${chk.added}, removed=${chk.removed})`);
+});
+
+// #134: Dart is a breadth-tier language with no vendored tags.scm, so the
+// node-kind walker minted class_body / locals and skipped top-level functions.
+// Issue fixture — top-level const + functions + a method that calls a top-level fn.
+const DART = `const int kThreshold = 3;
+
+bool isReady(int count) => count >= kThreshold;
+
+String describe(int count) {
+  final label = isReady(count) ? 'ready' : 'waiting';
+  return label;
+}
+
+class Counter {
+  int value = 0;
+
+  bool ready() => isReady(value);
+}
+`;
+
+test("genericLangOf routes .dart to the breadth tier", () => {
+  assert.equal(genericLangOf("lib/example.dart")?.name, "dart");
+});
+
+test("Dart top-level functions/consts become symbols; call edges resolve; body locals stay out (#134)", async () => {
+  await warmGenericGrammars(["dart"]);
+  assert.ok(isWarm("dart"), "dart grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("lib/example.dart", DART, "dart");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const byName = new Map(symbols.map((n) => [n.name, n]));
+
+  assert.equal(byName.get("isReady")?.kind, "function", "isReady is a top-level function");
+  assert.equal(byName.get("describe")?.kind, "function", "describe is a top-level function");
+  assert.equal(byName.get("kThreshold")?.kind, "constant", "kThreshold is a top-level const");
+  assert.equal(byName.get("Counter")?.kind, "class");
+  assert.equal(byName.get("ready")?.kind, "method", "Counter.ready is a method");
+
+  assert.ok(!symbols.some((n) => n.name === "label"), "function-body local `label` is not a symbol");
+  assert.ok(
+    !symbols.some((n) => n.kind === "class" && n.name === "int"),
+    `no bogus class int (got ${symbols.filter((n) => n.kind === "class").map((n) => n.name).join(", ")})`,
+  );
+
+  const edges = resolveEdges(nodes, rawEdges);
+  const calls = edges
+    .filter((e) => e.relation === "calls")
+    .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
+  assert.ok(calls.includes("describe→isReady"), `describe → isReady (got ${calls.join(", ")})`);
+  assert.ok(calls.includes("ready→isReady"), `Counter.ready → isReady (got ${calls.join(", ")})`);
+});
+
+test("Dart file-level skeleton lists the API, not function-body locals (#134)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-dart-"));
+  mkdirSync(join(dir, "lib"));
+  writeFileSync(join(dir, "lib", "example.dart"), DART);
+
+  await buildGraph(dir, { reuse: false });
+  const r = skeleton(dir, "lib/example.dart");
+  const names = r.entries.map((e) => e.name);
+  for (const want of ["isReady", "describe", "kThreshold", "Counter", "ready"]) {
+    assert.ok(names.includes(want), `skeleton includes ${want} (got ${names.join(", ")})`);
+  }
+  assert.ok(!names.includes("label"), "skeleton omits function-body local `label`");
+  assert.ok(
+    !r.entries.some((e) => e.kind === "class" && e.name === "int"),
+    "skeleton has no bogus class int",
+  );
+});
+
+// #139: tree-sitter-wasm 1.1.4's PHP grammar throws `memory access out of bounds`
+// on heredoc/nowdoc, and extractGeneric swallows that into a file-only result.
+// PHP is depth-tier now (.php is not claimed by the breadth registry), so this
+// loads the wasm grammar directly — the same parse the breadth path used when
+// the issue landed.
+// v1.1.6 is the first release that parses these without crashing.
+const PHP_HEREDOC = `<?php
+namespace App;
+class WithHeredoc {
+    public function sql(): string {
+        return <<<SQL
+            SELECT 1
+            SQL;
+    }
+    public function other(): int { return 2; }
+}
+`;
+
+const PHP_NOWDOC = `<?php
+namespace App;
+class WithNowdoc {
+    public function sql(): string {
+        return <<<'SQL'
+            SELECT 1
+            SQL;
+    }
+    public function other(): int { return 2; }
+}
+`;
+
+function namedOfType(root: TsNode, type: string): string[] {
+  const names: string[] = [];
+  const visit = (n: TsNode): void => {
+    if (n.type === type) {
+      const name = n.childForFieldName?.("name")?.text;
+      if (name) names.push(name);
+    }
+    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
+      const c = n.namedChild?.(i);
+      if (c) visit(c);
+    }
+  };
+  visit(root);
+  return names;
+}
+
+async function assertPhpWasmExtractsClassAndMethods(source: string, className: string, label: string): Promise<void> {
+  const language = await loadWasmLanguage("php");
+  assert.ok(language, "tree-sitter-wasm must ship a php grammar");
+  const root = parseWasm(language, source);
+  assert.ok(root, `${label}: PHP wasm parse must not crash (1.1.4 threw on heredoc/nowdoc)`);
+  const classes = namedOfType(root, "class_declaration");
+  const methods = namedOfType(root, "method_declaration");
+  assert.ok(classes.includes(className), `${label}: expected class ${className}, got: ${classes.join(", ") || "(none)"}`);
+  assert.ok(methods.includes("sql"), `${label}: expected method sql, got: ${methods.join(", ") || "(none)"}`);
+  assert.ok(methods.includes("other"), `${label}: expected method other, got: ${methods.join(", ") || "(none)"}`);
+}
+
+test("PHP wasm grammar extracts class + methods from a heredoc file (#139)", async () => {
+  await assertPhpWasmExtractsClassAndMethods(PHP_HEREDOC, "WithHeredoc", "heredoc");
+});
+
+test("PHP wasm grammar extracts class + methods from a nowdoc file (#139)", async () => {
+  await assertPhpWasmExtractsClassAndMethods(PHP_NOWDOC, "WithNowdoc", "nowdoc");
 });

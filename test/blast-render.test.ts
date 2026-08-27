@@ -11,6 +11,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { markdownReport, mermaidDiagram, textReport } from "../src/blast/render.js";
 import type { BlastReport, ChangedArea, ImpactedModule, TestSignal } from "../src/blast/blast.js";
 
@@ -139,4 +142,28 @@ test("blast markdown: test-only dependents are counted, never mixed into the are
   assert.match(body, /9 symbols, kept out of the diagram and the table/);
 
   assert.match(textReport(report()), /1 test suite also references this code \(not listed\)/);
+});
+
+test("markdown: the collapsed list quotes the line that reaches the diff", () => {
+  const root = mkdtempSync(join(tmpdir(), "graft-render-"));
+  mkdirSync(join(root, "core"), { recursive: true });
+  // `mod("core/")` puts its symbols in core/dep.ts at L1-L3, and line 1 is what
+  // makes this file part of the radius at all.
+  writeFileSync(
+    join(root, "core", "dep.ts"),
+    'import { thing } from "./f0.js";\nexport function s0() {\n  return thing();\n}\n',
+  );
+
+  const md = markdownReport(report(), { root });
+  const quoted = '`1: import { thing } from "./f0.js";`';
+  assert.ok(md.includes(quoted), "the reaching line is shown");
+  // It must stay BELOW the fold: the comment's job is five circles and a table,
+  // and this is the part nobody reads by default.
+  assert.ok(md.indexOf(quoted) > md.indexOf("<details>"), "quoted inside the collapsed section");
+  assert.ok(md.indexOf(quoted) > md.indexOf("```mermaid"), "never above the diagram");
+
+  // No checkout, no snippet — and nothing else changes.
+  const bare = markdownReport(report());
+  assert.ok(!bare.includes(quoted));
+  assert.ok(bare.includes("`core/dep.ts:L1-L3` — s0 (calls, depth 1)"), "the symbol is still listed");
 });

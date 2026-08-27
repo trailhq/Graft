@@ -33,10 +33,12 @@ import {
 } from "./graph/workspace-cli.js";
 import { formatInitEpilogue } from "./cli-epilogue.js";
 import { planInit, selectedWrites } from "./hosts/plan.js";
+import { planRetract, runRetract, changed, type Retraction } from "./hosts/retract.js";
 import { formatNonInteractiveHelp, formatPlan, runPicker } from "./cli-picker.js";
 import { homedir } from "node:os";
 import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurrentVersion, runUpgrade } from "./cli-meta.js";
 import { patchBuildConfig, type BuildConfig } from "./util/state.js";
+import { normalizePathPrefix } from "./util/paths.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readUpdateCache, refreshUpdateCache, writeStamp } from "./upkeep.js";
 import {
   errorCode,
@@ -167,6 +169,28 @@ async function refreshBefore(dir: string, opts: { refresh?: boolean }): Promise<
 /** Attached to every query command: `--no-refresh` answers from the graph exactly
  * as it is on disk, no rebuild. */
 const NO_REFRESH_FLAG = ["--no-refresh", "skip the freshness check — answer from the graph as-is"] as const;
+
+const VIZ_TABS = ["context", "code", "outline"] as const;
+type VizTab = (typeof VIZ_TABS)[number];
+
+/**
+ * `--tabs context,code` → the tabs to write into an exported page.
+ *
+ * An unknown name is a caller mistake worth failing on rather than silently
+ * dropping: a page exported with a typo'd tab list would be missing a tab and
+ * nothing would say why. Undefined means "all of them", which is the default the
+ * exporter already applies.
+ */
+function parseTabs(raw: string | undefined): VizTab[] | undefined {
+  if (raw === undefined) return undefined;
+  const want = raw.split(",").map((t) => t.trim()).filter(Boolean);
+  const bad = want.filter((t) => !VIZ_TABS.includes(t as VizTab));
+  if (bad.length > 0 || want.length === 0) {
+    console.error(`✗ --tabs takes a comma-separated subset of ${VIZ_TABS.join(", ")}${bad.length ? ` — got "${bad.join('", "')}"` : ""}`);
+    process.exit(1);
+  }
+  return want as VizTab[];
+}
 
 /**
  * Commands that own the upgrade story themselves (`version`, `upgrade`) or must
@@ -305,6 +329,15 @@ program
     (val: string, prev: string[]) => [...prev, val],
     [] as string[],
   )
+  .option(
+    "--only-dir <path>",
+    "only index files under this repo-relative path — repeatable; persisted, so a later build " +
+      "(and the hooks/refresh path) walks the same set; everything outside the list is skipped",
+    (val: string, prev: string[]) => [...prev, val],
+    [] as string[],
+  )
+  .option("--no-gitignore", "skip writing graft/ into .gitignore (same as GRAFT_NO_GITIGNORE=1)")
+  .option("--no-ignore", "skip writing .ignore for ripgrep re-admit (same as GRAFT_NO_IGNORE=1)")
   .action(async (
     dir: string,
     opts: {
@@ -315,12 +348,17 @@ program
       lsp?: boolean;
       allowPartial?: boolean;
       includeDir?: string[];
+      onlyDir?: string[];
       followSubmodules?: boolean;
       followNestedRepos?: boolean;
+      gitignore?: boolean;
+      ignore?: boolean;
     },
     command: Command,
   ) => {
     const buildStartedAt = Date.now();
+    if (opts.gitignore === false) process.env.GRAFT_NO_GITIGNORE = "1";
+    if (opts.ignore === false) process.env.GRAFT_NO_IGNORE = "1";
     const concurrency = opts.concurrency ? Math.max(1, Number(opts.concurrency)) : undefined;
     if (opts.concurrency && !Number.isFinite(concurrency)) {
       console.error(`✗ --concurrency must be a number, got "${opts.concurrency}"`);
@@ -348,6 +386,23 @@ program
         }
       }
       buildConfigPatch.includeDirs = opts.includeDir;
+    }
+    // The whitelist is NOT persisted to `.graft/config.json`: it belongs with the
+    // graph (the fingerprint records it at build time), never in the source repo,
+    // so a `--only-dir` build leaves no trace under the repo being indexed.
+    let onlyDirs: string[] | undefined;
+    if (opts.onlyDir && opts.onlyDir.length > 0) {
+      // --only-dir takes a repo-relative path prefix, normalized to the same
+      // posix, no-`./`, no-trailing-slash form `--in` uses, so the prefix match
+      // is exact. A prefix that normalizes to "" (a bare "/" or ".") is rejected:
+      // it would mean "match nothing" or "match everything", neither of which is
+      // a deliberate whitelist.
+      const normalized = opts.onlyDir.map((p) => normalizePathPrefix(p)).filter((p) => p !== "");
+      if (normalized.length === 0) {
+        console.error("✗ --only-dir: expected a non-empty repo-relative path");
+        process.exit(1);
+      }
+      onlyDirs = normalized;
     }
     const followSubmodulesWasExplicit = command.getOptionValueSource("followSubmodules") === "cli";
     if (followSubmodulesWasExplicit && typeof opts.followSubmodules === "boolean") {
@@ -431,6 +486,7 @@ program
       concurrency,
       reuse: opts.reuse,
       lsp: opts.lsp,
+      onlyDirs,
       onProgress: ({ phase, index, total, file }) =>
         process.stderr.write(
           `\r${phase === "enrich" ? "summarizing" : "parsing"} ${index + 1}/${total}: ${file.slice(0, 50).padEnd(50)}`,
@@ -465,7 +521,11 @@ program
     for (const e of g.errors) console.error(`✗ ${e}`);
 
     const rel = relative(process.cwd(), g.contextDir) || "graft";
-    console.log(`  ${rel}/ is git-ignored (added automatically) — a local cache; teammates run \`graft build\` to get their own.`);
+    if (process.env.GRAFT_NO_GITIGNORE) {
+      console.log(`  ${rel}/ is a local cache — add it to your gitignore if you want it untracked.`);
+    } else {
+      console.log(`  ${rel}/ is git-ignored (added automatically) — a local cache; teammates run \`graft build\` to get their own.`);
+    }
 
     // #127: a --deep run whose LLM calls failed used to print the same success
     // footer and exit 0, so a quota-exhausted build looked identical to a clean
@@ -606,7 +666,12 @@ program
   .option("--no-open", "don't open the browser")
   .option("--export <dir>", "write one self-contained index.html instead of serving (for CI, GitHub Pages, or a build artifact)")
   .option("--title <text>", "subtitle shown beside the repo name in an exported page (e.g. \"PR #151\")")
-  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; export?: string; title?: string }) => {
+  .option("--tabs <list>", "tabs the exported page offers, comma separated: context,code,outline (default: all three)")
+  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; export?: string; title?: string; tabs?: string }) => {
+    // Flags are checked before the repository is: a typo'd `--tabs` is a mistake
+    // in the command the caller just typed, and telling them to go build an index
+    // first sends them off to fix the wrong thing.
+    const tabs = parseTabs(opts.tabs);
     const dir = noteQuery(queryRoot(dirArg));
     const { existsSync } = await import("node:fs");
     const { resolve, basename } = await import("node:path");
@@ -632,6 +697,7 @@ program
         outDir: resolve(opts.export),
         repoName: basename(root),
         subtitle: opts.title,
+        tabs,
       });
       const kb = Math.round(out.bytes / 1024);
       console.log(
@@ -719,8 +785,10 @@ program
   .option("--name", "name the affected areas with one cached LLM call (needs GRAFT_API_KEY); without it, areas are named after their hub symbol")
   .option("--export-viz <dir>", "also write the interactive page for this radius (one self-contained index.html — for CI, GitHub Pages, or an artifact)")
   .option("--title <text>", "subtitle beside the repo name on the exported page (e.g. \"PR #171\")")
+  .option("--no-owners", "do not suggest who to tag (by default, git history names the people behind each affected area)")
+  .option("--pr-author <who...>", "GitHub login, git name or email of the PR author, so they are left out of their own suggestions")
   .option(...NO_REFRESH_FLAG)
-  .action(async (dirArg: string | undefined, opts: { base?: string; depth?: string; format?: string; name?: boolean; exportViz?: string; title?: string; refresh?: boolean }) => {
+  .action(async (dirArg: string | undefined, opts: { base?: string; depth?: string; format?: string; name?: boolean; exportViz?: string; title?: string; owners?: boolean; prAuthor?: string[]; refresh?: boolean }) => {
     const dir = noteQuery(queryRoot(dirArg));
     await refreshBefore(dir, opts);
     const { runBlastCommand } = await import("./blast/blast-cli.js");
@@ -731,6 +799,8 @@ program
       name: opts.name,
       exportViz: opts.exportViz,
       title: opts.title,
+      owners: opts.owners,
+      prAuthor: opts.prAuthor,
       globalDir: program.opts<GlobalOpts>().dir,
     });
   });
@@ -956,6 +1026,17 @@ function wireTarget(
 ): void {
     const { home, cliPath, plan, wantClaude, opts } = ctx;
 
+    // Converge, don't just add. init writes the selected hosts; without this it
+    // never touches the rest, so a repo wired by an older version (or by the same
+    // version with different --agents) keeps that run's files forever — and
+    // `reconcileWiring` then keeps them *up to date*, which is worse than stale.
+    // Retract every host NOT being written now; `exclude` spares the ones about to
+    // be rewritten, and the graph cache is kept (init is one step from using it).
+    const retracted = changed(
+      runRetract(repo, { home, apply: true, global: opts.global, cache: false, exclude: ids }),
+    ).filter((r) => r.action !== "skipped-unparseable");
+    for (const r of retracted) console.error(`- removed ${r.path} (${r.what}) — agent not selected`);
+
     if (wantClaude) {
       const res = runInit(repo, { build: opts.build, cliPath });
       console.error(`✓ wrote ${res.settingsPath}`);
@@ -1012,6 +1093,69 @@ function wireTarget(
     }
 
 }
+
+/** Group a retraction report by host, so the output reads as "what leaves each agent". */
+function formatRetractions(rs: Retraction[], apply: boolean): string {
+  const hit = changed(rs);
+  if (hit.length === 0) return "· nothing to remove — no graft wiring found here";
+  const verb = apply ? "removed" : "would remove";
+  const lines: string[] = [];
+  const byHost = new Map<string, Retraction[]>();
+  for (const r of hit) {
+    const k = byHost.get(r.hostId) ?? [];
+    k.push(r);
+    byHost.set(r.hostId, k);
+  }
+  for (const [host, items] of byHost) {
+    lines.push(`\n${host}:`);
+    for (const r of items) {
+      const mark =
+        r.action === "skipped-unparseable"
+          ? "⚠"
+          : r.action === "deleted"
+            ? "-"
+            : "~";
+      const note =
+        r.action === "skipped-unparseable"
+          ? " — not valid JSON, left untouched (remove the graft entry by hand)"
+          : r.action === "deleted"
+            ? ` (${r.what} — deleted)`
+            : ` (${r.what})`;
+      const scope = r.scope === "global" ? " [machine-wide]" : "";
+      lines.push(`  ${mark} ${verb}: ${r.path}${scope}${note}`);
+    }
+  }
+  return lines.join("\n").replace(/^\n/, "");
+}
+
+program
+  .command("uninstall")
+  .description("Remove every file and config entry graft has written to this repo (the inverse of init)")
+  .argument("[dir]", "target repo directory", ".")
+  .option("-y, --yes", "actually remove (without this, prints what it would remove and exits)")
+  .option("--keep-cache", "keep graft/ and the .gitignore entries — wiring only")
+  .option("--no-global", "leave out-of-repo files alone (~/.codex, ~/.gemini)")
+  .action((dir: string, opts: { yes?: boolean; keepCache?: boolean; global?: boolean }) => {
+    const repo = resolve(dir);
+    const home = homedir();
+    const common = { home, global: opts.global, cache: opts.keepCache ? false : true };
+
+    if (!opts.yes) {
+      console.error(formatRetractions(planRetract(repo, common), false));
+      console.error("\nDry run — nothing was touched. Re-run with -y to remove.");
+      if (opts.global !== false)
+        console.error("Entries marked [machine-wide] affect every project; --no-global skips them.");
+      return;
+    }
+    const done = runRetract(repo, { ...common, apply: true });
+    console.error(formatRetractions(done, true));
+    const bad = changed(done).filter((r) => r.action === "skipped-unparseable");
+    console.error(
+      bad.length
+        ? `\n⚠ ${bad.length} file(s) could not be parsed and were left as-is — see above.`
+        : "\n✓ graft fully removed. `graft init` re-wires from scratch.",
+    );
+  });
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof Error ? err.message : err);

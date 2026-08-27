@@ -1,7 +1,217 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Swift gets full-fidelity (depth-tier) extraction**, promoted from the
+  breadth tier the same way Kotlin was (#130) — whose swift tags query had no
+  call captures at all, so Swift repos indexed symbols with zero wiring.
+  `tree-sitter-swift` (native, `^0.7.1` — the first release whose install
+  compiles the shipped parser instead of regenerating it, which broke under
+  npm's hoisting; a root `overrides` entry pins its `tree-sitter` peer for dev
+  installs) parses `.swift`. One `class_declaration` node covers `class` /
+  `struct` / `enum` / `actor` / `extension`, told apart by their own keyword:
+  class and actor → `class`, struct → `struct`, enum → `enum`, `protocol` →
+  `interface`, `typealias` → `type`, top-level `let`/`var` → `variable`. An
+  `extension Point` node takes the extended type's own name, so its members
+  mint as Point methods and member calls on a Point receiver resolve to them.
+  The extension node itself is kind `module`, not a second same-named class —
+  otherwise every `Point()` call and `: Point` heritage target would go
+  ambiguous and drop. `init` becomes a method named after its type (like a
+  Java constructor); `func` is a method inside any type and a function
+  elsewhere. Calls resolve via `call_expression` with `navigation_expression`
+  / `self` / `super` receivers. A bare lowercase call inside a type body is
+  ONE edge carrying both of its readings in Swift's own inner-scope-first
+  order: the member reading first (owner-qualified index + the in-repo
+  ancestor chain — a stdlib call like `contains` inside `extension Set`
+  drops instead of binding to an unrelated type's only same-named method, a
+  false positive dogfooding on swift-composable-architecture caught), then
+  the free-function reading only when no member exists on the chain — so a
+  name defined as both yields the member edge alone, as Swift dispatches it.
+  `super.method()` resolves against the declaration's own superclass (the
+  first `:` entry, which Swift's grammar puts before any protocol), climbing
+  past the current class's override. Overloads disambiguate by declared
+  arity vs call-site argument count (Java's exact mechanism — defaults and
+  variadics make the arity a minimum); an overload set arity can't split
+  (`save(Int)` vs `save(String)`) DROPS rather than taking the same-file
+  tiebreak, which would stamp whichever overload appears first `extracted`.
+  An initializer call (`Animal(legs: 4)` — an ordinary call node, no `new`)
+  falls back to class/struct/enum targets once functions find nothing,
+  Python's constructor-fallback shape. The `:` inheritance clause yields `extends`
+  edges (bare names — Swift can't say syntactically which specifier is the
+  superclass), `import` declarations yield module-path import edges, and
+  visibility maps to `exported` as only `private`/`fileprivate` hidden —
+  Swift's default `internal` is module-wide, which for a one-module repo is
+  the API surface. A Swift bindings collector types receivers from the
+  confident, syntax-local clues: typed parameters (`func feed(animal:
+  Animal)`, argument labels handled), typed properties, initializer-call
+  assignments (`let vet = Vet()` — UpperCamelCase callee, the same convention
+  trust as Go's `NewX`), and fields bound both bare and `self.`-prefixed —
+  so `vet.check()`, `keeper.wave()`, `self.repo.save()`, and type-member
+  calls (`Animal.census()`) all resolve through the owner-qualified method
+  index. A receiver with no local clue (a chained call's result) stays
+  unresolved rather than guessed.
+### Fixed
+
+- **`allowScripts` now names R by the identity npm actually matches on.** The
+  entry was `tree-sitter-r@1.3.0`, the alias in `dependencies`, but npm derives
+  the identity from the resolved package in the lockfile —
+  `@davisvaughan/tree-sitter-r@1.3.0`. The old key matched nothing, so the
+  grammar's install script counted as unreviewed and was blocked;
+  `npm ci --strict-allow-scripts` failed on it. Harmless in practice only
+  because the package ships prebuilds for every supported platform. Note the
+  `overrides` key must stay the alias — the two fields key differently.
+- **`graft check` no longer reports every container-tier node as `removed`.**
+  `checkGraph` branched on the depth and breadth tiers but never on the container
+  tier the build uses for `.vue`, so `genericLangOf` returned null, a `generic!`
+  assertion threw, and the catch swallowed it as a parse failure — every `.vue`
+  node fell through to `removed` on a clean build, and the `graft build` the
+  check told you to run had already written them. The check now mirrors the
+  build's three-way branch, warms the container grammars alongside the generic
+  ones, and treats "no tier claims this file" as an explicit case rather than a
+  non-null assertion, so the next tier added fails in the type checker instead of
+  silently reporting drift. ([#236](https://github.com/trailhq/Graft/issues/236))
+
+### Added
+
+- **`graft init` converges instead of accumulating, and `graft uninstall` removes
+  graft entirely.** `init` wrote the files the selected agents needed and never
+  looked at the rest, so a repo wired by an older version — or by the same version
+  with different `--agents` — kept that run's files forever, and the session-start
+  refresh then kept them *up to date*. `init` now retracts every agent it isn't
+  about to write, and `graft uninstall` retracts the lot.
+
+  Only graft's own contribution is touched: inside a shared file just the
+  marker-fenced block, inside a config just the `graft` key — foreign MCP servers,
+  hooks, statuslines and ignore entries survive byte for byte. A file left holding
+  nothing is deleted rather than truncated to an empty shell, and the directories
+  that empties are pruned. An unparseable config is reported and left alone.
+  `uninstall` is dry-run until `-y`.
+
+  The target list is derived from the same registries `init` writes through, so a
+  host added later is retractable for free; only a host *removed* from the registry
+  needs a hand-written entry, and `LEGACY_TARGETS` says so. Exclusion is by path as
+  well as by host id: three hosts write `AGENTS.md`, and keeping any one of them has
+  to spare that block.
+
+### Fixed
+
+- **A stale `[mcp_servers.graft]` is now replaced instead of skipped.** The TOML
+  writer returned early the moment the header existed, which froze the launch
+  command at whatever the first `init` wrote — a repo wired when graft wasn't on
+  `PATH` kept the slow `npx` form forever, and no upgrade could correct it. Codex
+  and Grok both went through that path. Foreign tables are untouched either way.
+
+- **`.claude/settings.json` no longer accumulates graft's own entries.** The
+  allowlist and `footerLinksRegexes` were append-only, so a renamed invocation form
+  stayed in the user's settings beside its replacement with nothing able to remove
+  it. Both now drop graft's prior entries before adding the current set, the same
+  way the hooks merge already did. Scoped to the forms graft is actually invoked as,
+  so a hand-written `Bash(graft-mytool:*)` survives.
+
+- **`graft blast` suggests who to tag.** The comment already named the areas a
+  diff changes and the areas it can affect; it now names the people behind them,
+  read from git history with no API call and no config file. One `git log` per
+  area over that area's own files, weighted towards recent work (120-day
+  half-life), with areas the diff only *reaches* counted at 0.6 against a changed
+  area's 1.0 — the person whose code your change can break is exactly the
+  reviewer the diff alone would never surface. The markdown report gains a `Tag:`
+  line under the tests line and a collapsed `Who knows this code` table; the
+  exported page gains initials badges on each bubble, a *Who knows this* block in
+  the detail panel, and a `people` legend toggle.
+
+  A handle is never guessed: only a GitHub noreply commit address resolves to
+  `@mention`, and anyone else is printed as a plain unlinked name, because a
+  guessed mention pings a stranger. A repo can fix that for good with a
+  `.mailmap` entry, which git applies to the names `blast` reads. Merge commits,
+  bots, everyone who authored a commit in the diff range, and — for a local run
+  with no `--base` — your own git identity are all excluded. `--no-owners` turns
+  the layer off; `--pr-author <who...>` takes logins, names or emails; the
+  bundled action gains a `suggest-reviewers` input, defaulting true.
+
+## 0.13.0
+
+### Added
+
+- **Grok (xAI) is a first-class `graft init` host.** Detects `~/.grok` or a
+  repo `.grok/` and writes `.grok/skills/graft/SKILL.md` plus a repo-level
+  `[mcp_servers.graft]` block in `.grok/config.toml` (Grok's MCP config).
+  Select it with `graft init --agents grok`.
+- **R language support.** `tree-sitter-r` (`npm:@davisvaughan/tree-sitter-r`;
+  the unscoped npm name is a squatted placeholder) parses `.R`/`.r` files.
+  Plain functions: every `name <- function(...)` / `name = function(...)` /
+  `function(...) -> name` assignment becomes a `function` node (the grammar's
+  `function_definition` has no name field, so the name comes from the
+  enclosing assignment; right-assign has its own AST shape). Classes — R's
+  class systems are library convention, not syntax, so they are recognised by
+  call idiom: **R6** (`R6::R6Class(...)` — the class node, `public =`/
+  `private =`/`active =` entries as methods, `inherit =` heritage, and `self$`/
+  `private$`/`super$` calls resolving to the class or its parent), **S4**
+  (`setClass()`/`setMethod()` with `contains =` heritage), **S3**
+  (`generic.Class <- function()` only when `generic` is registered locally via
+  `UseMethod()` or is one of a small curated base-R set — false negatives over
+  false positives), and plain-list mixin bundles (`Foo <- list(public =
+  list(...), ...)`) that are spliced across classes instead of inherited. An
+  untyped `obj$method()` resolves by bare name to a uniquely-named method
+  (ambiguous drops). Visibility: a roxygen `#' @export` tag wins; a roxygen
+  block without it means "not exported"; no roxygen falls back to the
+  leading-dot convention; R6 `private =` members are unexported.
+  `library()`/`require()`/`source()` calls are the import edges. Known gaps:
+  S3 generics registered in another file aren't seen (per-file pass); S4
+  `signature()` multiple dispatch isn't handled; R6 active bindings are
+  ordinary methods.
+- **Resumable `graft build --deep`.** The concept phase now checkpoints
+  summaries to disk atomically as it runs, so a build interrupted by a session
+  or rate limit resumes where it stopped on the next run (content-hash cached,
+  no repeated LLM cost) instead of restarting from zero.
+- **Kotlin gets full-fidelity (depth-tier) extraction**, and **Lua** and **Nix**
+  join the breadth tier. **Dart** now indexes top-level functions and consts.
+- **Hermes Agent** is a first-class `graft init` host.
+- **Every reported edge quotes the source line** where the call or reference
+  happens, in the PR comment, the CLI, and one shared helper.
+
+### Fixed
+
+- **PHP.** Enums with array consts stay in the graph; trait-inherited method
+  calls (`$this->traitMethod()`) resolve through the `implements` edge;
+  attribute usage is wired as `references` edges; anonymous classes are minted
+  as nodes with their `implements` edges.
+- **Java.** Generic type arguments (`Base<Item>`) no longer become bogus
+  `extends`/`implements` edges or poison call resolution; anonymous-class
+  methods no longer take the enclosing type's owner, so calls resolve to the
+  real method.
+- **Python.** Constructor calls (`Foo()`) resolve to the class instead of being
+  dropped.
+- **Deep tier.** An empty meaning reply is no longer cached as a permanent
+  `pending` state, and per-file failures surface instead of the build exiting
+  successfully.
+- **`graft ask`.** Distinct files are ranked ahead of one file's sibling spans
+  under bounded output, and multi-scope workspaces score comparably across
+  scopes.
+- **Claude hooks, sync-run, and statusline respect `GRAFT_DIR`**, and the hook
+  timeout is also read from user-level settings.
+- **Ingest** skips the `_build/` directory (the underscore spelling of a build
+  tree).
+
 ## 0.12.0
 
+### Added
+
+- **Kotlin moves to full-fidelity extraction.** `.kt` and `.kts` files are now
+  parsed by a hand-written tree-sitter extractor — the same tier as TypeScript,
+  Python, Go, and Java — instead of the generic breadth grammar, so Kotlin
+  symbols, call edges, heritage, and imports resolve with scope awareness. The
+  kind mapping now matches tree-sitter-kotlin's real node types (the earlier
+  attempt reused Java's, which do not exist in the Kotlin grammar and emitted no
+  symbols at all): `class_declaration` is re-read off its own keyword into
+  class / interface / enum / annotation, `object` and `companion object` become
+  classes, secondary constructors and member functions become methods,
+  `typealias` becomes a type, and top-level `val`/`var` become variables.
+- **Kotlin edges.** Calls resolve through `call_expression` (member calls via
+  `navigation_expression`, with `this`/`super` receivers), the `:` heritage
+  clause yields `extends` edges, `import_header` yields import edges, and
+  `internal`/`private`/`protected` visibility maps to the exported flag.
 ### Changed
 
 - **graft now collects anonymous usage stats, and the README no longer says it
@@ -28,6 +238,11 @@
 
 ### Fixed
 
+- **Node 24 no longer aborts breadth-tier builds with `Fatal process out of
+  memory: Zone`.** The broader `tree-sitter-wasm` grammar bundle avoids the V8
+  Turboshaft failure triggered by the previous bundle. CI now exercises every
+  breadth grammar under Node 24 to keep that runtime compatibility pinned
+  ([#122]).
 - **`npm install -g @nanonets/graft@latest` could silently do nothing.** The
   generated shims (`.claude/helpers/graft-*.cjs`, and Codex's
   `~/.codex/hooks/graft/`) locate the installed package at runtime from four

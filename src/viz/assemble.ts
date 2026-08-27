@@ -24,6 +24,24 @@ export interface VizNode {
   /** Code to show under the node, in place of `sources`. Set by
    * `blast --export-viz`, where every node stands for real changed lines. */
   evidence?: Evidence[];
+  /** Who has worked on this area, best first. Set by `blast --export-viz`. */
+  owners?: NodeOwner[];
+}
+
+/**
+ * One contributor on a node, as the exported page carries them.
+ *
+ * `last` is an ISO day rather than "9d ago" so the page stays truthful when it is
+ * opened a fortnight after it was published — the viewer does the arithmetic at
+ * read time. `handle` is absent whenever git carried no GitHub address for them,
+ * and the viewer must then render the name unlinked.
+ */
+export interface NodeOwner {
+  name: string;
+  handle?: string;
+  commits: number;
+  /** `YYYY-MM-DD` of their most recent commit in this area. */
+  last: string;
 }
 
 export interface VizEdge {

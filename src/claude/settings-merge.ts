@@ -43,6 +43,23 @@ function isGraftHookEntry(entry: Json): boolean {
   return JSON.stringify(entry ?? '').includes('graft-hooks.cjs');
 }
 
+/**
+ * Is this allowlist entry one graft wrote?
+ *
+ * Scoped to the forms graft is actually invoked as — NOT any rule mentioning
+ * "graft". A user who allowlists their own `Bash(graft-mytool:*)` keeps it; only
+ * graft's own set is replaced, which is what lets a renamed entry disappear on
+ * upgrade instead of accumulating beside its replacement.
+ */
+export function isGraftAllowEntry(entry: unknown): boolean {
+  return /^Bash\((?:graft|npx graft|graft-dev|node dist\/cli\.js)(?::|\))/.test(String(entry));
+}
+
+/** Is this footer regex graft's? It points at the card tree, which is graft's alone. */
+export function isGraftFooterRegex(re: unknown): boolean {
+  return String(re).includes('graft/');
+}
+
 export function mergeGraftSettings(existing: Json): { merged: Json; warnings: string[] } {
   const merged: Json = { ...(existing ?? {}) };
   const warnings: string[] = [];
@@ -62,18 +79,19 @@ export function mergeGraftSettings(existing: Json): { merged: Json; warnings: st
     merged.hooks[event] = [...foreign, ...blocks];
   }
 
-  const footer = Array.isArray(merged.footerLinksRegexes) ? [...merged.footerLinksRegexes] : [];
-  if (!footer.includes(FOOTER)) footer.push(FOOTER);
-  merged.footerLinksRegexes = footer;
+  // Drop graft's own prior regex before re-adding, so a change to FOOTER replaces
+  // the old pattern instead of stacking beside it. The user's regexes are kept.
+  const priorFooter = Array.isArray(merged.footerLinksRegexes) ? merged.footerLinksRegexes : [];
+  merged.footerLinksRegexes = [...priorFooter.filter((r: unknown) => !isGraftFooterRegex(r)), FOOTER];
 
   // headless/subagent runs hard-deny Bash by default; without an allowlist entry
   // `graft ask`'s own Bash calls (and the skill it installs) can't run out-of-box.
+  // Same shape as the hooks merge above: drop graft's prior entries, then add the
+  // current set. Append-only left a renamed invocation form in the user's settings
+  // forever, with nothing able to remove it.
   merged.permissions = { ...(merged.permissions ?? {}) };
-  const allow = Array.isArray(merged.permissions.allow) ? [...merged.permissions.allow] : [];
-  for (const entry of ALLOW_ENTRIES) {
-    if (!allow.includes(entry)) allow.push(entry);
-  }
-  merged.permissions.allow = allow;
+  const priorAllow = Array.isArray(merged.permissions.allow) ? merged.permissions.allow : [];
+  merged.permissions.allow = [...priorAllow.filter((e: unknown) => !isGraftAllowEntry(e)), ...ALLOW_ENTRIES];
 
   return { merged, warnings };
 }

@@ -1,7 +1,7 @@
 name: Blast viewer
 
-# Publishes the interactive viewer for a pull request to GitHub Pages, and links it
-# from the blast-radius comment.
+# Publishes the interactive viewer for a pull request to GitHub Pages, and posts the
+# blast-radius comment that links to it.
 #
 # `pull_request_target`, not `pull_request`, because publishing needs write access to
 # the gh-pages branch and a `pull_request` job on a fork PR has none. That choice
@@ -12,9 +12,18 @@ name: Blast viewer
 # package.json, no postinstall). The graph is built from the PR's source text by a
 # tree-sitter parser, which executes none of it.
 #
-# A dispatch by PR number is the second entry point. It exists because a fork PR's
-# comment job cannot post the link itself (a `pull_request` job on a fork gets a
-# read-only token), so publishing that page has to be startable by hand.
+# It posts the comment as well as the page, because a `pull_request` job on a fork
+# gets a read-only token no matter what its `permissions:` block says: `blast.yml`
+# can compute the radius there and cannot post it, and most of this repo's open pull
+# requests come from forks. So `blast.yml` runs with `comment: false` and this is the
+# single writer — two jobs editing one marked comment would race and overwrite each
+# other. The cost of that choice is honest: graft's own PRs are now described by
+# main's graft rather than by the code in the PR. `blast.yml` still runs the PR's
+# build and writes the body to its step summary, so a renderer a PR breaks still
+# fails visibly; it just no longer speaks on the PR.
+#
+# A dispatch by PR number is the second entry point. It backfills a pull request that
+# was opened before any of this existed, without waiting for a new push.
 on:
   pull_request_target:
     branches: [main]
@@ -22,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       pr:
-        description: "Pull request number to publish the page for."
+        description: "Pull request number to publish the page and comment for."
         required: true
         type: string
 
@@ -57,8 +66,10 @@ jobs:
           case "$NUMBER" in
             "" | *[!0-9]*) echo "not a pull request number: $NUMBER" >&2; exit 1 ;;
           esac
+          # `author` is the login only — an email is not in this payload, and the
+          # commits in the range carry the identity `blast` really matches on.
           gh api "repos/$REPO/pulls/$NUMBER" --jq \
-            '"number=\(.number)", "base_ref=\(.base.ref)", "base_sha=\(.base.sha)"' >> "$GITHUB_OUTPUT"
+            '"number=\(.number)", "base_ref=\(.base.ref)", "base_sha=\(.base.sha)", "author=\(.user.login)"' >> "$GITHUB_OUTPUT"
 
       # 1. The tooling, from the base branch — never from the PR.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -75,12 +86,19 @@ jobs:
         run: npm ci && npm run build
 
       # 2. The PR's code, as data only.
+      #
+      # actions/checkout refuses a fork's PR ref under `pull_request_target` unless
+      # the workflow opts in — the review that opt-in asks for is the header of this
+      # file: the checkout is credential-less, lands in its own directory, and
+      # nothing below executes anything from it (the CLI that reads it was built
+      # from the base commit above). Without the flag every fork PR fails here.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: refs/pull/${{ steps.pr.outputs.number }}/merge
           path: pr
           fetch-depth: 0
           persist-credentials: false
+          allow-unsafe-pr-checkout: true
 
       # Same cache the comment job reads (see blast-cache.yml). Both jobs name the
       # same clusters, so sharing the cache is what keeps the page's bubbles worded
@@ -98,6 +116,7 @@ jobs:
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          PR_AUTHOR: ${{ steps.pr.outputs.author }}
           # `--name` reads a key, so the page gets the same concept names the comment
           # shows instead of hub-symbol fallbacks. The PR's code is never executed
           # here (see the header) — naming only sends its source text to the model,
@@ -116,8 +135,19 @@ jobs:
           # every bubble falls back to its hub symbol, so the page reads `cli.ts` and
           # `exportViz` where the comment reads "CLI Entry Point" and "Visualization
           # Export". The point of the page is that a reviewer recognises the feature.
+          #
+          # `--format markdown`, not text: one run produces both the page and the
+          # comment body, so the two can never describe different radii or word the
+          # same area differently.
+          #
+          # `--pr-author` is belt to `blast`'s own braces: it already drops everyone
+          # who authored a commit in the range, which covers the author under the
+          # name and email git actually records. The login is passed too for the one
+          # case that misses — a squash merge attributed to a different identity.
           node ../base/dist/cli.js blast . --base "origin/$BASE_REF" \
-            --name --title "PR #$PR_NUMBER" --export-viz ../site --format text > /dev/null
+            --name --title "PR #$PR_NUMBER" --pr-author "$PR_AUTHOR" \
+            --export-viz ../site --format markdown > ../blast.md
+          cat ../blast.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish to gh-pages
         env:
@@ -126,30 +156,97 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch gh-pages "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages \
-            || git clone --depth 1 "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages
-          cd pages
-          # `checkout --orphan` keeps the index, so on a repo with no gh-pages yet
-          # (where the fallback clone above landed on the default branch) the first
-          # commit would carry every file of main and Pages would serve the repo.
-          if ! git checkout gh-pages 2>/dev/null; then
-            git checkout --orphan gh-pages
-            git rm -rf --cached . >/dev/null
-            # The exported page lives outside this clone, so clean cannot reach it.
-            git clean -fdq
+          # Every open PR publishes into the same branch, so two runs that overlap
+          # race on the push and the loser is rejected non-fast-forward. They never
+          # conflict on content — each writes only its own pr/<n>/ — so the answer is
+          # to retry against whatever landed. A fresh clone per attempt rather than a
+          # rebase: this clone is `--depth 1`, and rebasing a shallow history is
+          # exactly the kind of thing that half-works.
+          #
+          # It matters beyond politeness: the comment step below runs only if this
+          # one succeeds, so a lost race meant a pull request silently got no comment.
+          #
+          # The loop is flat, not a retried function, because bash suspends `set -e`
+          # inside anything it evaluates as a condition — a `push || retry` helper
+          # would keep going after a failed clone and then "succeed".
+          published=""
+          for i in 1 2 3 4 5; do
+            rm -rf pages
+            git clone --depth 1 --branch gh-pages "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages 2>/dev/null \
+              || git clone --depth 1 "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages
+            cd pages
+            # `checkout --orphan` keeps the index, so on a repo with no gh-pages yet
+            # (where the fallback clone above landed on the default branch) the first
+            # commit would carry every file of main and Pages would serve the repo.
+            if ! git checkout gh-pages 2>/dev/null; then
+              git checkout --orphan gh-pages
+              git rm -rf --cached . >/dev/null
+              # The exported page lives outside this clone, so clean cannot reach it.
+              git clean -fdq
+            fi
+            mkdir -p "pr/$PR_NUMBER"
+            cp ../site/index.html "pr/$PR_NUMBER/index.html"
+            # Pages runs Jekyll over a branch source unless this file exists, and
+            # Jekyll would try to render the export as a template rather than serve
+            # it. Written every time, so a rebuilt or force-pushed branch cannot lose
+            # it and start silently mangling every viewer.
+            touch .nojekyll
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .nojekyll "pr/$PR_NUMBER"
+            # An unchanged page is done, not a retry: there is nothing to push.
+            if ! git commit -m "viz: PR #$PR_NUMBER"; then
+              echo "nothing changed"
+              published=1; cd ..; break
+            fi
+            if git push origin gh-pages; then
+              published=1; cd ..; break
+            fi
+            cd ..
+            echo "gh-pages push lost a race, retry $i" >&2
+            sleep $((i * 5))
+          done
+          if [ -z "$published" ]; then
+            echo "could not publish pr/$PR_NUMBER after 5 attempts" >&2
+            exit 1
           fi
-          mkdir -p "pr/$PR_NUMBER"
-          cp ../site/index.html "pr/$PR_NUMBER/index.html"
-          # Pages runs Jekyll over a branch source unless this file exists, and
-          # Jekyll would try to render the export as a template rather than serve
-          # it. Written every time, so a rebuilt or force-pushed branch cannot lose
-          # it and start silently mangling every viewer.
-          touch .nojekyll
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .nojekyll "pr/$PR_NUMBER"
-          git commit -m "viz: PR #$PR_NUMBER" || { echo "nothing changed"; exit 0; }
-          git push origin gh-pages
+
+      # 3. The comment — posted here, and only here.
+      #
+      # `blast.yml` runs the PR's own code, so it can never hold a write token; on a
+      # fork its comment step would 403, and most of this repo's open pull requests
+      # are forks. Under `pull_request_target` the token belongs to the BASE repo,
+      # so a fork PR is ordinary work. It runs after the page is pushed, so the link
+      # it carries is live by the time anyone can click it.
+      - name: Post or update the blast-radius comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+          # Unset, the comment simply has no link rather than a link that 404s.
+          VIEWER_BASE: ${{ vars.BLAST_VIEWER_BASE }}
+        run: |
+          set -euo pipefail
+          # One comment per PR, edited in place: a new one per push turns a busy PR
+          # into a wall of stale diagrams. The marker is how it is found again and
+          # stays invisible in the rendered body — the same marker the action used,
+          # so a PR that already has a comment from that path is edited, not doubled.
+          marker='<!-- graft-blast-radius -->'
+          printf '%s\n' "$marker" > body.md
+          cat blast.md >> body.md
+          if [ -n "$VIEWER_BASE" ]; then
+            printf '\n[**Open the interactive graph →**](%s/pr/%s/) — click an area to see its dependent symbols at file:line.\n' \
+              "$VIEWER_BASE" "$PR_NUMBER" >> body.md
+          fi
+          # `--paginate` runs the filter once per page, so a match can print more
+          # than one line; the first is the comment we own.
+          existing=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq "map(select(.body | startswith(\"$marker\"))) | .[0].id // empty" | head -1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@body.md >/dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@body.md >/dev/null
+          fi
 
   # A merged or closed PR's page is dead weight — and on a busy repo, thousands of
   # 1 MB files. Removed with the PR, not on a timer.
@@ -162,14 +259,46 @@ jobs:
       - name: Remove this PR's page
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          # Read from the event, NOT from `steps.pr` — that step belongs to the
+          # publish job and `steps.*` does not cross jobs. It was empty here, which
+          # turned `git rm -r "pr/$PR_NUMBER"` into `git rm -r "pr/"`: one closed
+          # pull request deleted the page of every open one, and `[ -d "pr/" ]`
+          # waved it through. This job only ever runs on a `closed` event, so the
+          # event always carries the number.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch gh-pages "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages || exit 0
-          cd pages
-          [ -d "pr/$PR_NUMBER" ] || exit 0
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm -r --quiet "pr/$PR_NUMBER"
-          git commit -m "viz: drop PR #$PR_NUMBER" && git push origin gh-pages
+          # Digits, and never the empty string. A path this deletes recursively is
+          # not somewhere to find out at runtime that a variable was unset.
+          case "$PR_NUMBER" in
+            "" | *[!0-9]*)
+              echo "no pull request number in the event: refusing to touch pr/" >&2
+              exit 1
+              ;;
+          esac
+          deleted=""
+          for i in 1 2 3; do
+            rm -rf pages
+            git clone --depth 1 --branch gh-pages "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" pages || exit 0
+            cd pages
+            # Already gone, or never published: nothing owed.
+            if [ ! -d "pr/$PR_NUMBER" ]; then
+              deleted=1; cd ..; break
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git rm -r --quiet "pr/$PR_NUMBER"
+            git commit -m "viz: drop PR #$PR_NUMBER"
+            # Same race as publishing, same answer — see the publish job.
+            if git push origin gh-pages; then
+              deleted=1; cd ..; break
+            fi
+            cd ..
+            echo "gh-pages push lost a race, retry $i" >&2
+            sleep $((i * 5))
+          done
+          if [ -z "$deleted" ]; then
+            echo "could not drop pr/$PR_NUMBER after 3 attempts" >&2
+            exit 1
+          fi

@@ -1,7 +1,8 @@
 name: graft blast radius
 description: >-
   Index the repository with graft, work out what the pull request's diff can
-  affect, and post it on the PR as one sticky comment with a Mermaid diagram.
+  affect and who has worked on it, and post that on the PR as one sticky comment
+  with a Mermaid diagram.
   Requires a checkout with `fetch-depth: 0` — the diff is taken against the merge
   base, which a shallow clone does not contain.
 
@@ -24,6 +25,13 @@ inputs:
       still a name a reviewer can grep. This replaces `build --deep` on the PR path:
       summarising every file in the repo to label six clusters cost ~356 calls and
       thirteen minutes per run.
+    required: false
+    default: "true"
+  suggest-reviewers:
+    description: >-
+      Name the people behind each affected area, read from git history, so the author
+      can tag them. Needs the same `fetch-depth: 0` checkout the diff already needs.
+      Set false to leave people out of the comment entirely.
     required: false
     default: "true"
   comment:
@@ -120,20 +128,44 @@ runs:
         BASE: ${{ inputs.base != '' && inputs.base || format('origin/{0}', github.event.pull_request.base.ref) }}
         DEPTH: ${{ inputs.depth }}
         NAME_AREAS: ${{ inputs.name-areas }}
+        SUGGEST_REVIEWERS: ${{ inputs.suggest-reviewers }}
+        # Both, because they are two different keys on the same person: CI knows the
+        # login, while the commits in the diff carry the email. Excluding on one alone
+        # tells roughly half of all authors to tag themselves.
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        PR_AUTHOR_EMAIL: ${{ github.event.pull_request.user.email }}
         VIEWER_URL: ${{ inputs.viewer-url }}
         EXPORT_VIZ: ${{ inputs.export-viewer }}
         GRAFT: ${{ inputs.graft-cmd }}
       run: |
         set -euo pipefail
-        name=""
-        if [ "$NAME_AREAS" = "true" ]; then name="--name"; fi
-        # One command for both outputs: the page and the comment then describe the
-        # same radius, named once. A second `viz --export` step could drift from it.
-        viz=""
-        if [ -n "$EXPORT_VIZ" ]; then viz="--export-viz $EXPORT_VIZ"; fi
+        # An ARRAY, not a string: a value here can contain a space (a git display
+        # name does), and word-splitting an interpolated string is the same class of
+        # bug as interpolating a workflow expression into shell text. Nothing is
+        # ever `eval`ed. Note that a literal GitHub expression cannot appear even in
+        # a comment in this block — the template engine evaluates `run:` before bash
+        # ever sees it, and an empty one fails the whole action to load.
+        args=(blast . --base "$BASE" --depth "$DEPTH")
         # --name never fails the step: with no key, a spent quota or a refused call
         # it prints one line on stderr and every area keeps its hub-symbol name.
-        $GRAFT blast . --base "$BASE" --depth "$DEPTH" $name $viz --format markdown > blast.md
+        if [ "$NAME_AREAS" = "true" ]; then args+=(--name); fi
+        # One command for both outputs: the page and the comment then describe the
+        # same radius, named once. A second `viz --export` step could drift from it.
+        if [ -n "$EXPORT_VIZ" ]; then args+=(--export-viz "$EXPORT_VIZ"); fi
+        if [ "$SUGGEST_REVIEWERS" = "true" ]; then
+          # Both keys for the same person, and neither is reliable alone: CI has the
+          # login, the commits have the email, and the webhook usually leaves the
+          # email empty. `graft blast` also excludes every author in the diff range
+          # itself, which is what actually covers the empty-email case.
+          authors=()
+          if [ -n "$PR_AUTHOR" ]; then authors+=("$PR_AUTHOR"); fi
+          if [ -n "$PR_AUTHOR_EMAIL" ]; then authors+=("$PR_AUTHOR_EMAIL"); fi
+          if [ ${#authors[@]} -gt 0 ]; then args+=(--pr-author "${authors[@]}"); fi
+        else
+          args+=(--no-owners)
+        fi
+        args+=(--format markdown)
+        $GRAFT "${args[@]}" > blast.md
         if [ -n "$VIEWER_URL" ]; then
           printf '\n[**Open the interactive graph →**](%s) — click an area to see its dependent symbols at file:line.\n' "$VIEWER_URL" >> blast.md
         fi
