@@ -26,7 +26,7 @@ export function renderStatusline(
   session: SessionState | null,
   ctx: { ctxPct: number | null },
 ): string[] {
-  if (!stats || stats.nodeCount === 0) {
+  if (!stats) {
     return [C.muted('◤ graft · not built · run ') + C.text('graft build')];
   }
   const top = [C.muted('◤ ') + C.indigo('graft'), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];

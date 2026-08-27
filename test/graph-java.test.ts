@@ -1353,3 +1353,176 @@ test("Java anonymous class: methods do not take the enclosing type's owner (#161
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Issue #89: Java annotations are metadata, not call sites — wire them as
+// `references` edges from the annotated symbol to the annotation type (the
+// same shape as PHP 8 attributes in #155). Field annotations are out of
+// scope: fields are not nodes.
+const ANNO_MYANNO = `package com.acme;
+
+public @interface MyAnno {
+  String value() default "";
+}
+`;
+
+const ANNO_FOO = `package com.acme;
+
+@Entity
+@MyAnno
+public class Foo {
+  @Transient
+  private String field;
+
+  @MyAnno
+  public void tagged() {}
+
+  @MyAnno(value = "x")
+  public void parameterized() {}
+
+  @Override
+  public String toString() {
+    return "foo";
+  }
+}
+`;
+
+const ANNO_ENTITY_CLASS = `package com.other;
+
+public class Entity {}
+`;
+
+function annotationFixture(): string {
+  const dir = mkdtempSync(join(tmpdir(), "graft-java-annoref-"));
+  mkdirSync(join(dir, PKG), { recursive: true });
+  mkdirSync(join(dir, "src/main/java/com/other"), { recursive: true });
+  writeFileSync(join(dir, PKG, "MyAnno.java"), ANNO_MYANNO);
+  writeFileSync(join(dir, PKG, "Foo.java"), ANNO_FOO);
+  writeFileSync(join(dir, "src/main/java/com/other/Entity.java"), ANNO_ENTITY_CLASS);
+  return dir;
+}
+
+test("Java extraction: in-repo annotation usage resolves to references edges (#89)", async () => {
+  const dir = annotationFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const foo = `${PKG}/Foo.java#Foo`;
+    const myAnno = `${PKG}/MyAnno.java#MyAnno`;
+
+    assert.equal(nodeById(graph, myAnno)?.kind, "interface", "@interface maps to interface kind");
+
+    assert.ok(
+      graph.edges.some(
+        (e) => e.relation === "references" && e.source === foo && e.target === myAnno,
+      ),
+      "Foo class should reference the in-repo MyAnno annotation type",
+    );
+
+    assert.ok(
+      graph.edges.some(
+        (e) =>
+          e.relation === "references" &&
+          e.source === `${PKG}/Foo.java#Foo.tagged` &&
+          e.target === myAnno,
+      ),
+      "tagged method should reference the in-repo MyAnno annotation type",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java extraction: annotation arguments do not emit extra edges (#89)", async () => {
+  const dir = annotationFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const myAnno = `${PKG}/MyAnno.java#MyAnno`;
+    const tagged = graph.edges.filter(
+      (e) => e.relation === "references" && e.source === `${PKG}/Foo.java#Foo.tagged`,
+    );
+    const parameterized = graph.edges.filter(
+      (e) => e.relation === "references" && e.source === `${PKG}/Foo.java#Foo.parameterized`,
+    );
+
+    assert.ok(
+      tagged.some((e) => e.target === myAnno),
+      "marker @MyAnno on tagged should resolve",
+    );
+    assert.deepEqual(
+      tagged.map((e) => e.target).sort(),
+      parameterized.map((e) => e.target).sort(),
+      "@MyAnno(value = \"x\") must emit the same references as marker @MyAnno",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java extraction: external annotation keeps its bare name (#89)", async () => {
+  // Heritage keeps an unresolved supertype as the edge target rather than
+  // minting a node or collapsing onto a same-named in-repo type (#103).
+  // @Entity / @Override are the annotation equivalent: no in-repo @interface,
+  // and a class named Entity elsewhere must not steal the edge.
+  const dir = annotationFixture();
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const foo = `${PKG}/Foo.java#Foo`;
+    const refs = graph.edges.filter((e) => e.relation === "references");
+
+    assert.ok(
+      refs.some((e) => e.source === foo && e.target === "Entity"),
+      "unresolved @Entity should keep the bare name",
+    );
+    assert.ok(
+      !refs.some((e) => e.source === foo && e.target.endsWith("#Entity")),
+      "@Entity must not false-match the in-repo class Entity",
+    );
+    assert.ok(
+      refs.some((e) => e.source === `${PKG}/Foo.java#Foo.toString` && e.target === "Override"),
+      "unresolved @Override should keep the bare name",
+    );
+    assert.ok(
+      !refs.some((e) => e.source === foo && (e.target === "Transient" || e.target.endsWith("#Transient"))),
+      "field annotations are not class-level references",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Java extraction: external @Service does not collapse onto a plain interface Service (#89)", async () => {
+  // #103 in interface form: `@interface` and `interface` both mint kind
+  // `interface`, so `@Service` (external Spring annotation) must not resolve
+  // onto an in-repo `interface Service`. The edge stays a bare name.
+  const dir = mkdtempSync(join(tmpdir(), "graft-java-service-anno-"));
+  mkdirSync(join(dir, PKG), { recursive: true });
+  writeFileSync(
+    join(dir, PKG, "Service.java"),
+    "package com.acme;\n\npublic interface Service {}\n",
+  );
+  writeFileSync(
+    join(dir, PKG, "Foo.java"),
+    "package com.acme;\n\n@Service\npublic class Foo {}\n",
+  );
+  try {
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+    const foo = `${PKG}/Foo.java#Foo`;
+    const service = `${PKG}/Service.java#Service`;
+    const refs = graph.edges.filter((e) => e.relation === "references" && e.source === foo);
+
+    assert.equal(nodeById(graph, service)?.kind, "interface", "plain Service is an in-repo interface");
+    assert.ok(
+      refs.some((e) => e.target === "Service"),
+      "unresolved @Service should keep the bare name",
+    );
+    assert.ok(
+      !refs.some((e) => e.target === service || e.target.endsWith("#Service")),
+      "@Service must not false-match the in-repo interface Service",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

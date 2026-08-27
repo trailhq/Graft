@@ -161,6 +161,44 @@ test("rankScopesAndFuse: post-normalization rank factors cannot be erased by a t
   );
 });
 
+test("rankScopesAndFuse: optional collapse sees components and supplies the docs combined across scopes", () => {
+  let hookCalled = false;
+  const ops: ScopeRankOps = {
+    lex: () => new Map([["a1", 10], ["a2", 4]]),
+    walk: () => new Map([["a2", 0.8]]),
+    rankFactor: (_scope, id) => (id === "a2" ? 0.5 : 1),
+    collapseCandidates: (candidates) => {
+      hookCalled = true;
+      const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+      assert.deepEqual(
+        {
+          lexical: byId.get("a1")?.lexical,
+          graph: byId.get("a1")?.graph,
+          rankFactor: byId.get("a1")?.rankFactor,
+          baseline: byId.get("a1")?.score,
+        },
+        { lexical: 1, graph: 0, rankFactor: 1, baseline: 1 },
+      );
+      assert.deepEqual(
+        {
+          lexical: byId.get("a2")?.lexical,
+          graph: byId.get("a2")?.graph,
+          rankFactor: byId.get("a2")?.rankFactor,
+          baseline: byId.get("a2")?.score,
+        },
+        { lexical: 0.4, graph: 0.8, rankFactor: 0.5, baseline: 0.4 },
+      );
+      return [{ id: "file-a", scope: "app", score: 1.1 }];
+    },
+  };
+
+  const result = rankScopesAndFuse(["app"], ops, 0.5, 0.05);
+  assert.equal(hookCalled, true);
+  assert.deepEqual(result.ranked, [
+    { id: "file-a", scope: "app", score: 1.1 },
+  ]);
+});
+
 test("rankScopesAndFuse: a scope whose best hit is a weak incidental match is excluded from ranked and reported in alsoMatched", () => {
   // b's only hit scores 1 against a repo best of 10 — 0.1, well under the 0.25
   // participation ratio. An incidental body-comment collision, same shape as

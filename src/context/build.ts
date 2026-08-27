@@ -216,15 +216,28 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
     opts.onProgress?.({ phase: "synthesize", index: b, total: batches.length, file: `batch ${b + 1}` });
     const key = batchKey(batches[b], hashByPath);
     let nodes = cache.synth[key];
-    if (!nodes) {
+    // An empty array is a miss, not a hit: caching [] made a silent empty
+    // synthesis permanent, the same trap #177 closed for the meaning pass (#129).
+    const cached = Array.isArray(nodes) && nodes.length > 0;
+    if (!cached) {
       nodes = await opts.synthesizer.synthesize(batches[b]);
-      cache.synth[key] = nodes;
+      if (nodes.length > 0) cache.synth[key] = nodes;
+      else delete cache.synth[key];
     }
+    const links = nodes.reduce((n, node) => n + node.links.length, 0);
+    console.error(
+      `  synthesis batch ${b + 1}/${batches.length}: ${nodes.length} nodes, ${links} links${cached ? " (cached)" : ""}`,
+    );
     synthNodes.push(...nodes);
   }
   // Drop cache entries for batches we no longer produce, so it can't grow forever.
+  // Skip empty arrays so a failed batch is retried on the next --deep, not frozen.
   cache.synth = Object.fromEntries(
-    batches.map((batch) => [batchKey(batch, hashByPath), cache.synth[batchKey(batch, hashByPath)] ?? []]),
+    batches.flatMap((batch) => {
+      const k = batchKey(batch, hashByPath);
+      const v = cache.synth[k];
+      return v && v.length > 0 ? [[k, v] as [string, SynthNode[]]] : [];
+    }),
   );
   saveCache(outDir, cache);
 
@@ -297,6 +310,13 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
   }
   result.nodes = nodes.length;
   result.links = nodes.reduce((n, node) => n + node.links.length, 0);
+  // Failure mode 2 (#129): a model can emit real tool_calls whose quality
+  // collapsed (many batches, zero links) with nothing per-batch in the log.
+  if (result.links === 0 && result.batches > 1) {
+    console.error(
+      `⚠ synthesis produced 0 links across ${result.batches} batches — the model may be degrading; see per-batch counts above`,
+    );
+  }
 
   // Manifest: authoritative file→hash map (every processed file) + node roster.
   const fileRefs: SourceRef[] = processed

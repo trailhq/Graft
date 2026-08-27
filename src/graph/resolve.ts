@@ -241,6 +241,22 @@ export function resolveEdges(
         const refKinds: Kind[] = ["class", "interface", "trait", "enum"];
         const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
         if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
+      } else if (e.file.endsWith(".java") && byId.get(e.source)?.origin === "ast") {
+        // Java annotation without a specifier (same-file or globally unique
+        // `@interface`). Annotation types are `interface` kind — a class of the
+        // same name is not a match, so `@Entity` cannot collapse onto an in-repo
+        // `class Entity` (#103). Kind alone still cannot tell `@interface Service`
+        // from `interface Service`, so only accept a candidate whose header
+        // contains the literal `@interface` (`includes`, not `startsWith`: a
+        // meta-annotated type is `@Documented @Retention(...) public @interface
+        // JsonAdapter`). Unresolved targets keep the bare name, matching
+        // heritage, rather than dropping the way PHP attributes do.
+        const refKinds: Kind[] = ["interface"];
+        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
+        const anno = hit ? byId.get(hit.id) : undefined;
+        if (hit && hit.id !== e.source && anno?.signature?.includes("@interface"))
+          add(e.source, hit.id, "references", hit.confidence);
+        else add(e.source, e.name, "references", "inferred");
       } else if (byId.get(e.source)?.origin === "generic") {
         // Breadth tier: a bare-name structural reference (extends / implements /
         // object-creation / module alias) the grammar marked but cannot type. Resolve

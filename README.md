@@ -360,6 +360,7 @@ graft blast --base origin/main       # diff against the merge base with HEAD —
 graft blast --format markdown        # a PR comment: the areas a change can reach, per-symbol detail collapsed under it
 graft blast --base origin/main --name  # name those areas with one cached LLM call, instead of a full --deep build
 graft blast --export-viz site/       # also write the interactive page for this radius (what a PR comment links to)
+graft blast --no-owners              # skip "who to tag" — by default git history names the people behind each area
 graft blast --depth all --format json  # the full transitive closure, machine-readable
 
 graft check [dir]                    # fail (exit 1) if graft/ has drifted from the code (never auto-refreshes — it's the drift report)
@@ -382,6 +383,11 @@ graft init --no-global               # skip writes outside this repo (~/.codex/ 
 graft init --no-build                # wire the files only; don't build the graph
 graft init --all-agents              # wire every known agent, detected or not
 graft init --list-agents             # list known agent ids and exit
+
+graft uninstall [dir]                # remove every file and config entry graft wrote here (the inverse of init)
+graft uninstall -y                   # actually remove (without -y it prints what it would remove and exits)
+graft uninstall --keep-cache         # wiring only; leave graft/ and the .gitignore entry
+graft uninstall --no-global          # leave out-of-repo files alone (~/.codex, ~/.gemini)
 
 graft version                        # print the installed + latest published npm version
 graft upgrade                        # npm install -g the latest published version

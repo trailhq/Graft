@@ -15,6 +15,7 @@
  * consumed once, at write time, to slice the crux text verbatim from source.
  */
 import type { ChatModel } from "./llm/types.js";
+import { recoverToolArgsFromContent, warnToolChoiceIgnored } from "./llm/recover-tool.js";
 import type { Kind } from "../graph/types.js";
 
 /** One definition we want described, located by its line span within the file. */
@@ -128,50 +129,12 @@ function argsFromResponse(res: { text: string; toolCalls: { name: string; args: 
   if (call?.args && typeof call.args === "object" && !Array.isArray(call.args)) {
     return call.args as { symbols?: unknown };
   }
-  return recoverArgsFromContent(res.text);
-}
-
-function recoverArgsFromContent(text: string): { symbols?: unknown } | undefined {
-  const raw = text?.trim();
-  if (!raw) return undefined;
-  const stripped = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-
-  const asSymbols = (value: unknown): { symbols?: unknown } | undefined => {
-    if (!value || typeof value !== "object") return undefined;
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        if (!item || typeof item !== "object") continue;
-        const rec = item as Record<string, unknown>;
-        const name = typeof rec.name === "string" ? rec.name : "";
-        // Accept the crux tool, or a generic emit_json wrapper some gateways use.
-        if (name && name !== RECORD_TOOL && name !== "emit_json") continue;
-        const params = rec.parameters ?? rec.arguments ?? rec.args;
-        const hit = asSymbols(params);
-        if (hit) return hit;
-      }
-      return undefined;
-    }
-    const obj = value as Record<string, unknown>;
-    if (Array.isArray(obj.symbols)) return obj as { symbols?: unknown };
-    return undefined;
-  };
-
-  try {
-    const hit = asSymbols(JSON.parse(stripped));
-    if (hit) return hit;
-  } catch {
-    /* try bracket slice below */
-  }
-  const start = stripped.indexOf("{");
-  const end = stripped.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    try {
-      return asSymbols(JSON.parse(stripped.slice(start, end + 1)));
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
+  const recovered = recoverToolArgsFromContent(res.text, {
+    toolNames: [RECORD_TOOL, "emit_json"],
+    payloadKey: "symbols",
+  });
+  if (!recovered) warnToolChoiceIgnored("crux", res.text?.trim() ? "unparsed" : "empty");
+  return recovered as { symbols?: unknown } | undefined;
 }
 
 /** Crux summarizer backed by any {@link ChatModel} via forced tool calling. */

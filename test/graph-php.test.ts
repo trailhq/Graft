@@ -577,3 +577,38 @@ $b = new class { public function two(): int { return 2; } };
   assert.ok(ids.includes("dup.php#{anonymous}"), `expected an {anonymous} node, got: ${ids.join(", ")}`);
   assert.ok(ids.includes("dup.php#{anonymous}~2"), `expected a deduplicated {anonymous}~2 node, got: ${ids.join(", ")}`);
 });
+
+// #139: a PHP class whose methods return a heredoc/nowdoc must still emit the
+// class and both methods — not collapse to a file node. Depth-tier extractFile
+// uses native tree-sitter-php; the wasm grammar crash is covered in
+// generic-extract.test.ts. This pins the user-visible graph shape.
+const HEREDOC_PHP = `<?php
+namespace App;
+class WithHeredoc {
+    public function sql(): string {
+        return <<<SQL
+            SELECT 1
+            SQL;
+    }
+    public function other(): int { return 2; }
+}
+`;
+
+test("PHP heredoc: extractFile emits class + both methods (#139)", () => {
+  const { nodes } = extractFile("h.php", HEREDOC_PHP, "php");
+  const ids = symbolIds(nodes);
+  assert.equal(nodes.find((n) => n.id === "h.php#WithHeredoc")?.kind, "class", `expected class:WithHeredoc, got: ${ids.join(", ")}`);
+  assert.equal(nodes.find((n) => n.id === "h.php#WithHeredoc.sql")?.kind, "method", `expected method:sql, got: ${ids.join(", ")}`);
+  assert.equal(nodes.find((n) => n.id === "h.php#WithHeredoc.other")?.kind, "method", `expected method:other, got: ${ids.join(", ")}`);
+  assert.ok(nodes.some((n) => n.kind === "file"), "file node is still present");
+  assert.ok(nodes.filter((n) => n.kind !== "file").length >= 3, `must not be file-only, got: ${ids.join(", ")}`);
+});
+
+test("PHP nowdoc: extractFile emits class + both methods (#139)", () => {
+  const src = HEREDOC_PHP.replace("WithHeredoc", "WithNowdoc").replace("<<<SQL", "<<<'SQL'");
+  const { nodes } = extractFile("n.php", src, "php");
+  const ids = symbolIds(nodes);
+  assert.equal(nodes.find((n) => n.id === "n.php#WithNowdoc")?.kind, "class", `got: ${ids.join(", ")}`);
+  assert.equal(nodes.find((n) => n.id === "n.php#WithNowdoc.sql")?.kind, "method", `got: ${ids.join(", ")}`);
+  assert.equal(nodes.find((n) => n.id === "n.php#WithNowdoc.other")?.kind, "method", `got: ${ids.join(", ")}`);
+});
