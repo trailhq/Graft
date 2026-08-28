@@ -48,6 +48,7 @@ import {
 } from "./graphrank.js";
 import { readSourceFile } from "../util/source.js";
 import { counts, tokenize, type AskIndex, type AskIndexDoc } from "./index-file.js";
+import { buildFileBm25Index, rankFileBm25 } from "./file-bm25.js";
 
 export interface AskHit {
   kind: "concept" | "symbol" | "caller" | "callee";
@@ -488,6 +489,8 @@ function lexical(
   fileComplement = false,
   fileTopLock = false,
   includeRankingMetadata = false,
+  fileBm25 = true,
+  root?: string,
 ): AskResult {
   // Binary query terms: a word repeated in a pasted issue body counts once, so a
   // ranty description can't linearly amplify an incidental word.
@@ -540,6 +543,33 @@ function lexical(
     if (graph.nodes.every((n) => map.has(n.id))) docById = map;
   }
   const askIndex = docById ? corpus.askIndex : null;
+
+  // File-first retrieval is grounded in the strongest measured baseline:
+  // BM25 over each raw source file plus its path. The build-time sidecar is the
+  // fast path. A missing/pre-upgrade sidecar rebuilds only this derived view
+  // live so cache presence never changes retrieval semantics.
+  const liveFileSources = (): Map<string, string> => {
+    const sources = new Map<string, string>();
+    if (!root || !graph) return sources;
+    for (const node of graph.nodes) {
+      if (node.kind !== "file" || sources.has(node.path)) continue;
+      if (inPrefix && !pathUnderPrefix(node.path, inPrefix)) continue;
+      try {
+        const source = readSourceFile(join(root, node.path));
+        if (source !== null) sources.set(node.path, source);
+      } catch {
+        // A disappearing/unreadable working-tree file is simply absent from
+        // this query; freshness repair will reconcile the graph separately.
+      }
+    }
+    return sources;
+  };
+  const fileBm25Index = fileBm25 && fileFirst && graph
+    ? askIndex?.files ?? buildFileBm25Index(liveFileSources())
+    : undefined;
+  const fileBm25Ranking = fileBm25Index
+    ? rankFileBm25(fileBm25Index, query, inPrefix)
+    : [];
 
   // Symbols AND file nodes are scored: a symbol's body_text is its definition;
   // a file's body_text is the module-level residual (imports/constants not in
@@ -1064,25 +1094,71 @@ function lexical(
   }
   }
 
-  // Concepts and symbols live on comparable 0..~1.5 scales so they merge fairly:
+  // Reuse the existing best symbol/residual representative for each file, but
+  // make whole-file BM25 authoritative for FILE order. A file whose raw text
+  // matched but whose extracted nodes did not gets its real file node as a
+  // fallback, so the raw candidate universe is never silently truncated.
+  let bm25FileGroups: AskRankingGroup[] | undefined;
+  if (fileBm25Ranking.length > 0 && graph) {
+    const existing = new Map(fileGroups.map((group) => [group.key, group]));
+    const fileNodeByPath = new Map(
+      graph.nodes.filter((node) => node.kind === "file").map((node) => [node.path, node]),
+    );
+    bm25FileGroups = [];
+    for (const ranked of fileBm25Ranking) {
+      const key = `file:${ranked.path}`;
+      let group = existing.get(key);
+      if (!group) {
+        const node = fileNodeByPath.get(ranked.path);
+        const hit = node ? makeSymbolHit(node.id, ranked.normalized) : null;
+        if (!hit) continue;
+        group = {
+          key,
+          hits: [hit],
+          coverage: ranked.coverage,
+          coverageStrong: ranked.coverageStrong,
+        };
+      }
+      const leader = group.hits[0];
+      const representativeStrong = matchedStrongOf.get(leader) ?? 0;
+      const coverageStrong = Math.max(ranked.coverageStrong, representativeStrong);
+      leader.score = ranked.normalized;
+      selectionGroupOf.set(leader, key);
+      matchedOf.set(leader, ranked.coverage);
+      matchedStrongOf.set(leader, coverageStrong);
+      bm25FileGroups.push({
+        ...group,
+        coverage: ranked.coverage,
+        coverageStrong,
+      });
+    }
+  }
+
+  // Concepts and symbols live on comparable 0..~1.5 scales so they merge fairly
+  // on the symbol path. File-first retrieval instead exposes the BM25-ranked
+  // file groups above; structural intent was already handled before this pass.
   // concept scores are normalized to their own max; symbol scores use the
   // lexical-normalized + graph-weighted blend.
   for (const h of conceptHits) h.score = maxConcept > 0 ? h.score / maxConcept : 0;
 
-  const scored = [...conceptHits, ...symbolHits];
+  const scored = bm25FileGroups
+    ? bm25FileGroups.map((group) => group.hits[0])
+    : [...conceptHits, ...symbolHits];
   scored.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
-  const baselineScored = needsFileQueues
+  const baselineScored = bm25FileGroups
+    ? [...scored]
+    : needsFileQueues
     ? [...conceptHits, ...baselineSymbolHits].sort(
         (a, b) => b.score - a.score || a.title.localeCompare(b.title),
       )
     : scored;
-  const conceptGroups: AskRankingGroup[] = conceptHits.map((hit, index) => ({
+  const conceptGroups: AskRankingGroup[] = (bm25FileGroups ? [] : conceptHits).map((hit, index) => ({
     key: selectionGroupOf.get(hit) ?? `concept:${index}`,
     hits: [hit],
     coverage: matchedOf.get(hit) ?? 0,
     coverageStrong: matchedStrongOf.get(hit) ?? 0,
   }));
-  const unlockedGroups = [...conceptGroups, ...fileGroups].sort(
+  const unlockedGroups = [...conceptGroups, ...(bm25FileGroups ?? fileGroups)].sort(
     (a, b) =>
       b.hits[0].score - a.hits[0].score ||
       a.hits[0].title.localeCompare(b.hits[0].title),
@@ -1229,6 +1305,9 @@ export interface AskOptions {
   /** @internal Return latent file queues and the exact baseline list so a
    * workspace parent can fuse files before projecting spans. */
   includeRankingMetadata?: boolean;
+  /** @internal Disable whole-file BM25 to exercise the legacy symbol-derived
+   * file projection in focused regression tests. Production callers omit it. */
+  fileBm25?: boolean;
 }
 
 /** Parse a `path:Lx-Ly` pointer into its parts, or null if it isn't one
@@ -1345,6 +1424,8 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
         fileComplement,
         fileTopLock,
         opts.includeRankingMetadata ?? false,
+        opts.fileBm25 ?? true,
+        root,
       );
       // A structural-intent query that couldn't be answered structurally still
       // gets a prominent note on the lexical fallback result — never silent.
@@ -1363,6 +1444,8 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
       fileComplement,
       fileTopLock,
       opts.includeRankingMetadata ?? false,
+      opts.fileBm25 ?? true,
+      root,
     );
   }
   if (opts.source) {

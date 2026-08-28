@@ -242,7 +242,6 @@ export async function buildGraph(
       entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [] };
       return;
     }
-
     const hash = contentHash(source);
     if (cached && hash === cached.hash) {
       entries[rel] = { ...cached, size: f.size, mtimeMs: f.mtimeMs };
@@ -349,7 +348,7 @@ export async function buildGraph(
   // this sidecar exists), so the nodes on disk no longer carry it — only this
   // in-memory object, still holding what `extractFile` populated, does.
   try {
-    writeAskIndex(outDir, graph);
+    writeAskIndex(outDir, graph, sources);
   } catch (err) {
     errors.push(`ask-index: ${err instanceof Error ? err.message : String(err)}`);
   }

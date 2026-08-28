@@ -261,7 +261,9 @@ function makeCollisionFixture(): string {
 }
 
 const rank = (dir: string, gr: boolean) =>
-  ask(dir, "foo", { graphRank: gr }).hits.map((h) => h.title.split(" ·")[0]);
+  ask(dir, "foo", { graphRank: gr, fileBm25: false }).hits.map(
+    (h) => h.title.split(" ·")[0],
+  );
 
 test("ask (graphRank off): pure lexical does not favour the connected hit", async () => {
   const dir = makeCollisionFixture();
