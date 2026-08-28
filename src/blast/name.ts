@@ -261,3 +261,42 @@ export async function applyNames(
   if (stats.named > 0) saveNameCache(opts.contextDir, cache);
   return stats;
 }
+
+/**
+ * Name the clusters left on their symbol backstop, and say what it cost.
+ *
+ * Everything here is best-effort by construction: no key, a spent quota or a
+ * refused call leaves the backstop labels in place, because neither a PR check
+ * nor a review comment should fail over a cosmetic layer. The note comes back
+ * rather than going to a stream, so `graft blast --name` can prefix it and the
+ * App can log it against the pull request it belongs to.
+ */
+export async function nameReport(
+  graph: GraphV1,
+  report: BlastReport,
+  contextDir: string,
+): Promise<{ stats: NameStats; note: string | null }> {
+  const { resolveConfig } = await import("../ai/providers.js");
+  const cfg = resolveConfig({ contextDir });
+
+  let namer: Namer | undefined;
+  if (cfg.chatModel) {
+    namer = new ChatNamer(cfg.chatModel);
+  } else if (cfg.apiKey) {
+    const { createChatModel } = await import("../ai/llm/factory.js");
+    namer = new ChatNamer(createChatModel({
+      provider: cfg.provider, apiKey: cfg.apiKey, model: cfg.model,
+      baseUrl: cfg.baseUrl, headers: cfg.headers,
+    }));
+  }
+
+  const stats = await applyNames(graph, report, { namer, contextDir });
+  if (!namer) return { stats, note: "no API key (GRAFT_API_KEY), so areas keep their symbol names" };
+  if (stats.error) return { stats, note: `naming failed (${stats.error}) — areas keep their symbol names` };
+  if (stats.named + stats.cached + stats.declined > 0) {
+    const bits = [`${stats.named} named`, `${stats.cached} cached`];
+    if (stats.declined > 0) bits.push(`${stats.declined} left as symbols (mixed)`);
+    return { stats, note: bits.join(", ") };
+  }
+  return { stats, note: null };
+}

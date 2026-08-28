@@ -126,37 +126,13 @@ export async function runBlastCommand(dir: string, opts: BlastCliOptions): Promi
 /**
  * Name the clusters left on their symbol backstop, then report what it cost.
  *
- * Everything here is best-effort by construction: no key, a spent quota or a
- * refused call leaves the backstop labels in place and the command still exits 0,
- * because a PR check must not fail over a cosmetic layer.
+ * The work lives in `name.ts` so the GitHub App runs the identical pass; all
+ * this adds is the `--name:` prefix a CLI note wants.
  */
 async function nameClusters(graph: GraphV1, report: BlastReport, contextDir: string): Promise<void> {
-  const { applyNames, ChatNamer } = await import("./name.js");
-  const { resolveConfig } = await import("../ai/providers.js");
-  const cfg = resolveConfig({ contextDir });
-
-  let namer;
-  if (cfg.chatModel) {
-    namer = new ChatNamer(cfg.chatModel);
-  } else if (cfg.apiKey) {
-    const { createChatModel } = await import("../ai/llm/factory.js");
-    namer = new ChatNamer(createChatModel({
-      provider: cfg.provider, apiKey: cfg.apiKey, model: cfg.model,
-      baseUrl: cfg.baseUrl, headers: cfg.headers,
-    }));
-  }
-
-  const stats = await applyNames(graph, report, { namer, contextDir });
-  if (!namer) {
-    console.error("• --name: no API key (GRAFT_API_KEY), so areas keep their symbol names");
-    return;
-  }
-  if (stats.error) console.error(`• --name: naming failed (${stats.error}) — areas keep their symbol names`);
-  else if (stats.named + stats.cached + stats.declined > 0) {
-    const bits = [`${stats.named} named`, `${stats.cached} cached`];
-    if (stats.declined > 0) bits.push(`${stats.declined} left as symbols (mixed)`);
-    console.error(`• --name: ${bits.join(", ")}`);
-  }
+  const { nameReport } = await import("./name.js");
+  const { note } = await nameReport(graph, report, contextDir);
+  if (note) console.error(`• --name: ${note}`);
 }
 
 /**

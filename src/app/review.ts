@@ -59,6 +59,18 @@ export async function reviewPullRequest(job: ReviewJob, deps: ReviewDeps): Promi
     if (!diff) throw new Error(`no diff against ${job.baseRef}`);
 
     const report = blastRadiusIn(graph, contextDir, diff.files, diff.basis, DEPTH);
+
+    // Same two passes `graft blast --name` runs, in the same order: a reviewer's
+    // reason cites area labels, and naming is what gives an area its final one.
+    // Both are best-effort — without GRAFT_API_KEY the areas keep their symbol
+    // names and the comment still goes out.
+    const { nameReport } = await import("../blast/name.js");
+    const { note } = await nameReport(graph, report, contextDir);
+    if (note) log(`${job.owner}/${job.repo}#${job.number}: ${note}`);
+
+    const { attachOwners, diffAuthors } = await import("../blast/owners.js");
+    attachOwners(checkout.dir, report, { exclude: diffAuthors(checkout.dir, checkout.base) });
+
     // NOTE: once #180 lands, pass `{ root: checkout.dir }` so the collapsed list
     // quotes the reaching line here too. It is additive, and the App works without it.
     let body = `${MARKER}\n${markdownReport(report)}`;
