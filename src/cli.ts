@@ -331,7 +331,8 @@ program
   )
   .option(
     "--only-dir <path>",
-    "only index files under this repo-relative path — repeatable; persisted, so a later build " +
+    "only index files under this repo-relative path — repeatable; the wiring walk and the --deep " +
+      "concept pass both honor it. Recorded in the graph fingerprint so a later build " +
       "(and the hooks/refresh path) walks the same set; everything outside the list is skipped",
     (val: string, prev: string[]) => [...prev, val],
     [] as string[],
@@ -462,6 +463,7 @@ program
     if (deep) {
       const c = await engine.init(dir, {
         extensions: opts.extensions,
+        onlyDirs,
         onProgress: ({ phase, index, total, file }) =>
           process.stderr.write(
             `\r${phase === "summarize" ? "reading" : "writing"} concepts ${index + 1}/${total}: ${file.slice(0, 40).padEnd(40)}`,
