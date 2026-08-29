@@ -201,7 +201,7 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
 - **Broad** — symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
-  OCaml, Zig, Dart, Clojure, Nix, Lua**.
+  OCaml, Zig, Dart, Clojure, Nix, Lua / Luau** (`.lua` / `.luau`).
 
 - **Compiler-grade edges (opt-in)** — `graft build --lsp` adds precise
   `lsp_resolved` call edges (member calls the static pass can't type) when a

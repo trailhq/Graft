@@ -43,9 +43,10 @@ fn helper() -> String {
 }
 `;
 
-test("genericLangOf routes .rs to the breadth tier (and not depth-tier extensions)", () => {
+test("genericLangOf routes breadth-tier extensions", () => {
   assert.equal(genericLangOf("src/main.rs")?.name, "rust");
   assert.equal(genericLangOf("src/init.lua")?.name, "lua");
+  assert.equal(genericLangOf("src/init.luau")?.name, "lua");
   assert.equal(genericLangOf("src/app.ts"), null); // depth tier owns .ts
   assert.equal(genericLangOf("README.md"), null);
 });
@@ -117,10 +118,11 @@ const SNIPPETS: Array<{ lang: string; file: string; src: string; defs: string[];
     defs: ["function:helper", "function:run", "module:my.core"], call: ["run", "helper"],
   },
   {
-    // Lua functions can be declarations, assigned expressions, or table fields;
-    // colon syntax defines and calls methods.
-    lang: "lua", file: "a.lua",
-    src: `local function helper()\n  return 1\nend\n\nlocal assigned = function()\n  return helper()\nend\n\nlocal handlers = { draw = function() return helper() end }\n\nfunction Widget:run()\n  return helper()\nend\n\nlocal function launch()\n  return Widget:run()\nend\n`,
+    // The Lua grammar also recognizes Luau's typed function syntax. Functions
+    // can be declarations, assigned expressions, or table fields; colon syntax
+    // defines and calls methods.
+    lang: "lua", file: "a.luau",
+    src: `--!strict\n\nlocal function helper(value: number): number\n  return value + 1\nend\n\nlocal assigned = function(value: number): number\n  return helper(value)\nend\n\nlocal handlers = { draw = function(value: number): number return helper(value) end }\n\nfunction Widget:run(value: number): number\n  return helper(value)\nend\n\nlocal function launch(): number\n  return Widget:run(1)\nend\n`,
     defs: ["function:assigned", "function:draw", "function:helper", "function:launch", "method:run"], call: ["launch", "run"],
   },
   {
