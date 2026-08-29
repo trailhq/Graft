@@ -61,6 +61,20 @@ test("patching covers preserves the node's body and other frontmatter", async ()
   }
 });
 
+test("writeCovers does not stamp covers onto a root-level file card (#261)", async () => {
+  const dir = makeFixture();
+  try {
+    await buildContext(dir, { model: "fake", ...fakeProviders() });
+    await buildGraph(dir);
+    const card = matter(readFileSync(join(dir, "graft", "auth.md"), "utf8"));
+    assert.equal(card.data.slug, undefined, "file card has no concept slug");
+    assert.ok(!("covers" in card.data), "file cards must not grow concept covers: []");
+    assert.match(card.content.trimStart(), /^# auth\.ts/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("re-running the wiring build leaves covers byte-stable", async () => {
   const dir = makeFixture();
   try {

@@ -133,6 +133,102 @@ test("check: root-level file card is not indexDrift after build (#213)", async (
   }
 });
 
+// #261 — same collision as #213, two holes #215's skip does not cover:
+//   1. A concept slug equal to the root file's stem (Laravel `server.php` vs
+//      a synthesized "Server" node). writeCards must not clobber the concept.
+//   2. A root file card whose source is not in manifest.files (#215 only
+//      skips stems recorded there). Graph-indexed extras (e.g. .lua) still
+//      land at graft/<stem>.md and must not become indexDrift.
+test("check: root PHP file card is not indexDrift after build (#261)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxgraph-root-php-"));
+  try {
+    writeFileSync(join(dir, "server.php"), `<?php\nfunction hi() { return 1; }\n`);
+    mkdirSync(join(dir, "lib"));
+    writeFileSync(join(dir, "lib", "deep.php"), `<?php\nfunction deep() { return 2; }\n`);
+
+    await buildContext(dir, buildOpts());
+    await buildGraph(dir);
+
+    assert.ok(existsSync(join(dir, "graft", "server.md")), "root php source gets a top-level file card");
+    assert.ok(existsSync(join(dir, "graft", "lib", "deep.md")), "nested php card stays in a subdir");
+
+    const r = checkContext(dir);
+    assert.equal(r.ok, true, `expected clean check, got ${JSON.stringify(r)}`);
+    assert.deepEqual(r.indexDrift, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("check: root file card must not overwrite a concept with the same slug (#261)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxgraph-root-collide-"));
+  try {
+    writeFileSync(
+      join(dir, "server.php"),
+      `<?php\n// [[Server]] ==depends_on==> [[Router]]\nfunction hi() { return 1; }\n`,
+    );
+    mkdirSync(join(dir, "lib"));
+    writeFileSync(
+      join(dir, "lib", "router.php"),
+      `<?php\n// [[Router]]\nfunction route() { return 2; }\n`,
+    );
+
+    await buildContext(dir, buildOpts());
+    assert.match(
+      readFileSync(join(dir, "graft", "server.md"), "utf8"),
+      /^slug:\s*server\s*$/m,
+      "context build writes a concept node at graft/server.md",
+    );
+
+    await buildGraph(dir);
+
+    const concept = readFileSync(join(dir, "graft", "server.md"), "utf8");
+    assert.match(concept, /^slug:\s*server\s*$/m, "file card must not clobber the concept node");
+    assert.ok(
+      existsSync(join(dir, "graft", "_root", "server.md")),
+      "root file card relocates to graft/_root/ when the stem is a concept slug",
+    );
+    assert.match(readFileSync(join(dir, "graft", "_root", "server.md"), "utf8"), /^# server\.php/m);
+
+    const r = checkContext(dir);
+    assert.equal(r.ok, true, `expected clean check, got ${JSON.stringify(r)}`);
+    assert.deepEqual(r.indexDrift, []);
+
+    writeFileSync(join(dir, "graft", "notes.md"), "# stray notes\n");
+    const stray = checkContext(dir);
+    assert.equal(stray.ok, false);
+    assert.ok(
+      stray.indexDrift.some((s) => s.startsWith("notes:")),
+      `expected stray notes.md to be indexDrift, got ${JSON.stringify(stray.indexDrift)}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("check: root file card not in manifest.files is not indexDrift (#261)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxgraph-root-extra-"));
+  try {
+    // .lua is graph-indexed but not a context CODE_EXTENSIONS, so the card is
+    // written and the source never appears in manifest.files — #215's skip
+    // keyed on recorded root sources misses it.
+    writeFileSync(join(dir, "server.lua"), `function hi() return 1 end\n`);
+    mkdirSync(join(dir, "lib"));
+    writeFileSync(join(dir, "lib", "deep.ts"), `export function deep() { return 2; }\n`);
+
+    await buildContext(dir, buildOpts());
+    await buildGraph(dir);
+
+    assert.ok(existsSync(join(dir, "graft", "server.md")), "graph still writes a root file card");
+
+    const r = checkContext(dir);
+    assert.equal(r.ok, true, `expected clean check, got ${JSON.stringify(r)}`);
+    assert.deepEqual(r.indexDrift, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("check reports NO GRAPH when init never ran", () => {
   const dir = mkdtempSync(join(tmpdir(), "ctxgraph-"));
   try {
