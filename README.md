@@ -209,7 +209,7 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
   **gopls** (Go), **pyright** (Python), **typescript-language-server** (TS/JS).
   It's best-effort — with no server installed the graph is unchanged.
 
-Twenty-three languages in total. A file whose language isn't listed is skipped, not
+Twenty-four languages in total. A file whose language isn't listed is skipped, not
 indexed. Adding a broad-tier language is a small contribution — see
 [CREDITS.md](CREDITS.md) for the folks who added the current set.
 
