@@ -8,13 +8,19 @@
  * `litellm` is a convenience over `openai`: same wire format, but pointed at a
  * LiteLLM proxy by default and paired with `/v1/models` auto-discovery
  * (see litellm.ts), so one endpoint reaches 100+ providers.
+ *
+ * `orcarouter` is the same kind of convenience over `openai`, pointed at the
+ * OrcaRouter AI gateway by default (see orcarouter.ts) so its users get the
+ * gateway's routing, failover, and guardrails behind a named provider instead
+ * of a bare custom base URL.
  */
 import type { ChatModel } from "./types.js";
 import { OpenAIChatModel } from "./openai.js";
 import { AnthropicChatModel } from "./anthropic.js";
 import { LiteLLMChatModel } from "./litellm.js";
+import { OrcaRouterChatModel } from "./orcarouter.js";
 
-export type ProviderKind = "openai" | "anthropic" | "litellm";
+export type ProviderKind = "openai" | "anthropic" | "litellm" | "orcarouter";
 
 export interface ChatModelConfig {
   provider: ProviderKind;
@@ -38,6 +44,13 @@ export function createChatModel(cfg: ChatModelConfig): ChatModel {
       });
     case "litellm":
       return new LiteLLMChatModel({
+        apiKey: cfg.apiKey,
+        model: cfg.model,
+        baseUrl: cfg.baseUrl,
+        headers: cfg.headers,
+      });
+    case "orcarouter":
+      return new OrcaRouterChatModel({
         apiKey: cfg.apiKey,
         model: cfg.model,
         baseUrl: cfg.baseUrl,
