@@ -134,6 +134,7 @@ export function maybeRefreshInBackground(home?: string, now = Date.now()): boole
     const child = spawn(process.execPath, [graftCliPath(), '_update-check'], {
       detached: true,
       stdio: 'ignore',
+      windowsHide: true,
     });
     child.unref();
     return true;
