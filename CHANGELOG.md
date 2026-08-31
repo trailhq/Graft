@@ -4,6 +4,39 @@
 
 ### Added
 
+- **A container language can carry SEVERAL embedded shapes, and Astro's client
+  `<script>` is the second one.** `ContainerLang.block`/`body` become
+  `embeds: EmbeddedBlock[]`, each with its own `block`/`body` pair, an opt-in
+  `nested` flag and an optional `accept` predicate. Astro needs all three: its
+  client code is a `script_element` → `raw_text`, a different node pair from the
+  fence, sitting inside the markup rather than at the root — three levels down in
+  a real layout — and a page can hold one 900-line block that is the whole of its
+  behaviour.
+
+  `nested` is per-shape rather than a change to the walk, because Vue's
+  `<script>` is always top-level and descending for it would newly index a
+  `<script>` written inside a `<template>` — a behaviour change to `.vue`
+  smuggled in with the Astro work. A test pins that Vue still ignores it.
+
+  `accept` exists for a subtler reason: **not every `<script>` holds code.**
+  `<script type="application/ld+json">` is structured data, and its body parses
+  as a perfectly good TypeScript block, so without a check the graph mints nodes
+  out of a JSON-LD blob. `isJavaScriptScript` reads the `type` attribute —
+  absent or valueless means JavaScript per the HTML spec, `module` /
+  `text/javascript` / `text/typescript` and friends are code, everything else
+  (`ld+json`, `importmap`, `speculationrules`) is data. A `type={dynamic}` that
+  cannot be read statically is treated as data: one un-indexed block beats
+  guessing at content we cannot see.
+
+  Blocks are now returned in **document order** across all shapes rather than
+  registry order. That is not cosmetic — ids are minted in the order blocks
+  arrive, so a name defined in both the fence and a script would otherwise get
+  its `~2` suffix based on how the registry happens to be written.
+
+  On the same repo as the entry above: 6,561 → **7,262 edges**, 2,808 → **3,120
+  nodes**, and a 20-line function 826 lines into a page's inline script now has
+  an exact span where it previously did not exist.
+
 - **Astro (`.astro`) joins the container tier**, the second row after Vue and the
   one its registry comment was holding open. The `---` frontmatter is the same
   shape as a Vue SFC's `<script>` with a different fence: `tree-sitter-astro`
@@ -21,12 +54,9 @@
   Frontmatter is where an Astro page's imports and server-side code live, so
   pages stop being invisible: a `lib` function's `callers` now names the pages
   that import it, and `graft grep` reaches `.astro` at all. Client `<script>`
-  blocks are deliberately still out — they nest inside the markup, and `blocks()`
-  walks the root's named children only, so reaching them needs a recursive walk
-  and a `block` that can name two node types. A file with only a client script
-  degrades to a file node; it never reports a wrong line. Svelte stays out of the
-  registry for the reason Astro just left it: nobody has verified its `body` node
-  against a real repo.
+  blocks follow in the entry below. Svelte stays out of the registry for the
+  reason Astro just left it: nobody has verified its `body` node against a real
+  repo.
 
 - **`graft init --no-statusline`** (and `GRAFT_NO_STATUSLINE=1`) skips writing
   Claude Code's `statusLine` / `subagentStatusLine`. A custom bar — in the

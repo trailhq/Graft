@@ -406,15 +406,160 @@ test("container: an .astro with no usable frontmatter degrades to a file node", 
   for (const [label, lines] of [
     ["no frontmatter at all", ["<main>", "  <p>static</p>", "</main>"]],
     ["empty frontmatter", ["---", "---", "<p />"]],
-    // The known limit of this row: client `<script>` blocks are nested in the
-    // markup, and `blocks()` only walks the root's named children. Pinned so
-    // the behaviour is a decision rather than a surprise — note it degrades to
-    // "not indexed", never to a wrong line.
-    ["client script only", ["<main>", "  <script>", "    function boot() {}", "  </script>", "</main>"]],
+    // A `<script src>` has an empty `raw_text`, not a missing one: the block is
+    // found and handed over, and the inner extractor returns nothing from it.
+    ["external script only", ["<main>", '  <script src="/boot.js"></script>', "</main>"]],
   ] as const) {
     const { nodes, rawEdges } = extractContainer("Empty.astro", astro([...lines]), ASTRO);
     assert.equal(nodes.length, 1, `${label}: file node only`);
     assert.equal(nodes[0].kind, "file");
     assert.equal(rawEdges.length, 0, `${label}: no edges`);
   }
+});
+
+/* ---------------------------------------------------------------------------
+ * Astro client `<script>`: the second embedded shape. Nested in the markup
+ * rather than at the root, and living in the same tree as the frontmatter, so
+ * the risks are (a) the offset, again, now with a much larger shift, and
+ * (b) document order across two different node types.
+ * ------------------------------------------------------------------------- */
+
+test("container: a client <script> nested in the markup is extracted", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                                    //  1
+    "const title = 'hi';",                    //  2
+    "---",                                    //  3
+    "<main>",                                 //  4
+    "  <section>",                            //  5
+    "    <p>{title}</p>",                     //  6
+    "    <script>",                           //  7
+    "      export function boot() {",         //  8
+    "        return 1;",                      //  9
+    "      }",                                // 10
+    "    </script>",                          // 11
+    "  </section>",                           // 12
+    "</main>",                                // 13
+  ];
+
+  // Three levels down, and 7 lines below the fence: the offset here is neither
+  // zero nor the frontmatter's.
+  assert.equal(spanOf(extractContainer("Deep.astro", astro(lines), ASTRO).nodes, "boot"), "L8-L10");
+});
+
+test("container: fence and scripts come back in document order, each with its own offset", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                              //  1
+    "export function fromFence() {}",   //  2
+    "---",                              //  3
+    "<script>",                         //  4
+    "function firstScript() {}",        //  5
+    "</script>",                        //  6
+    "<p>between</p>",                   //  7
+    "<script>",                         //  8
+    "function secondScript() {}",       //  9
+    "</script>",                        // 10
+  ];
+
+  const { nodes } = extractContainer("Order.astro", astro(lines), ASTRO);
+  assert.equal(spanOf(nodes, "fromFence"), "L2-L2");
+  assert.equal(spanOf(nodes, "firstScript"), "L5-L5");
+  assert.equal(spanOf(nodes, "secondScript"), "L9-L9");
+  assert.equal(nodes.filter((n) => n.kind === "file").length, 1, "exactly one file node");
+});
+
+test("container: a name defined in both the fence and a script gets two nodes", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                    // 1
+    "function dup() {}",      // 2
+    "---",                    // 3
+    "<script>",               // 4
+    "function dup() {}",      // 5
+    "</script>",              // 6
+  ];
+
+  const { nodes, rawEdges } = extractContainer("Dup.astro", astro(lines), ASTRO);
+  const dups = nodes.filter((n) => n.name === "dup");
+
+  assert.equal(dups.length, 2, "both definitions survive");
+  assert.equal(new Set(dups.map((n) => n.id)).size, 2, "ids are distinct");
+  assert.deepEqual(dups.map((n) => n.span).sort(), ["L2-L2", "L5-L5"]);
+
+  const ids = new Set(nodes.map((n) => n.id));
+  for (const e of rawEdges) {
+    assert.ok(ids.has(e.source), `edge source ${e.source} has no node`);
+    if (e.targetId) assert.ok(ids.has(e.targetId), `edge target ${e.targetId} has no node`);
+  }
+});
+
+test("container: a <script> holding data, not code, is left alone", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  // JSON-LD parses fine as a TypeScript block, so nothing downstream would
+  // complain — it would just mint nodes out of a structured-data blob.
+  const lines = [
+    "<head>",                                             //  1
+    '  <script type="application/ld+json">',              //  2
+    '    {"@type": "Organization", "name": "Acme"}',      //  3
+    "  </script>",                                        //  4
+    "  <script type=application/json>",                   //  5
+    '    {"a": 1}',                                       //  6
+    "  </script>",                                        //  7
+    '  <script type="module">',                           //  8
+    "    export function real() {}",                      //  9
+    "  </script>",                                        // 10
+    "</head>",                                            // 11
+  ];
+
+  const { nodes } = extractContainer("Data.astro", astro(lines), ASTRO);
+  assert.equal(spanOf(nodes, "real"), "L9-L9", 'type="module" is JavaScript and is indexed');
+  assert.equal(nodes.length, 2, "the file node and `real` — the two data blocks contribute nothing");
+});
+
+test("container: isJavaScriptScript reads the type attribute, defaulting to JS", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  // Exercised through extraction rather than by hand-building nodes, so the
+  // assertion is about behaviour and not about a helper's signature.
+  for (const [tag, indexed] of [
+    ["<script>", true],
+    ['<script is:inline>', true],
+    ['<script type="module">', true],
+    ["<script type=text/javascript>", true],
+    ['<script type="text/typescript">', true],
+    ['<script type="application/ld+json">', false],
+    ['<script type="importmap">', false],
+    ['<script type="speculationrules">', false],
+    ["<script type={dynamic}>", false],
+  ] as const) {
+    const { nodes } = extractContainer("T.astro", astro(["<div>", `  ${tag}`, "  function probe() {}", "  </script>", "</div>"]), ASTRO);
+    const hit = nodes.some((n) => n.name === "probe");
+    assert.equal(hit, indexed, `${tag} should ${indexed ? "" : "not "}be indexed`);
+  }
+});
+
+test("container: Vue does not descend into the template — nesting is opt-in per shape", async () => {
+  await warmContainerGrammars(["vue"]);
+
+  // Astro's row is `nested`; Vue's is not. A <script> written inside a Vue
+  // template is markup the framework never runs as a module, and indexing it
+  // would be a behaviour change to `.vue` smuggled in with the Astro work.
+  const lines = [
+    "<template>",                     // 1
+    "  <div>",                        // 2
+    "    <script>",                   // 3
+    "      function inTemplate() {}", // 4
+    "    </script>",                  // 5
+    "  </div>",                       // 6
+    "</template>",                    // 7
+  ];
+
+  const { nodes } = extractContainer("Nested.vue", sfc(lines), VUE);
+  assert.equal(nodes.length, 1, "file node only");
+  assert.ok(!nodes.some((n) => n.name === "inTemplate"));
 });
