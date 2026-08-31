@@ -6,6 +6,7 @@
 
 - feat: add Ruby language support (Phase 1: flat class/module/method extraction)
 - feat: add Ruby language support (Phase 2: singleton methods)
+- feat: add Ruby language support (Phase 3: private/protected/public visibility)
 - **C/C++ language support.** One `"cpp"` grammar (`tree-sitter-cpp`) parses the
   whole family — `.c/.h/.cpp/.hpp/.cc/.cxx/.hh/.hxx` — uniformly, the same
   approach clangd and most polyglot tooling take; there's no separate `.c`-only

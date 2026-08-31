@@ -223,6 +223,7 @@ const FUNCTION_VALUE_TYPES = new Set([
 ]);
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
+const EMPTY_MAP: ReadonlyMap<string, "protected" | "private"> = new Map();
 
 const parser = new Parser();
 const GRAMMARS: Record<Language, unknown> = {
@@ -271,6 +272,21 @@ export interface WalkCtx {
   // for the method's whole body, only changing when a genuinely different
   // class is entered. Null outside any class, or for a class with no parent.
   rSuperClass: string | null;
+  // Ruby (Phase 3): the current visibility mode inside a class/module body —
+  // starts "public", switches on a bare `private`/`protected`/`public`
+  // identifier statement, and applies FORWARD ONLY to subsequent sibling
+  // defs (Ruby language semantics). Reset to "public" whenever a genuinely
+  // new class/module body is entered (mirrors rSuperClass's reset rule) —
+  // NOT reset per-definition, since it must stay live across sibling defs.
+  rubyVisibility: "public" | "protected" | "private";
+  // Ruby (Phase 3): names marked private/protected by a POST-HOC symbol
+  // call (`private :foo`) anywhere in the CURRENT class/module body,
+  // pre-scanned once when that body is entered (see rubyPostHocVisibility())
+  // — because such a call can appear textually after the def it targets,
+  // a single forward pass over rubyVisibility can't see it in time. Reset
+  // whenever a new class/module body is entered, same trigger as
+  // rubyVisibility.
+  rubyPostHoc: ReadonlyMap<string, "protected" | "private">;
 }
 
 /** A definition we're about to emit, normalized across the shapes we handle. */
@@ -343,6 +359,8 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
     rR6Access: null,
     rGenerics,
     rSuperClass: null,
+    rubyVisibility: "public",
+    rubyPostHoc: EMPTY_MAP,
   };
   // Every id minted this file, seeded with the file node's own id (`rel`) so a
   // top-level definition can never collide with it. Threaded as its own
@@ -409,7 +427,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
               : ctx.lang === "r"
                 ? rExported(desc.name, ctx, node)
                 : ctx.lang === "ruby"
-                  ? rubyExported(desc.name)
+                  ? rubyExported(desc.name, ctx)
                   : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
@@ -459,6 +477,12 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       // stays live through a method's whole body, where super$ calls actually
       // happen) — inherited unchanged for every other definition kind.
       rSuperClass: desc.kind === "class" ? (ctx.lang === "r" ? rR6ParentClass(node) : null) : ctx.rSuperClass,
+      rubyVisibility:
+        ctx.lang === "ruby" && (desc.kind === "class" || desc.kind === "module") ? "public" : ctx.rubyVisibility,
+      rubyPostHoc:
+        ctx.lang === "ruby" && (desc.kind === "class" || desc.kind === "module")
+          ? rubyPostHocVisibility(node)
+          : ctx.rubyPostHoc,
     };
     for (const child of node.namedChildren) walk(child, childCtx, out, edges, minted);
     return;
@@ -580,6 +604,23 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     }
   }
 
+  if (ctx.lang === "ruby" && node.type === "body_statement") {
+    let visibility = ctx.rubyVisibility;
+    for (const child of node.namedChildren) {
+      const switchTo = rubyVisibilitySwitch(child);
+      if (switchTo) {
+        visibility = switchTo;
+        continue;
+      }
+      const inline = rubyInlineVisibility(child);
+      if (inline) {
+        walk(inline.methodNode, { ...ctx, rubyVisibility: inline.visibility }, out, edges, minted);
+        continue;
+      }
+      walk(child, { ...ctx, rubyVisibility: visibility }, out, edges, minted);
+    }
+    return;
+  }
   for (const child of node.namedChildren) walk(child, ctx, out, edges, minted);
 }
 
@@ -1245,13 +1286,72 @@ function describeRuby(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | nu
 }
 
 /**
- * Phase 1 baseline, ahead of Phase 3's real private/protected/public
- * tracking: `initialize` is unconditionally private by Ruby language rule
- * regardless of the surrounding visibility mode, so it's correct standalone
- * and Phase 3 layers on top of it rather than replacing it.
+ * `initialize` is unconditionally private by Ruby language rule, regardless
+ * of the surrounding visibility mode. Otherwise: a post-hoc `private
+ * :name`/`protected :name` in the current class/module body wins over the
+ * forward mode-switch state (it's a more specific, deliberate override);
+ * absent that, the current mode-switch state (already resolved to an inline
+ * override, if any, by the caller passing a one-off ctx — see
+ * rubyInlineVisibility) decides.
  */
-function rubyExported(name: string): boolean {
-  return name !== "initialize";
+function rubyExported(name: string, ctx: WalkCtx): boolean {
+  if (name === "initialize") return false;
+  const postHoc = ctx.rubyPostHoc.get(name);
+  if (postHoc) return false;
+  return ctx.rubyVisibility === "public";
+}
+
+/**
+ * One shallow pass over a class/module's own `body`, collecting every
+ * `private :sym`/`protected :sym` post-hoc call — see WalkCtx.rubyPostHoc's
+ * doc comment for why this can't be folded into the forward
+ * rubyVisibility pass. Deliberately shallow (direct body children only,
+ * `namedChildren` not a full recursive walk) — a `private :sym` nested
+ * inside a conditional or another method body is not a class-level
+ * visibility declaration and should not be treated as one.
+ */
+function rubyPostHocVisibility(classOrModuleNode: Parser.SyntaxNode): ReadonlyMap<string, "protected" | "private"> {
+  const body = classOrModuleNode.childForFieldName("body");
+  if (!body) return EMPTY_MAP;
+  const out = new Map<string, "protected" | "private">();
+  for (const stmt of body.namedChildren) {
+    if (stmt.type !== "call") continue;
+    const methodNode = stmt.childForFieldName("method");
+    if (methodNode?.type !== "identifier") continue;
+    if (methodNode.text !== "private" && methodNode.text !== "protected") continue;
+    const args = stmt.childForFieldName("arguments");
+    const sym = args?.namedChildren[0];
+    if (sym?.type === "simple_symbol") out.set(sym.text.slice(1), methodNode.text as "protected" | "private");
+  }
+  return out;
+}
+
+/** A bare `private`/`protected`/`public` statement (no call, no args) — the
+ * mode-switch form. Returns the mode to switch to, or null if `node` isn't
+ * one. `module_function` is deliberately NOT handled — it has dual
+ * public-singleton-method/private-instance-method semantics with no clean
+ * fit in this schema; see the plan's Task 3 notes. */
+function rubyVisibilitySwitch(node: Parser.SyntaxNode): "public" | "protected" | "private" | null {
+  if (node.type !== "identifier") return null;
+  if (node.text === "private" || node.text === "protected" || node.text === "public") return node.text;
+  return null;
+}
+
+/** `private def foo; end` / `protected def foo; end` — the inline form.
+ * Returns the wrapped method node and the one-off visibility to apply to it
+ * (independent of, and without mutating, the surrounding mode-switch
+ * state), or null if `node` isn't this shape. */
+function rubyInlineVisibility(
+  node: Parser.SyntaxNode,
+): { methodNode: Parser.SyntaxNode; visibility: "protected" | "private" } | null {
+  if (node.type !== "call") return null;
+  const methodField = node.childForFieldName("method");
+  if (methodField?.type !== "identifier") return null;
+  if (methodField.text !== "private" && methodField.text !== "protected") return null;
+  const args = node.childForFieldName("arguments");
+  const sole = args?.namedChildren[0];
+  if (sole?.type !== "method" && sole?.type !== "singleton_method") return null;
+  return { methodNode: sole, visibility: methodField.text as "protected" | "private" };
 }
 
 /**
