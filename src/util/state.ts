@@ -10,7 +10,7 @@
  * outside had to change when it moved.
  */
 import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, isAbsolute } from 'node:path';
 
 export interface Stats {
   nodeCount: number; edgeCount: number; languages: string[];
@@ -28,7 +28,25 @@ export function emptyStats(): Stats {
 
 const LOCK_FILE = '.sync.lock';
 
-export function cacheDir(projectDir: string): string { return join(projectDir, 'graft', '.cache'); }
+/**
+ * Where the pieces this module manages (the stats cache, the sync lock,
+ * per-session state, the upkeep stamp) actually live when no caller-supplied
+ * override is available. The Claude Code hooks, `sync-run`, the statusline,
+ * and `upkeep` all resolve a bare project dir and never see an explicit
+ * `--dir` — unlike a direct CLI invocation, which threads one through
+ * `contextDirFor` (`context/node-file.ts`). This mirrors that same override
+ * precedence for those entry points: `GRAFT_DIR` wins over the default
+ * `<projectDir>/graft`, the same env var `resolveConfig` already honors for
+ * the `--deep` LLM path. A relative `GRAFT_DIR` resolves against `projectDir`
+ * so it holds regardless of the caller's cwd.
+ */
+export function resolveContextDir(projectDir: string): string {
+  const override = process.env.GRAFT_DIR;
+  if (!override) return join(projectDir, 'graft');
+  return isAbsolute(override) ? override : join(projectDir, override);
+}
+
+export function cacheDir(projectDir: string): string { return join(resolveContextDir(projectDir), '.cache'); }
 function statsPath(d: string): string { return join(cacheDir(d), 'stats.json'); }
 
 export function readJson<T>(p: string): T | null {
@@ -64,16 +82,26 @@ export function readStats(d: string): Stats | null { return readJson<Stats>(stat
 export function writeStats(d: string, s: Stats): void { writeJsonAtomic(statsPath(d), s); }
 
 /**
- * Persisted per-repo build configuration — currently just `graft build
- * --include-dir`'s override. An explicit input like the graph itself: absent
- * or empty `includeDirs` means today's default (every `SKIP_DIRS` name stays
- * skipped), so a repo that never used the flag is entirely unaffected.
+ * Persisted per-repo build configuration. Explicit CLI choices live here so
+ * later no-flag builds and automatic refreshes enumerate the same file set.
+ * Missing fields always retain backwards-compatible defaults.
  */
 export interface BuildConfig {
   /** SKIP_DIRS names to include in this repo's walks, persisted so a LATER
    * no-flag build — and the fingerprint/refresh path, which never sees CLI
    * flags at all — behave identically to the invocation that set it. */
   includeDirs?: string[];
+  /** Whether initialized Git submodules (gitlinks) are folded into this repo's
+   * graph. Absent/false keeps the historical boundary at the superproject. */
+  followSubmodules?: boolean;
+  /** Whether nested Git clones the index does not track — how manifest-driven
+   * multi-repo tools check dependencies out, and how an ad-hoc local clone lands
+   * in the tree — are folded into this repo's graph. Deliberately SEPARATE from
+   * `followSubmodules`: a submodule is a dependency the parent pins, a nested
+   * clone is invisible to the parent's index and may equally be a scratch
+   * checkout someone parked in the tree. Absent/false keeps the historical
+   * boundary. */
+  followNestedRepos?: boolean;
 }
 
 /** Local, Git-ignored repository configuration. Kept outside generated
@@ -105,6 +133,12 @@ export function writeBuildConfig(d: string, c: BuildConfig): void {
   writeJsonAtomic(buildConfigPath(d), c);
 }
 
+/** Merge explicit CLI choices into the existing local config, so updating one
+ * persisted build option cannot erase another. */
+export function patchBuildConfig(d: string, patch: BuildConfig): void {
+  writeBuildConfig(d, { ...(readBuildConfig(d) ?? {}), ...patch });
+}
+
 /** The persisted `--include-dir` override for repo `d`, as a Set — `undefined`
  * when nothing was ever persisted (or the persisted list is empty), which every
  * `shouldSkipDir`/`walkDir` caller treats as "today's default behavior". Shared
@@ -113,6 +147,16 @@ export function writeBuildConfig(d: string, c: BuildConfig): void {
 export function readIncludeDirs(d: string): Set<string> | undefined {
   const dirs = readBuildConfig(d)?.includeDirs;
   return dirs && dirs.length ? new Set(dirs) : undefined;
+}
+
+/** Missing and explicit false both retain the backwards-compatible default. */
+export function readFollowSubmodules(d: string): boolean {
+  return readBuildConfig(d)?.followSubmodules === true;
+}
+
+/** Missing and explicit false both retain the backwards-compatible default. */
+export function readFollowNestedRepos(d: string): boolean {
+  return readBuildConfig(d)?.followNestedRepos === true;
 }
 // Best-effort read-modify-write; not atomic across concurrent processes, but acceptable
 // for episodic hook writes (worst case is a lost update, not corruption).

@@ -30,6 +30,10 @@ const INDEXED = [
   "a.h", "a.hpp", "a.hh", "a.hxx", "a.cpp", "a.cc", "a.cxx",
   "a.R", "a.r",
   "a.rb",
+  "a.java",
+  "a.kt", "a.kts",
+  "a.swift",
+  "a.php",
 ];
 
 test("a file is labelled exactly when it is indexed", () => {
@@ -37,6 +41,7 @@ test("a file is labelled exactly when it is indexed", () => {
   // adding an extension cannot teach the extractor about it and leave the banner
   // silent (or vice versa — claiming coverage of a file nothing can parse).
   for (const f of [...INDEXED, "a.txt", "a.rs", "README.md", "noextension", ""]) {
+    // (".rs" stays a null case here: Rust is breadth-tier, which this table doesn't cover.)
     assert.equal(
       languageOf(f) === null,
       languageLabelOf(f) === null,
@@ -63,6 +68,11 @@ test("labels name the language, not the grammar that parses it", () => {
   assert.equal(languageLabelOf("analysis/model.R"), "r");
   assert.equal(languageLabelOf("analysis/model.r"), "r");
   assert.equal(languageLabelOf("app/models/user.rb"), "ruby");
+  assert.equal(languageLabelOf("src/main/java/com/acme/App.java"), "java");
+  assert.equal(languageLabelOf("src/main/kotlin/com/acme/App.kt"), "kotlin");
+  assert.equal(languageLabelOf("scripts/main.kts"), "kotlin");
+  assert.equal(languageLabelOf("Sources/App/main.swift"), "swift");
+  assert.equal(languageLabelOf("app/Models/User.php"), "php");
 
   // The grammar is unchanged — extraction, the extract cache and every `Language`
   // switch still see exactly what they saw before.
@@ -85,9 +95,11 @@ test("the build banner and repo map report every language they indexed", async (
   writeFileSync(join(d, "scripts", "tool.mjs"), "export function mjsOnlySymbol() {\n  return 1;\n}\n");
   writeFileSync(join(d, "scripts", "web.jsx"), "export function JsxOnly() {\n  return null;\n}\n");
   writeFileSync(join(d, "src", "c.py"), "def py_only():\n    return 1\n");
+  writeFileSync(join(d, "src", "a.kt"), "fun ktOnly(): Int {\n  return 1\n}\n");
+  writeFileSync(join(d, "src", "a.swift"), "func swiftOnly() -> Int {\n  return 1\n}\n");
 
   const r = await buildGraph(d);
-  assert.deepEqual(r.languages, ["javascript", "jsx", "python", "tsx", "typescript"]);
+  assert.deepEqual(r.languages, ["javascript", "jsx", "kotlin", "python", "swift", "tsx", "typescript"]);
 
   // The reported symbol was queryable all along — that mismatch is what the issue was
   // about, so pin both halves together.

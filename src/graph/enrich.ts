@@ -19,7 +19,8 @@
  * once, to cut `crux.code` verbatim from the source. `crux.span` is a pointer
  * only and is never used to re-slice.
  */
-import type { CruxSummarizer, NodeCrux, NodeRef } from "../ai/crux.js";
+import { formatCruxMiss, type CruxMissKind, type CruxSummarizer, type NodeCrux, type NodeRef } from "../ai/crux.js";
+import { LlmFailureGate } from "../ai/failure.js";
 import type { Crux, NodeV1 } from "./types.js";
 
 /** Cap on the stored crux: an over-long pick is trimmed to its leading slice. */
@@ -35,6 +36,21 @@ export interface EnrichOptions {
   concurrency?: number;
   /** Progress is reported per file (one LLM call each), as files finish — not per node. */
   onProgress?: (info: { index: number; total: number; node: string }) => void;
+  /**
+   * Durability flush of the (partially) enriched graph, called from the per-file
+   * completion handler at most once every {@link CHECKPOINT_MS}. Without it, crux
+   * only reached wiring.json at build end, so an interrupted --deep run discarded
+   * every crux it had already computed and paid for (#128). Single-threaded, so it
+   * never interleaves with a node mutation.
+   */
+  checkpoint?: () => void;
+}
+
+/** How often the crux pass flushes partial progress to disk. Read at call time (not
+ * module load) so a test seam `GRAFT_CRUX_CHECKPOINT_MS=0` (flush on every completed
+ * file) takes effect. */
+function checkpointMs(): number {
+  return Number(process.env.GRAFT_CRUX_CHECKPOINT_MS ?? 15000);
 }
 
 export interface EnrichStats {
@@ -43,6 +59,16 @@ export interface EnrichStats {
   stale: number; // body changed, left with an outdated summary (no LLM this run)
   pending: number; // never summarized and not computed this run
   errors: string[];
+  /** Files whose LLM call failed outright. The count `errors` used to only imply —
+   * a caller has to be able to decide "this build is degraded" without parsing
+   * message strings (#127). */
+  failedFiles: number;
+  /** Files never attempted, because {@link EnrichStats.fatal} stopped the pass. */
+  skippedFiles: number;
+  /** Set when the pass gave up early: quota/auth rejection, or a run of
+   * provider failures. Content-quality misses (#235) count in `failedFiles` but
+   * do not set this. The reason is what `graft build --deep` exits non-zero with. */
+  fatal?: string;
 }
 
 export async function enrichGraph(
@@ -51,7 +77,15 @@ export async function enrichGraph(
   sources: Map<string, string>,
   opts: EnrichOptions = {},
 ): Promise<EnrichStats> {
-  const stats: EnrichStats = { cached: 0, computed: 0, stale: 0, pending: 0, errors: [] };
+  const stats: EnrichStats = {
+    cached: 0,
+    computed: 0,
+    stale: 0,
+    pending: 0,
+    errors: [],
+    failedFiles: 0,
+    skippedFiles: 0,
+  };
 
   // Which nodes actually need an LLM call this run (after cache carry-over).
   const dirty: NodeV1[] = [];
@@ -100,38 +134,91 @@ export async function enrichGraph(
   const files = [...byFile.keys()];
   const limit = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
   let done = 0;
+  const flushEvery = checkpointMs();
+  let lastCheckpoint = Date.now();
+
+  // Shared with the concept pass (`context/build.ts`), so both agree on when a
+  // provider has stopped working. Counted across the whole pass, not per worker:
+  // with `-j 5` the interleaving is what a user sees as "everything is failing now".
+  const gate = new LlmFailureGate();
 
   await mapWithConcurrency(files, limit, async (path) => {
     const fileNodes = byFile.get(path)!;
     const source = sources.get(path)!;
     const lineCount = source.split("\n").length;
 
+    // Once the pass is fatal, the remaining files are not attempted: every call
+    // would fail the same way, and on a metered gateway each one still costs a
+    // request. They are counted so the caller can report what was left undone.
+    if (gate.stopped) {
+      gate.skip();
+      for (const node of fileNodes) {
+        if (node.summary_state === "stale") stats.stale++;
+        else stats.pending++;
+      }
+      // Still reported, so the caller's progress counter reaches `total` instead of
+      // freezing at the file that broke — the abort is announced by the build's
+      // summary, not by a stalled line.
+      opts.onProgress?.({ index: done++, total: files.length, node: path });
+      return;
+    }
+
     const refs: NodeRef[] = fileNodes.map((n) => {
       const [startLine, endLine] = spanLines(n.span, lineCount);
       return { id: n.id, kind: n.kind, signature: n.signature, startLine, endLine };
     });
 
-    const { results, error } = await collectFileCrux(summarizer, path, source, refs);
-    if (error) stats.errors.push(`${path}: ${error}`);
+    const { results, error, quality } = await collectFileCrux(summarizer, path, source, refs);
+    let fileError = error;
+    if (fileError) {
+      stats.errors.push(`${path}: ${fileError}`);
+      gate.record(fileError, { quality });
+    }
 
+    let applied = 0;
     for (const node of fileNodes) {
       const r = results.size > 0 ? results.get(node.id) : undefined;
-      if (!r) {
-        // whole-file call failed, or the model skipped this symbol: keep what it had.
+      // Empty / whitespace-only summaries are not success: caching them as
+      // `ready` made the next `--deep` a permanent cache hit (#172).
+      if (!r || !r.summary.trim()) {
+        // whole-file call failed, the model skipped this symbol, or it returned
+        // an empty summary: keep what it had and leave it retryable.
         if (node.summary_state === "stale") stats.stale++;
         else stats.pending++;
         continue;
       }
-      node.summary = r.summary || null;
+      node.summary = r.summary;
       node.crux = buildCrux(r, node, source, lineCount);
       node.summary_state = "ready";
       stats.computed++;
+      applied++;
+    }
+
+    if (!fileError && refs.length > 0 && applied === 0) {
+      // collectFileCrux already labels a total miss; this catches "got entries
+      // but every summary was blank" so the CLI's #127 degraded-exit path fires.
+      fileError = cruxMissMessage(summarizer, "empty-parsed");
+      stats.errors.push(`${path}: ${fileError}`);
+      gate.record(fileError, { quality: true });
+    } else if (!fileError) {
+      gate.succeeded();
     }
 
     // Report on completion so the counter climbs monotonically under concurrency.
     opts.onProgress?.({ index: done++, total: files.length, node: path });
+
+    // Flush partial crux to disk periodically, so a killed --deep run keeps what it
+    // has already computed (#128). Throttled by wall-clock; the caller's checkpoint
+    // writes wiring.json atomically, and the next run folds it back in by body_hash.
+    if (opts.checkpoint && Date.now() - lastCheckpoint >= flushEvery) {
+      lastCheckpoint = Date.now();
+      opts.checkpoint();
+    }
   });
 
+  stats.failedFiles = gate.failed;
+  stats.skippedFiles = gate.skipped;
+  stats.fatal = gate.fatal;
   return stats;
 }
 
@@ -153,6 +240,11 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+function cruxMissMessage(summarizer: CruxSummarizer, fallback: CruxMissKind): string {
+  const miss = summarizer.lastMiss;
+  return formatCruxMiss(miss?.kind ?? fallback, miss?.finishReason ?? null);
+}
+
 /**
  * Describe every requested definition in a file, re-asking for any the model
  * omits (it sometimes drops entries from a batch). Returns whatever it collected
@@ -163,7 +255,7 @@ async function collectFileCrux(
   path: string,
   source: string,
   refs: NodeRef[],
-): Promise<{ results: Map<string, NodeCrux>; error?: string }> {
+): Promise<{ results: Map<string, NodeCrux>; error?: string; quality?: boolean }> {
   const results = new Map<string, NodeCrux>();
   let missing = refs;
   let error: string | undefined;
@@ -176,6 +268,13 @@ async function collectFileCrux(
       error = err instanceof Error ? err.message : String(err);
       break;
     }
+  }
+  // A total miss used to return `{ results: ∅ }` with no error — enrich left
+  // every node `pending`, the CLI exited 0, and `graft check` told the user to
+  // re-run `--deep` forever (#172). Surface it as a failure like a thrown error.
+  // Content-quality, not quota: count the file, keep going (#235).
+  if (!error && refs.length > 0 && results.size === 0) {
+    return { results, error: cruxMissMessage(summarizer, "empty-toolCalls"), quality: true };
   }
   return { results, error };
 }

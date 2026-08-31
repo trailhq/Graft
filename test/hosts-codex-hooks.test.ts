@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installCodexHooks } from '../src/hosts/codex-hooks.js';
+import { editedFilePath } from '../src/claude/hooks.js';
 
 function fresh(): string { return mkdtempSync(join(tmpdir(), 'graft-cxhooks-')); }
 
@@ -34,13 +35,24 @@ test('writes shim + hooks.json entry, idempotent on re-run', () => {
   const shim = join(home, '.codex', 'hooks', 'graft', 'graft-hooks.cjs');
   assertRunnableShim(shim, 'shim is executable');
   const cfg = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
-  const entries = cfg.hooks.PostToolUse;
-  assert.equal(entries.length, 1);
-  assert.equal(entries[0].matcher, 'Write|Edit|MultiEdit');
-  assert.match(entries[0].hooks[0].command, /post-edit-sync/);
+  // Full Claude-Code parity: retrieval on prompt, orientation on start, blast
+  // radius on edit, one background sync at turn end.
+  const sub = (event: string) => cfg.hooks[event][0].hooks[0].command.match(/cjs" (\S+)$/)?.[1];
+  assert.equal(sub('UserPromptSubmit'), 'prompt', 'the coupling-seed retrieval hook');
+  assert.equal(sub('SessionStart'), 'session-start', 'orientation hook');
+  assert.equal(sub('PostToolUse'), 'post-edit', 'edit hook (sync split out to Stop)');
+  assert.equal(sub('Stop'), 'stop', 'background-sync hook');
+  // the edit matcher must include Codex's native edit tool
+  assert.match(cfg.hooks.PostToolUse[0].matcher, /apply_patch/);
+  // Codex ignores matcher for these, so we omit it rather than write a dead field
+  assert.ok(!('matcher' in cfg.hooks.UserPromptSubmit[0]), 'no matcher on UserPromptSubmit');
+  assert.ok(!('matcher' in cfg.hooks.Stop[0]), 'no matcher on Stop');
+
   const again = installCodexHooks(home);
-  assert.deepEqual(again.map((x) => x.action), ['unchanged', 'unchanged']);
-  assert.equal(JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8')).hooks.PostToolUse.length, 1);
+  assert.deepEqual(again.map((x) => x.action), ['unchanged', 'unchanged'], 'idempotent');
+  const after = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
+  for (const ev of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'])
+    assert.equal(after.hooks[ev].length, 1, `${ev} not duplicated on re-run`);
 });
 
 test('foreign hook entries are preserved; stale graft entries replaced', () => {
@@ -55,9 +67,27 @@ test('foreign hook entries are preserved; stale graft entries replaced', () => {
   installCodexHooks(home);
   const entries = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8')).hooks.PostToolUse;
   assert.equal(entries.length, 2, 'foreign kept, stale graft replaced by fresh');
-  assert.ok(entries.some((e: any) => e.hooks[0].command === 'other-tool'));
-  assert.ok(entries.some((e: any) => /post-edit-sync/.test(JSON.stringify(e))));
-  assert.ok(!JSON.stringify(entries).includes('/old/'));
+  assert.ok(entries.some((e: any) => e.hooks[0].command === 'other-tool'), 'foreign entry preserved');
+  assert.ok(entries.some((e: any) => /graft-hooks\.cjs" post-edit$/.test(e.hooks[0].command)), 'fresh graft entry present');
+  assert.ok(!JSON.stringify(entries).includes('/old/'), 'stale graft entry removed');
+});
+
+test('editedFilePath reads the touched file from BOTH host edit-tool shapes', () => {
+  const dir = '/repo';
+  // Claude Code: Write/Edit state the absolute path directly
+  assert.equal(
+    editedFilePath({ tool_input: { file_path: '/repo/src/a.ts' } }, dir),
+    '/repo/src/a.ts',
+  );
+  // Codex: apply_patch names the file (repo-relative) in the patch header → resolved absolute
+  const patch = '*** Begin Patch\n*** Update File: src/b.ts\n@@\n-old\n+new\n*** End Patch';
+  assert.equal(editedFilePath({ tool_input: { command: patch } }, dir), join(dir, 'src/b.ts'));
+  // an Add File header works too
+  const add = '*** Begin Patch\n*** Add File: pkg/new.rs\n+content\n*** End Patch';
+  assert.equal(editedFilePath({ tool_input: { command: add } }, dir), join(dir, 'pkg/new.rs'));
+  // neither shape present → null (hook stays a clean no-op)
+  assert.equal(editedFilePath({ tool_input: {} }, dir), null);
+  assert.equal(editedFilePath({}, dir), null);
 });
 
 test('unparseable hooks.json is never rewritten', () => {

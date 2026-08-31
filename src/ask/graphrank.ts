@@ -31,6 +31,84 @@ export interface PageRankOptions {
   nodeFilter?: (id: string) => boolean;
 }
 
+/** Immutable graph topology consumed by the PageRank iteration. Preparing it
+ * separately lets a multi-scope query partition one large graph once, instead
+ * of rescanning every node and edge for every scope. */
+export interface PageRankTopology {
+  ids: ReadonlySet<string>;
+  adjacency: ReadonlyMap<string, readonly string[]>;
+}
+
+export type PageRankRunOptions = Pick<PageRankOptions, "alpha" | "iters">;
+
+interface MutablePageRankTopology {
+  ids: Set<string>;
+  adjacency: Map<string, string[]>;
+}
+
+const emptyTopology = (): PageRankTopology => ({
+  ids: new Set<string>(),
+  adjacency: new Map<string, readonly string[]>(),
+});
+
+const link = (adjacency: Map<string, string[]>, source: string, target: string): void => {
+  const neighbours = adjacency.get(source);
+  if (neighbours) neighbours.push(target);
+  else adjacency.set(source, [target]);
+};
+
+/** Build independent PageRank topologies in one node pass and one edge pass.
+ * Edges crossing partitions are excluded, exactly like applying a nodeFilter
+ * for each partition independently. Returning `undefined` omits a node. */
+export function preparePageRankPartitions(
+  graph: GraphV1,
+  partitionOfId: (id: string) => string | undefined,
+): Map<string, PageRankTopology> {
+  const partitionById = new Map<string, string>();
+  const mutable = new Map<string, MutablePageRankTopology>();
+
+  for (const node of graph.nodes) {
+    const partition = partitionOfId(node.id);
+    if (partition === undefined) continue;
+    partitionById.set(node.id, partition);
+    const topology = mutable.get(partition);
+    if (topology) topology.ids.add(node.id);
+    else mutable.set(partition, { ids: new Set([node.id]), adjacency: new Map() });
+  }
+
+  for (const edge of graph.edges) {
+    if (!WALK_RELATIONS.has(edge.relation)) continue;
+    const partition = partitionById.get(edge.source);
+    if (partition === undefined || partitionById.get(edge.target) !== partition) continue;
+    const topology = mutable.get(partition)!;
+    link(topology.adjacency, edge.source, edge.target);
+    link(topology.adjacency, edge.target, edge.source);
+  }
+
+  return new Map(mutable);
+}
+
+/** Prepare one optionally filtered topology. Kept public for callers/tests that
+ * reuse the same graph across multiple seed sets. */
+export function preparePageRankTopology(
+  graph: GraphV1,
+  nodeFilter?: (id: string) => boolean,
+): PageRankTopology {
+  const ids = new Set(
+    graph.nodes.map((node) => node.id).filter((id) => !nodeFilter || nodeFilter(id)),
+  );
+  if (ids.size === 0) return emptyTopology();
+
+  const adjacency = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    if (!WALK_RELATIONS.has(edge.relation)) continue;
+    if (!ids.has(edge.source) || !ids.has(edge.target)) continue;
+    link(adjacency, edge.source, edge.target);
+    link(adjacency, edge.target, edge.source);
+  }
+  return { ids, adjacency };
+}
+
 /**
  * Personalized PageRank over the wiring graph.
  *
@@ -47,28 +125,24 @@ export function personalizedPageRank(
   seeds: Map<string, number>,
   opts: PageRankOptions = {},
 ): Map<string, number> {
+  return personalizedPageRankPrepared(
+    preparePageRankTopology(graph, opts.nodeFilter),
+    seeds,
+    opts,
+  );
+}
+
+/** Run PageRank on an already prepared topology. This is numerically identical
+ * to {@link personalizedPageRank}; it only removes repeated topology scans. */
+export function personalizedPageRankPrepared(
+  topology: PageRankTopology,
+  seeds: Map<string, number>,
+  opts: PageRankRunOptions = {},
+): Map<string, number> {
   const alpha = opts.alpha ?? 0.25;
   const iters = opts.iters ?? 25;
-
-  // Real node ids, restricted to the subgraph when a filter is given. Every
-  // downstream `ids.has(...)` check (edge endpoints, seeds) then naturally
-  // stays within the filtered subgraph, so no other site needs to know about
-  // `nodeFilter` — the walk simply never sees the excluded nodes or edges.
-  const ids = new Set(
-    graph.nodes.map((n) => n.id).filter((id) => !opts.nodeFilter || opts.nodeFilter(id)),
-  );
-
-  // Undirected adjacency over walk relations, endpoints restricted to real nodes.
-  const adj = new Map<string, string[]>();
-  const link = (a: string, b: string) => {
-    (adj.get(a) ?? adj.set(a, []).get(a)!).push(b);
-  };
-  for (const e of graph.edges) {
-    if (!WALK_RELATIONS.has(e.relation)) continue;
-    if (!ids.has(e.source) || !ids.has(e.target)) continue;
-    link(e.source, e.target);
-    link(e.target, e.source);
-  }
+  const ids = topology.ids;
+  const adjacency = topology.adjacency;
 
   // Restart distribution: seed weights, restricted to real nodes, normalized.
   let seedTotal = 0;
@@ -89,7 +163,7 @@ export function personalizedPageRank(
     // O(nodes + seeds) instead of O(dangling × seeds).
     let dangling = 0;
     for (const [id, mass] of rank) {
-      const nbrs = adj.get(id);
+      const nbrs = adjacency.get(id);
       if (!nbrs || nbrs.length === 0) {
         dangling += mass;
         continue;

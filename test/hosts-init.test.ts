@@ -34,9 +34,10 @@ test('explicit agents list overrides detection and flags unknown ids', () => {
 test('all writes every host and re-run converges (idempotent)', () => {
   const home = fresh(); const repo = fresh();
   const first = runHostsInit(repo, { home, all: true });
-  assert.equal(first.written.length, 7);
+  assert.equal(first.written.length, 10);
   const second = runHostsInit(repo, { home, all: true });
   assert.ok(second.written.every((w) => w.action === 'unchanged'));
+  // `agents` and `antigravity` share AGENTS.md, but the fenced section is written once
   const agents = readFileSync(join(repo, 'AGENTS.md'), 'utf8');
   assert.equal(agents.match(/graft:start/g)!.length, 1);
 });

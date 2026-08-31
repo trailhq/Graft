@@ -108,28 +108,29 @@ test("deterministic under input shuffle, including score ties", () => {
   }
 });
 
-// ── rankScopesAndFuse: the participation gate is the SAME two-floor
-// match-STRENGTH signal `federateAsk` (workspace federation) uses — a scope
-// participates iff its top hit's `coverageStrong` (name-only, file-kind-
-// excluded idf share) ≥ STRONG_FLOOR OR its `coverage` (name+path+body idf
-// share) ≥ HIGH_FLOOR. Gated-out scopes go to `alsoMatched`. This is NOT the
-// old `PARTICIPATION_RATIO` (0.25 × raw-lexical-best) ratio — Task 5's
-// investigation proved that ratio "far too lenient, leaks junk, worsens as
-// corpus grows" for exactly this reason: a body-only incidental collision's
-// raw lexical score can clear 0.25× of another scope's best even though it
-// never matched a name/path field at all. These drive `rankScopesAndFuse` end
-// to end (through its `lex`/`strength`/`walk` callback seam, the same seam
-// `ask.ts` drives it through) so a regression here is caught even if
-// `fuseScopes`'s own (pure, post-normalization, ratio-based) gate still
-// passes its tests — that gate is now just a no-op safety net once real
-// scopes have already survived this one. ────────────────────────────────────
+// ── rankScopesAndFuse: since #117, scopes are scored against REPO-WIDE corpus
+// statistics and normalized by a shared denominator, so their scores are
+// directly comparable. Participation is therefore the PARTICIPATION_RATIO
+// share check — a scope must reach 0.25× the best score anywhere in the repo —
+// and gated-out scopes still go to `alsoMatched` for `--in`.
+//
+// Historical note, because it looks like a reversal: this ratio check WAS
+// previously rejected as "far too lenient, leaks junk", and a match-STRENGTH
+// gate (STRONG_FLOOR/HIGH_FLOOR) replaced it. That judgement was correct at the
+// time and is now obsolete for a specific reason — back then every scope was
+// normalized by its OWN best, so each scope's top doc sat at ~1.0 and the ratio
+// compared 1.0 against 1.0, which is vacuous. Against a shared denominator the
+// same ratio compares real magnitudes and does the job it was designed for. The
+// strength floors are still exported and still gate `federateAsk`, which fuses
+// separate repositories and so genuinely has no shared denominator.
+//
+// These drive `rankScopesAndFuse` end to end through its `lex`/`walk` callback
+// seam — the same seam `ask.ts` drives it through. ─────────────────────────
 
-/** Scope "a": five docs with a real raw-lex spread (best = 10), always a
- * strong (name-matched) hit. Scope "b": one doc whose raw score is fixed but
- * whose match-strength (`coverage`/`coverageStrong`) is the probe knob — the
- * exact signal the real gate checks, decoupled from the raw-lex ratio the old
- * (buggy) gate used. No graph walk (PR rescue isn't what's under test). */
-function makeOps(bStrength: { coverage: number; coverageStrong: number }): ScopeRankOps {
+/** Scope "a": five docs with a real raw-lex spread (best = 10). Scope "b": one
+ * doc whose raw score is the probe knob, since raw magnitude is now what
+ * decides participation. No graph walk (PR rescue isn't what's under test). */
+function makeOps(bBest: number): ScopeRankOps {
   const aLex = new Map([
     ["a1", 10],
     ["a2", 8],
@@ -137,10 +138,9 @@ function makeOps(bStrength: { coverage: number; coverageStrong: number }): Scope
     ["a4", 4],
     ["a5", 2],
   ]);
-  const bLex = new Map([["b1", 3]]); // raw score irrelevant to the new gate
+  const bLex = new Map([["b1", bBest]]);
   return {
     lex: (s) => (s === "a" ? new Map(aLex) : new Map(bLex)),
-    strength: (s) => (s === "a" ? { coverage: 1, coverageStrong: 1 } : bStrength),
     walk: () => new Map(),
   };
 }
@@ -150,7 +150,6 @@ test("rankScopesAndFuse: post-normalization rank factors cannot be erased by a t
     // The test remains the strongest raw match even after lexical de-ranking.
     // Normalization therefore restores it to 1.0 while source lands at 0.4.
     lex: () => new Map([["source", 4], ["test", 10]]),
-    strength: () => ({ coverage: 1, coverageStrong: 1 }),
     walk: () => new Map(),
     rankFactor: (_scope, id) => (id === "test" ? 0.35 : 1),
   };
@@ -162,12 +161,50 @@ test("rankScopesAndFuse: post-normalization rank factors cannot be erased by a t
   );
 });
 
-test("rankScopesAndFuse: a scope with ONLY a body-token match (coverageStrong 0, coverage below HIGH_FLOOR) is excluded from ranked and reported in alsoMatched", () => {
-  // b's top hit never matched a name/path field (coverageStrong = 0) and its
-  // overall coverage (0.3) is well under HIGH_FLOOR (0.5) — an incidental
-  // body-comment collision, same shape as the monorepo junk/ repro.
-  const r = rankScopesAndFuse(["a", "b"], makeOps({ coverage: 0.3, coverageStrong: 0 }), 0.5, 0.05);
-  assert.deepEqual(r.federated, ["a"], "b must not federate on a body-only, sub-floor match");
+test("rankScopesAndFuse: optional collapse sees components and supplies the docs combined across scopes", () => {
+  let hookCalled = false;
+  const ops: ScopeRankOps = {
+    lex: () => new Map([["a1", 10], ["a2", 4]]),
+    walk: () => new Map([["a2", 0.8]]),
+    rankFactor: (_scope, id) => (id === "a2" ? 0.5 : 1),
+    collapseCandidates: (candidates) => {
+      hookCalled = true;
+      const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+      assert.deepEqual(
+        {
+          lexical: byId.get("a1")?.lexical,
+          graph: byId.get("a1")?.graph,
+          rankFactor: byId.get("a1")?.rankFactor,
+          baseline: byId.get("a1")?.score,
+        },
+        { lexical: 1, graph: 0, rankFactor: 1, baseline: 1 },
+      );
+      assert.deepEqual(
+        {
+          lexical: byId.get("a2")?.lexical,
+          graph: byId.get("a2")?.graph,
+          rankFactor: byId.get("a2")?.rankFactor,
+          baseline: byId.get("a2")?.score,
+        },
+        { lexical: 0.4, graph: 0.8, rankFactor: 0.5, baseline: 0.4 },
+      );
+      return [{ id: "file-a", scope: "app", score: 1.1 }];
+    },
+  };
+
+  const result = rankScopesAndFuse(["app"], ops, 0.5, 0.05);
+  assert.equal(hookCalled, true);
+  assert.deepEqual(result.ranked, [
+    { id: "file-a", scope: "app", score: 1.1 },
+  ]);
+});
+
+test("rankScopesAndFuse: a scope whose best hit is a weak incidental match is excluded from ranked and reported in alsoMatched", () => {
+  // b's only hit scores 1 against a repo best of 10 — 0.1, well under the 0.25
+  // participation ratio. An incidental body-comment collision, same shape as
+  // the monorepo junk/ repro.
+  const r = rankScopesAndFuse(["a", "b"], makeOps(1), 0.5, 0.05);
+  assert.deepEqual(r.federated, ["a"], "b must not federate on a weak match");
   assert.deepEqual(r.alsoMatched, [{ scope: "b", bestId: "b1" }]);
   assert.ok(
     r.ranked.every((d) => d.scope === "a"),
@@ -176,29 +213,32 @@ test("rankScopesAndFuse: a scope with ONLY a body-token match (coverageStrong 0,
   assert.deepEqual(
     r.ranked.map((d) => d.id),
     ["a1", "a2", "a3", "a4", "a5"],
-    "sole surviving scope passes through in raw score order",
+    "sole surviving scope passes through in score order",
   );
 });
 
-test("rankScopesAndFuse: positive — a scope with a real NAME/PATH match (coverageStrong ≥ STRONG_FLOOR) federates", () => {
-  const r = rankScopesAndFuse(["a", "b"], makeOps({ coverage: 0.2, coverageStrong: STRONG_FLOOR }), 0.5, 0.05);
-  assert.deepEqual([...r.federated].sort(), ["a", "b"], "b federates at exactly the strength gate");
+test("rankScopesAndFuse: positive — a scope with a genuinely competitive match federates", () => {
+  const r = rankScopesAndFuse(["a", "b"], makeOps(9), 0.5, 0.05);
+  assert.deepEqual([...r.federated].sort(), ["a", "b"], "b federates on a strong score");
   assert.deepEqual(r.alsoMatched, []);
   assert.ok(
     r.ranked.some((d) => d.id === "b1"),
-    "b's doc appears in the fused order",
+    "b's doc appears in the combined order",
   );
+  // Comparability: b's 9 sits between a's 10 and a's 8, which is precisely what
+  // per-scope normalization could not express — it put b1 level with a1.
+  assert.deepEqual(r.ranked.slice(0, 3).map((d) => d.id), ["a1", "b1", "a2"]);
 });
 
-test("rankScopesAndFuse: recall valve — body-only (coverageStrong 0) but BROAD (coverage ≥ HIGH_FLOOR) still federates", () => {
-  const r = rankScopesAndFuse(["a", "b"], makeOps({ coverage: HIGH_FLOOR, coverageStrong: 0 }), 0.5, 0.05);
-  assert.deepEqual([...r.federated].sort(), ["a", "b"], "a broad body-only match still federates via HIGH_FLOOR");
+test("rankScopesAndFuse: a scope exactly at the participation ratio federates (inclusive)", () => {
+  const r = rankScopesAndFuse(["a", "b"], makeOps(10 * PARTICIPATION_RATIO), 0.5, 0.05);
+  assert.deepEqual([...r.federated].sort(), ["a", "b"]);
   assert.deepEqual(r.alsoMatched, []);
   assert.ok(r.ranked.some((d) => d.id === "b1"));
 });
 
-test("formatAsk: 'also matched … --in …' actually renders for a scope gated out on match strength", () => {
-  const fusion = rankScopesAndFuse(["a", "b"], makeOps({ coverage: 0.3, coverageStrong: 0 }), 0.5, 0.05);
+test("formatAsk: 'also matched … --in …' actually renders for a scope gated out of participation", () => {
+  const fusion = rankScopesAndFuse(["a", "b"], makeOps(1), 0.5, 0.05);
   const hits: AskHit[] = fusion.ranked.map((d) => ({
     kind: "symbol",
     title: d.id,

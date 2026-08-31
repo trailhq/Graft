@@ -4,7 +4,7 @@
  * so `graft viz` needs no install or build step at runtime.
  */
 import { build } from "esbuild";
-import { mkdirSync, copyFileSync } from "node:fs";
+import { mkdirSync, copyFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,3 +26,19 @@ for (const asset of ["index.html", "style.css"]) {
 }
 
 console.log("viewer bundle → dist/viewer/");
+
+// The generic (breadth) tier's tags.scm query files are runtime assets — tsc
+// doesn't emit non-TS files, so copy them into dist so the published package
+// (which ships `dist` only) can load them. generic.ts resolves dist/graph/queries
+// first, then falls back to src/graph/queries for local dev.
+const scmSrc = join(root, "src", "graph", "queries");
+const scmOut = join(root, "dist", "graph", "queries");
+mkdirSync(scmOut, { recursive: true });
+let scmCount = 0;
+for (const f of readdirSync(scmSrc)) {
+  if (f.endsWith(".scm")) {
+    copyFileSync(join(scmSrc, f), join(scmOut, f));
+    scmCount++;
+  }
+}
+console.log(`grammar queries → dist/graph/queries/ (${scmCount} .scm)`);

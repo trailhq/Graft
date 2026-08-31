@@ -1,12 +1,18 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
-import { join, basename } from 'node:path';
+import { join, basename, isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
 import { readWiring } from './stats.js';
 import { formatBlastRadius, relevantRetrieval, formatOrientation } from './format.js';
 import { indexFreshness, staleBanner } from '../context/check.js';
-import { patchStats, readStats, acquireLock, readSession, writeSession } from './state.js';
+import { patchStats, readStats, acquireLock, readSession, writeSession, resolveContextDir } from './state.js';
 import { graftCliPath, claudeScriptPath } from './paths.js';
+import { runUpkeep } from '../upkeep-run.js';
+import { runningVersion } from '../upkeep.js';
+import { flushClosedSessions, summarizeSession } from '../telemetry/sessions.js';
+import { hasSavingsTally, lastAssistantTurn } from './tally.js';
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
+import { classifyToolUse, isMcpToolName, isGraftMcpTool, parseSavings, recordToolUse, type ToolKind } from './session-metrics.js';
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
  * conversational ("yes go ahead", "thanks") and the coverage gate can't judge
@@ -56,11 +62,26 @@ export function promptAskTimeout(dir: string): number {
   return Math.max(MIN_CHILD_TIMEOUT_MS, installed - HOOK_OVERHEAD_MS);
 }
 
-/** The timeout on this repo's graft hook entry for `event`, or null if it can't be
- * read (no settings file, hand-edited shape, unparseable JSON). */
-function installedHookTimeout(dir: string, event: string): number | null {
+/**
+ * Every settings file Claude Code merges hook definitions from, for a session
+ * rooted at `dir`. The per-repo file is not the only place graft's hooks can be
+ * installed: declaring them once at the user level wires every repo on the
+ * machine at once, and such a repo has no `.claude/settings.json` at all.
+ */
+function hookSettingsFiles(dir: string): string[] {
+  const user = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+  return [
+    join(dir, '.claude', 'settings.json'),
+    join(dir, '.claude', 'settings.local.json'),
+    join(user, 'settings.json'),
+  ];
+}
+
+/** The timeout on one settings file's graft hook entry for `event`, or null if it
+ * can't be read (no settings file, hand-edited shape, unparseable JSON). */
+function hookTimeoutIn(file: string, event: string): number | null {
   try {
-    const settings = JSON.parse(readFileSync(join(dir, '.claude', 'settings.json'), 'utf8')) as any;
+    const settings = JSON.parse(readFileSync(file, 'utf8')) as any;
     const blocks = settings?.hooks?.[event];
     if (!Array.isArray(blocks)) return null;
     for (const block of blocks) {
@@ -74,6 +95,39 @@ function installedHookTimeout(dir: string, event: string): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The budget this hook is actually running under, or null when no settings file
+ * declares one.
+ *
+ * The smallest declared timeout wins rather than the nearest, because when more
+ * than one file declares the hook Claude Code runs every matching entry and this
+ * process cannot tell which one launched it. Guessing high is the expensive
+ * mistake: an overrunning child gets the whole hook SIGKILLed, so `emit()` and
+ * `writeSession()` never run and the turn silently gets no retrieval at all.
+ * Guessing low only shortens one query.
+ */
+function installedHookTimeout(dir: string, event: string): number | null {
+  let smallest: number | null = null;
+  for (const file of hookSettingsFiles(dir)) {
+    const timeout = hookTimeoutIn(file, event);
+    if (timeout === null) continue;
+    if (smallest === null || timeout < smallest) smallest = timeout;
+  }
+  return smallest;
+}
+
+/**
+ * Append `--dir <contextDir>` for the hooks' own `graft ask`/`graft check`
+ * children — the one place in this file that spawns the CLI itself rather
+ * than reading `graft/` off disk (which already resolves through
+ * `resolveContextDir` inside `util/state.ts` and `claude/stats.ts`). A no-op
+ * when `GRAFT_DIR` isn't set, so an unconfigured repo's spawned CLI sees
+ * byte-identical argv to before this existed.
+ */
+function withContextDirArg(dir: string, args: string[]): string[] {
+  return process.env.GRAFT_DIR ? [...args, '--dir', resolveContextDir(dir)] : args;
 }
 
 function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_MS): any | null {
@@ -95,12 +149,36 @@ function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_
     return null;
   }
 }
+
 function emit(eventName: string, additionalContext: string): void {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: eventName, additionalContext } }));
 }
 
+/**
+ * The absolute path of the file a PostToolUse edit touched, across host edit-tool
+ * shapes:
+ *   - Claude Code (`Write`/`Edit`/`MultiEdit`) states it directly as
+ *     `tool_input.file_path` (already absolute).
+ *   - Codex (`apply_patch`) carries the whole patch in `tool_input.command` and
+ *     names the file in the patch header (`*** Add File:` / `*** Update File:`),
+ *     as a repo-relative path — resolved against `dir` here. Take the first
+ *     Add/Update target; that one file is enough to mark the graph dirty and
+ *     draw a blast radius (the sync re-checks the whole tree anyway).
+ * Returns null when neither shape yields a path, so the hook stays a clean no-op.
+ */
+export function editedFilePath(input: any, dir: string): string | null {
+  const direct = input?.tool_input?.file_path;
+  if (typeof direct === 'string' && direct.trim()) return direct;
+  const cmd = input?.tool_input?.command;
+  if (typeof cmd === 'string' && cmd) {
+    const m = /^\*\*\*\s+(?:Add|Update)\s+File:\s+(.+?)\s*$/m.exec(cmd);
+    if (m) return isAbsolute(m[1]) ? m[1] : join(dir, m[1]);
+  }
+  return null;
+}
+
 async function handlePostEdit(input: any, dir: string): Promise<void> {
-  const file: string | undefined = input?.tool_input?.file_path;
+  const file = editedFilePath(input, dir);
   if (!file || underGraft(dir, file)) return;
   // No `graft check` here (was: staleCount via checkStaleCount()). `check` walks
   // the whole graph, so on a large repo it can run well past this hook's timeout
@@ -155,25 +233,122 @@ export function lastFileScopeHint(dir: string, lastFile: string | null | undefin
   }
 }
 
-/** PostToolUse on a graft retrieval tool. Its rendered output carries one (or
- * more) `[graft] tokens saved ≈ N` footers — the same numbers the agent just
- * read. Sum them and add to the session's running total so the statusline's
- * `~N tok saved` reflects what graft saved this session, across CLI and MCP.
- * Pure parse of the payload the hook already received (no re-run), and a no-op
- * unless a footer is present — so it stays cheap on unrelated Bash calls. */
-function handleToolSavings(input: any, dir: string): void {
-  const blob = JSON.stringify(input?.tool_response ?? input ?? '');
-  let total = 0;
-  for (const m of blob.matchAll(/\[graft\] tokens saved ≈ ([\d,]+)/g))
-    total += Number(m[1].replace(/,/g, '')) || 0;
-  if (total <= 0) return;
-  const id = input?.session_id || 'default';
-  const s = readSession(dir, id);
-  s.savedTokens = (s.savedTokens ?? 0) + total;
-  writeSession(dir, id, s);
+/**
+ * PostToolUse on a retrieval tool. Two jobs, both a pure parse of the payload the
+ * hook already received (no re-run):
+ *
+ *   1. Score the usage mix: classify the tool as a graft retrieval or a source
+ *      read (Read/Grep/Glob) and bump the session's `graftReads`/`sourceReads`.
+ *      Until this ran, those counters were never incremented, so
+ *      `session_summary` telemetry shipped 0/0 for every session.
+ *   2. Sum any `[graft] tokens saved ≈ N` footers in the output into the running
+ *      `savedTokens` total, so the statusline's `~N tok saved` reflects the
+ *      session across CLI and MCP.
+ *
+ * A `[graft]` footer is itself proof graft ran, so it also counts as a graft
+ * read even when the tool name alone (a bare `Bash`) couldn't say so. A graft use
+ * also flags the turn (`turnUsedGraft`) so the Stop hook's tally can resolve
+ * whether the reply told the user what it saved. Stays a no-op on the
+ * Write/Edit/unrelated-Bash majority: nothing to classify and no footer means
+ * nothing is written.
+ */
+function handleToolUse(input: any, dir: string): void {
+  recordToolUse(dir, input?.session_id || 'default',
+    { ...classifyAndScore(input?.tool_name, input?.tool_input?.command, () => input?.tool_response ?? input), host: 'claude-code' });
 }
 
-function handleStop(dir: string): void {
+/**
+ * Classify a tool use and, only when it could carry a graft footer, parse the
+ * savings out of its (lazily-serialised) output.
+ *
+ * Source reads (Read/Grep/Glob) never print a `[graft]` footer, and their output
+ * is a whole file or every match — serialising and regexing that on every read
+ * is the expensive, pointless case the widened PostToolUse matcher would
+ * otherwise hit. So skip `payload()` entirely for them. For anything else, a
+ * footer is itself proof graft ran (a bare `Bash graft …` the name couldn't
+ * classify), so its presence upgrades the kind to 'graft'.
+ */
+function classifyAndScore(
+  toolName: string | undefined,
+  command: string | undefined,
+  payload: () => unknown,
+): { kind: ToolKind | null; savedTokens: number } {
+  let kind = classifyToolUse(toolName, command);
+  if (kind === 'source') return { kind, savedTokens: 0 };
+  const savedTokens = parseSavings(JSON.stringify(payload() ?? ''));
+  if (savedTokens > 0) kind = 'graft';
+  return { kind, savedTokens };
+}
+
+/**
+ * Cursor `postToolUse` (https://cursor.com/docs/hooks). Same job as
+ * {@link handleToolUse} but over Cursor's payload shape: `tool_output` holds the
+ * JSON-stringified result (a Shell `graft …` call's footer lives in its stdout),
+ * and the session key is `conversation_id`. MCP graft calls are skipped here —
+ * `afterMCPExecution` owns them, and counting both would double the graft tally.
+ * The skip covers both the prefixed (`MCP:graft_find_code`) and bare
+ * (`graft_find_code`) tool-name shapes, so the guard — not just the installed
+ * matcher — is what prevents the double count.
+ */
+function handleCursorPostTool(input: any, dir: string): void {
+  const toolName = String(input?.tool_name ?? '');
+  if (isMcpToolName(toolName) || isGraftMcpTool(toolName)) return; // handled by handleCursorMcp
+  const command = input?.tool_input?.command ?? input?.tool_input?.cmd;
+  recordToolUse(dir, cursorSessionId(input),
+    { ...classifyAndScore(toolName, command, () => input?.tool_output ?? input?.tool_response ?? input), host: 'cursor' });
+}
+
+/**
+ * Cursor `afterMCPExecution`: fires only for MCP tools, so a graft tool is
+ * recognised by its name and its savings read out of `result_json`. This is the
+ * one place graft MCP calls are counted for Cursor.
+ */
+function handleCursorMcp(input: any, dir: string): void {
+  const toolName = String(input?.tool_name ?? '');
+  if (!isGraftMcpTool(toolName)) return;
+  const savedTokens = parseSavings(JSON.stringify(input?.result_json ?? input?.result ?? input ?? ''));
+  recordToolUse(dir, cursorSessionId(input), { kind: 'graft', savedTokens, host: 'cursor' });
+}
+
+/** Cursor keys a chat by `conversation_id` (its `session_id` equivalent). */
+function cursorSessionId(input: any): string {
+  return input?.conversation_id || input?.session_id || 'default';
+}
+
+/**
+ * At turn end: did the reply the user just read say what graft saved?
+ *
+ * Runs only on turns the tool-savings hook flagged, so a conversational turn
+ * costs nothing. A turn we cannot observe — a host whose Stop hook names no
+ * transcript, an unreadable file, or a Stop that fires before the final prose
+ * is on disk — is counted in NEITHER total: the ratio these two numbers form
+ * has to mean "of the turns we could check", not "of the turns we tried to".
+ */
+function countTallyTurn(input: any, dir: string): void {
+  try {
+    const id = input?.session_id || 'default';
+    const s = readSession(dir, id);
+    if (!s.turnUsedGraft) return;
+    const turn = lastAssistantTurn(input?.transcript_path);
+    // Same reply as last time we looked: no new prose has landed, so this Stop
+    // is a duplicate or a race with the transcript write. Drop the turn rather
+    // than judge it on a stale message.
+    if (!turn || turn.uuid === s.lastTallyUuid) {
+      writeSession(dir, id, { ...s, turnUsedGraft: false });
+      return;
+    }
+    s.graftTurns = (s.graftTurns ?? 0) + 1;
+    if (hasSavingsTally(turn.text)) s.reportedTurns = (s.reportedTurns ?? 0) + 1;
+    s.turnUsedGraft = false;
+    s.lastTallyUuid = turn.uuid;
+    writeSession(dir, id, s);
+  } catch {
+    // A turn-end metric is never worth failing the graph sync over.
+  }
+}
+
+function handleStop(input: any, dir: string): void {
+  countTallyTurn(input, dir);
   // sync-run.js ships next to this module inside the package, so it resolves in
   // any repo that installs graft (not just graft's own). Defensive existsSync:
   // if the package is somehow incomplete, skip rather than wedge on syncing:true.
@@ -184,7 +359,7 @@ function handleStop(dir: string): void {
   const stats = readStats(dir);
   if (stats?.dirty && acquireLock(dir)) {
     patchStats(dir, { syncing: true });
-    const child = spawn(process.execPath, [syncRun, dir], { detached: true, stdio: 'ignore' });
+    const child = spawn(process.execPath, [syncRun, dir], { detached: true, stdio: 'ignore', windowsHide: true });
     child.unref();
   }
 }
@@ -194,21 +369,43 @@ export async function main(event: string): Promise<void> {
   const dir = projectDir(input);
 
   if (event === 'session-start') {
+    // Before anything is emitted: refresh this repo's wiring if it was written by
+    // an older graft, and pick up any cached "newer version on npm" answer.
+    // background:false — a hook must never touch the network; the CLI and the MCP
+    // server fill that cache, this only reads it.
+    const upkeep = runUpkeep(dir, runningVersion(), { background: false }).lines;
+    // Roll up any session that ended since we were last here. Queue-only — the
+    // hook still touches no network; the CLI or the MCP server sends it later.
+    flushClosedSessions(dir);
     try {
-      const idx = readFileSync(join(dir, 'graft', 'INDEX.md'), 'utf8');
+      const idx = readFileSync(join(resolveContextDir(dir), 'INDEX.md'), 'utf8');
       const banner = staleBanner(indexFreshness(dir)) ?? undefined;
-      emit('SessionStart', formatOrientation(idx, undefined, banner));
-    } catch { /* no INDEX.md — skip */ }
+      const orientation = formatOrientation(idx, undefined, banner);
+      emit('SessionStart', upkeep.length ? `${upkeep.join('\n')}\n\n${orientation}` : orientation);
+    } catch {
+      // No INDEX.md (never built here). An upgrade nudge is still worth saying.
+      if (upkeep.length) emit('SessionStart', upkeep.join('\n'));
+    }
     return;
   }
 
   if (event === 'post-edit') { await handlePostEdit(input, dir); return; }
 
-  if (event === 'tool-savings') { handleToolSavings(input, dir); return; }
+  if (event === 'tool-savings') { handleToolUse(input, dir); return; }
 
-  if (event === 'stop') { handleStop(dir); return; }
+  if (event === 'cursor-post-tool') { handleCursorPostTool(input, dir); return; }
 
-  if (event === 'post-edit-sync') { await handlePostEdit(input, dir); handleStop(dir); return; }
+  if (event === 'cursor-mcp') { handleCursorMcp(input, dir); return; }
+
+  // Cursor closes a chat: force-close THIS conversation into a bucketed
+  // `session_summary` now (its file's mtime is fresh, so the idle sweep would
+  // skip it). Attributed to Cursor. The idle sweep stays on Claude's
+  // session-start, whose Stop fires per turn and so has no real end signal.
+  if (event === 'cursor-session-end') { summarizeSession(dir, cursorSessionId(input), { host: 'cursor' }); return; }
+
+  if (event === 'stop') { handleStop(input, dir); return; }
+
+  if (event === 'post-edit-sync') { await handlePostEdit(input, dir); handleStop(input, dir); return; }
 
   if (event === 'prompt') {
     const prompt = String(input?.prompt ?? '').trim();
@@ -219,7 +416,7 @@ export async function main(event: string): Promise<void> {
     // pulls spans itself via `graft ask --source` when a pointer looks right.
     // relevantRetrieval then drops the pack entirely when the prompt barely
     // overlaps the top hit or when every hit was already injected this session.
-    const askArgs = ['ask', prompt, '.', '--json', '-n', '3'];
+    const askArgs = withContextDirArg(dir, ['ask', prompt, '.', '--json', '-n', '3']);
     // "You're working in backend/, weight it": only fires on a multi-scope
     // repo whose lastFile resolves cleanly to one scope — see lastFileScopeHint.
     const scopeHint = lastFileScopeHint(dir, readStats(dir)?.lastFile);

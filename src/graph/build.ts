@@ -18,10 +18,12 @@ import { basename, dirname, resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { contextDirFor, ensureGitignored, ensureSearchable } from "../context/node-file.js";
 import { extractFile, languageLabelOf, languageOf, type RawEdge } from "./extract.js";
+import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
+import { containerLangOf, extractContainer, warmContainerGrammars } from "./container.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
-import { readIncludeDirs } from "../util/state.js";
+import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
 import {
   emptyExtractCache,
   readExtractCache,
@@ -30,7 +32,7 @@ import {
 } from "./extract-cache.js";
 import { writeFingerprint } from "./fingerprint.js";
 import { seedGraph, type SeedResult } from "./seed.js";
-import { listSourceStats } from "./source-files.js";
+import { filterByOnlyDirs, listSourceStats } from "./source-files.js";
 import { resolveEdges, type GoModule } from "./resolve.js";
 import { enrichGraph, type EnrichStats } from "./enrich.js";
 import { readGraph, writeGraph, wiringPath } from "./write.js";
@@ -78,10 +80,19 @@ export interface GraphBuildOptions {
    * the pre-query refresh (`graph/refresh.ts`); an explicit `graft build` never
    * sets it. See the write block in {@link buildGraph} for why the split exists. */
   graphOnly?: boolean;
+  /** Opt-in compiler-grade edge enrichment via a language server (`graft build
+   * --lsp`): adds `lsp_resolved` call edges the AST resolver couldn't (member
+   * calls, breadth-tier calls). Off by default — needs a server on PATH and is
+   * slower; the graph is fully functional without it. */
+  lsp?: boolean;
   /** Run the Tier-2 LLM meaning pass. Absent → Tier-1 only (cache is still preserved). */
   summarizer?: CruxSummarizer;
   /** Max files summarized in parallel during the Tier-2 pass. Default is set in enrich. */
   concurrency?: number;
+  /** Repo-relative directory prefixes to limit the build to (`--only-dir`). When
+   * set, only files under these prefixes are indexed; the list is recorded in the
+   * fingerprint so the freshness probe enumerates the same set. */
+  onlyDirs?: string[];
   onProgress?: (info: {
     phase: "parse" | "enrich";
     index: number;
@@ -145,8 +156,13 @@ export async function buildGraph(
   const outDir = contextDirFor(root, opts.contextDir);
   // Enumerate once: source extraction, scope discovery, and Go module
   // resolution must agree on the same Git-ignore-aware working-tree view —
-  // including the repo's persisted `--include-dir` override.
-  const repoFiles = walkDir(root, readIncludeDirs(root));
+  // including the repo's persisted directory and submodule choices.
+  const walked = walkDir(root, readIncludeDirs(root), {
+    followSubmodules: readFollowSubmodules(root),
+    followNestedRepos: readFollowNestedRepos(root),
+  });
+  const onlyDirs = opts.onlyDirs && opts.onlyDirs.length > 0 ? new Set(opts.onlyDirs) : undefined;
+  const repoFiles = filterByOnlyDirs(walked, root, onlyDirs);
   const files = listSourceStats(root, outDir, repoFiles);
   const discoveredScopes = discoverScopes(root, repoFiles);
 
@@ -174,11 +190,30 @@ export async function buildGraph(
   let parsed = 0;
   let reused = 0;
 
+  // Breadth tier: WASM grammars load asynchronously, so warm the ones this repo
+  // needs ONCE here (buildGraph is async) before the synchronous parse loop below
+  // can call extractGeneric. Depth-tier (native) grammars need no warmup.
+  await warmGenericGrammars(
+    new Set(files.map((f) => genericLangOf(f.abs)?.name).filter((n): n is string => !!n)),
+  );
+  // Container tier (.vue and friends) loads its wrapper grammars the same way,
+  // for the same reason: extractContainer runs inside the sync loop below.
+  await warmContainerGrammars(
+    new Set(files.map((f) => containerLangOf(f.abs)?.name).filter((n): n is string => !!n)),
+  );
+
   files.forEach((f, i) => {
     const rel = f.rel;
     opts.onProgress?.({ phase: "parse", index: i, total: files.length, file: rel });
-    const lang = languageOf(f.abs)!;
-    const label = languageLabelOf(f.abs)!;
+    // Depth tier (hand-written, native grammar) if a language claims the file;
+    // otherwise the breadth tier (generic tags.scm over a WASM grammar).
+    const lang = languageOf(f.abs);
+    // A container is neither tier: its wrapper grammar only locates the embedded
+    // block, which then goes to the depth-tier extractor. Checked before the
+    // breadth tier so a future grammar claiming .vue can't shadow it.
+    const container = lang ? null : containerLangOf(f.abs);
+    const generic = lang || container ? null : genericLangOf(f.abs);
+    const label = languageLabelOf(f.abs) ?? container?.name ?? generic?.name ?? "unknown";
     const cached = priorExtract.files[rel];
 
     // Every file is read and hashed, every build — only the *parse* is memoized.
@@ -225,7 +260,11 @@ export async function buildGraph(
 
     parsed++;
     try {
-      const { nodes: fileNodes, rawEdges: fileEdges } = extractFile(rel, source, lang);
+      const { nodes: fileNodes, rawEdges: fileEdges } = lang
+        ? extractFile(rel, source, lang)
+        : container
+          ? extractContainer(rel, source, container)
+          : extractGeneric(rel, source, generic!.name);
       nodes.push(...fileNodes);
       rawEdges.push(...fileEdges);
       sources.set(rel, source);
@@ -251,22 +290,14 @@ export async function buildGraph(
 
   const edges = resolveEdges(nodes, rawEdges, { goModules: readGoModules(root, repoFiles) });
 
-  // graph.json is its own Tier-2 cache: fold in the prior meaning layer so an
-  // unchanged body is never re-summarized (and a Tier-1-only run never wipes it).
-  const prior = readGraph(wiringPath(outDir));
-  const priorById = new Map((prior?.nodes ?? []).map((n) => [n.id, n]));
-  const meaning = await enrichGraph(nodes, priorById, sources, {
-    summarizer: opts.summarizer,
-    concurrency: opts.concurrency,
-    onProgress: ({ index, total, node }) =>
-      opts.onProgress?.({ phase: "enrich", index, total, file: node }),
-  });
-  errors.push(...meaning.errors);
-
   // Guard 5 (minimum-substance): node counts aren't known until nodes are
   // assembled, so the merge-tiny-scopes-into-root guard runs here.
   const scopes = applyMinSubstanceGuard(discoveredScopes, nodes);
 
+  // Assemble the graph BEFORE the meaning pass, so the crux pass can checkpoint it to
+  // disk periodically (#128): crux/summary mutate node objects in place and never
+  // change the node/edge SET, so `meta` stays valid; the opt-in LSP pass below is the
+  // only thing that adds edges, and it runs before the final write.
   const graph: GraphV1 = {
     meta: {
       version: 1,
@@ -278,6 +309,32 @@ export async function buildGraph(
     nodes,
     edges,
   };
+
+  // graph.json is its own Tier-2 cache: fold in the prior meaning layer so an
+  // unchanged body is never re-summarized (and a Tier-1-only run never wipes it).
+  // Read BEFORE the first checkpoint can overwrite wiring.json.
+  const prior = readGraph(wiringPath(outDir));
+  const priorById = new Map((prior?.nodes ?? []).map((n) => [n.id, n]));
+  const meaning = await enrichGraph(nodes, priorById, sources, {
+    summarizer: opts.summarizer,
+    concurrency: opts.concurrency,
+    onProgress: ({ index, total, node }) =>
+      opts.onProgress?.({ phase: "enrich", index, total, file: node }),
+    // Periodic durability flush of partial crux; the next run folds it back in by
+    // body_hash, so an interrupted --deep run never repays the crux it computed.
+    checkpoint: () => writeGraph(graph, outDir),
+  });
+  errors.push(...meaning.errors);
+
+  // Opt-in compiler-grade enrichment (adds lsp_resolved call edges in place).
+  // Runs on the assembled graph so callee positions map back to nodes; never
+  // touches the extraction cache (Tier-1 stays pristine, cold==incremental).
+  if (opts.lsp) {
+    const { enrichWithLsp } = await import("./lsp/enrich.js");
+    const r = await enrichWithLsp(graph, root);
+    graph.meta.edgeCount = graph.edges.length;
+    opts.onProgress?.({ phase: "enrich", index: r.added, total: r.queried, file: `lsp:${r.server ?? "none"}` });
+  }
 
   const graphPath = writeGraph(graph, outDir);
   // `ask`'s token/IDF sidecar — moves per-query corpus tokenization to build
@@ -301,7 +358,7 @@ export async function buildGraph(
   // these source bytes." Nothing about the projections below — which is why it is
   // safe to write here, and why `graphOnly` builds (the query path, which stops
   // right after this line) are still recorded as fresh.
-  writeFingerprint(outDir, entries);
+  writeFingerprint(outDir, entries, opts.onlyDirs);
 
   // Tier-2 passive surface: project the nodes into per-file markdown cards, and
   // refresh the INDEX roster. Pure projection — no LLM, no network.

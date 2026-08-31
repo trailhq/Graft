@@ -26,7 +26,7 @@ export function renderStatusline(
   session: SessionState | null,
   ctx: { ctxPct: number | null },
 ): string[] {
-  if (!stats || stats.nodeCount === 0) {
+  if (!stats) {
     return [C.muted('◤ graft · not built · run ') + C.text('graft build')];
   }
   const top = [C.muted('◤ ') + C.indigo('graft'), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];
@@ -217,7 +217,7 @@ export function formatOrientation(indexMd: string, budgetBytes = 1500, staleNote
     `  In a monorepo, add --in <path>/ to ask/grep/callers to scope to one sub-project; hits are labeled [scope/].\n` +
     `  Already know the file or symbol to change? Go straight to it: graft grep "<symbol>", read the span, edit. Save ask for when you don't yet know where the code lives.\n` +
     `  Refactor, rename, or multi-file change? Run graft callers <sym> --depth all FIRST to map every connected file; editing the primary file and stopping is the classic miss (platform siblings, a new file to extract).\n` +
-    `Each tool prints a "[graft] tokens saved ≈ N" footer; when you used graft this turn, close your reply with a one-line tally of the total saved (e.g. 🌱 graft saved ~12k tokens this turn, 3 calls).\n`;
+    `Each tool opens its output with a "[graft] tokens saved ≈ N" line; when you used graft this turn, close your reply with a one-line tally of the total saved (e.g. 🌱 graft saved ~12k tokens this turn, 3 calls). Never pipe a graft command through head/tail — it is already capped, and clipping drops that line.\n`;
   const banner = staleNote ? `${staleNote}\n\n` : "";
   return `${banner}${directive}\nrepo map (graft/INDEX.md):\n${indexMd.slice(0, budgetBytes)}`;
 }

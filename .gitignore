@@ -24,3 +24,7 @@ transcripts/
 
 # Local git worktrees for isolated feature work
 .worktrees/
+
+# Cursor project config — written per machine by `graft init` (hooks, MCP, rule),
+# a personal setup like the Claude settings above, not a shared artifact.
+.cursor/
