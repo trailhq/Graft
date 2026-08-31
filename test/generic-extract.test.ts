@@ -84,7 +84,7 @@ test("the EXISTING resolver resolves generic-tier Rust calls by name", async () 
 });
 
 // One inline snippet per breadth language, each exercising a definition + a call
-// that must resolve. Java/Ruby/C# calls target METHODS — proving the generic-origin
+// that must resolve. Java/Ruby calls target METHODS — proving the generic-origin
 // call-kind widening (resolve.ts) works, not just function-target languages.
 const SNIPPETS: Array<{ lang: string; file: string; src: string; defs: string[]; call: [string, string] }> = [
   {
@@ -99,11 +99,6 @@ const SNIPPETS: Array<{ lang: string; file: string; src: string; defs: string[];
     lang: "ruby", file: "a.rb",
     src: `class Widget\n  def render\n    self.draw\n  end\n  def draw\n    1\n  end\nend\n`,
     defs: ["class:Widget", "method:draw", "method:render"], call: ["render", "draw"],
-  },
-  {
-    lang: "c_sharp", file: "A.cs",
-    src: `class A {\n  int Run() { return Helper(); }\n  int Helper() { return 1; }\n}\n`,
-    defs: ["class:A", "method:Helper", "method:Run"], call: ["Run", "Helper"],
   },
   {
     lang: "c", file: "a.c",

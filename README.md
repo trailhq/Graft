@@ -196,11 +196,13 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
   **Kotlin**, **PHP**, **Swift** (classes, structs, enums, actors, protocols;
   extension members attach to the extended type), **R** (`.R`/`.r` — plain
   functions, S3/S4/R6 classes and methods, roxygen `@export`,
-  `library()`/`source()` imports).
+  `library()`/`source()` imports), **C#** (classes, structs, interfaces, records,
+  enums; interface inheritance and class/struct implementation, field/`this.field`
+  and typed-parameter receiver resolution, `using` imports).
 
 - **Broad** — symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
-  **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
+  **Rust, C, C++, Ruby, Scala, Elixir, Solidity,
   OCaml, Zig, Dart, Clojure, Nix, Lua**.
 
 - **Compiler-grade edges (opt-in)** — `graft build --lsp` adds precise
