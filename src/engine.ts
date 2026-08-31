@@ -28,6 +28,8 @@ export type { BuildResult, BuildProgress, CheckResult, GraphBuildResult, GraphCh
 export interface InitOptions {
   /** Code extensions to include. Default: {@link CODE_EXTENSIONS}. */
   extensions?: string[];
+  /** Repo-relative directory prefixes to limit the concept pass (`--only-dir`). */
+  onlyDirs?: string[];
   /** Progress callback for long builds. */
   onProgress?: (info: BuildProgress) => void;
 }
@@ -43,6 +45,10 @@ export interface GraphRunOptions {
   concurrency?: number;
   /** Replay unchanged files from the extraction cache (default true). */
   reuse?: boolean;
+  /** Opt-in compiler-grade LSP edge enrichment (`graft build --lsp`). */
+  lsp?: boolean;
+  /** Repo-relative directory prefixes to limit the build to (`--only-dir`). */
+  onlyDirs?: string[];
   onProgress?: GraphBuildOptions["onProgress"];
 }
 
@@ -58,6 +64,7 @@ export class Graft {
     return buildContext(dir, {
       contextDir: this.cfg.contextDir,
       extensions: opts.extensions,
+      onlyDirs: opts.onlyDirs,
       model: this.modelLabel(),
       summarizer: this.summarizer(),
       synthesizer: this.synthesizer(),
@@ -70,8 +77,9 @@ export class Graft {
     return checkContext(dir, { contextDir: this.cfg.contextDir, extensions: opts.extensions });
   }
 
-  /** Report whether the committed `graph.json` is in sync with the code (Tier-1 diff). */
-  checkGraph(dir: string): GraphCheckResult {
+  /** Report whether the committed `graph.json` is in sync with the code (Tier-1 diff).
+   * Async because the breadth tier warms WASM grammars before re-extraction. */
+  checkGraph(dir: string): Promise<GraphCheckResult> {
     return checkGraph(dir, { contextDir: this.cfg.contextDir });
   }
 
@@ -86,6 +94,8 @@ export class Graft {
       summarizer: opts.llm ? this.cruxSummarizer() : undefined,
       concurrency: opts.concurrency,
       reuse: opts.reuse,
+      lsp: opts.lsp,
+      onlyDirs: opts.onlyDirs,
       onProgress: opts.onProgress,
     });
   }
@@ -95,13 +105,14 @@ export class Graft {
    * channel. Deterministic and $0: routes structural queries to the wiring
    * edges and everything else to a lexical rank over concepts + symbols.
    */
-  ask(dir: string, query: string, opts: { limit?: number; source?: boolean; full?: boolean; in?: string } = {}): AskResult {
+  ask(dir: string, query: string, opts: { limit?: number; source?: boolean; full?: boolean; in?: string; graphRank?: boolean } = {}): AskResult {
     return ask(dir, query, {
       contextDir: this.cfg.contextDir,
       limit: opts.limit,
       source: opts.source,
       full: opts.full,
       in: opts.in,
+      graphRank: opts.graphRank,
     });
   }
 

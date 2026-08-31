@@ -69,6 +69,17 @@ test('codex TOML append preserves existing content', () => {
   assert.match(toml, /\[mcp_servers\.graft\]/);
 });
 
+test('grok gets a repo-local TOML MCP section', () => {
+  const repo = fresh(); const home = fresh();
+  const w = registerMcpConfigs(repo, ['grok'], { home });
+  assert.deepEqual(w.map((x) => x.action), ['created']);
+  const toml = readFileSync(join(repo, '.grok', 'config.toml'), 'utf8');
+  assert.match(toml, /^\[mcp_servers\.graft\]$/m);
+  assert.match(toml, /"@nanonets\/graft"/);
+  const again = registerMcpConfigs(repo, ['grok'], { home });
+  assert.deepEqual(again.map((x) => x.action), ['unchanged']);
+});
+
 test('JSON with non-object mcpServers value is skipped', () => {
   const repo = fresh(); const home = fresh();
   mkdirSync(join(repo, '.cursor'), { recursive: true });

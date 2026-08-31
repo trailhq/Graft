@@ -89,7 +89,7 @@ test("A1 hash-what-you-parse consistency: build/check/fingerprint agree on a UTF
     writeFileSync(join(dir, "legacy.py"), utf16le("def from_legacy():\n    return 42\n"));
     await buildGraph(dir);
 
-    const check = checkGraph(dir);
+    const check = await checkGraph(dir);
     assert.equal(check.ok, true, "checkGraph must decode the same way build.ts did — no added/removed/changed");
     assert.deepEqual(check.added, []);
     assert.deepEqual(check.removed, []);

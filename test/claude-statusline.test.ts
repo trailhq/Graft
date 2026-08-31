@@ -4,7 +4,10 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveStats } from '../src/claude/statusline.js';
+import { renderStatusline } from '../src/claude/format.js';
 import { writeStats, emptyStats } from '../src/claude/state.js';
+
+const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
 function repo(): string { return mkdtempSync(join(tmpdir(), 'graft-sl-')); }
 function writeWiring(dir: string, obj: unknown): void {
@@ -44,4 +47,25 @@ test('resolveStats prefers the cache over the graph even when both exist', () =>
 
 test('resolveStats returns null when neither cache nor graph exists', () => {
   assert.equal(resolveStats(repo()), null);
+});
+
+test('empty wiring.json is a built graph: statusline shows 0 nodes, not "not built"', () => {
+  const d = repo();
+  writeWiring(d, { meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] });
+  const s = resolveStats(d)!;
+  assert.equal(s.nodeCount, 0);
+  assert.equal(s.edgeCount, 0);
+  const line = strip(renderStatusline(s, null, { ctxPct: null })[0]);
+  assert.doesNotMatch(line, /not built/);
+  assert.doesNotMatch(line, /graft build/);
+  assert.match(line, /0 nodes \/ 0 edges/);
+});
+
+test('a 0-node cache without wiring.json is still not built', () => {
+  const d = repo();
+  writeStats(d, { ...emptyStats(), nodeCount: 0, edgeCount: 0 });
+  assert.equal(resolveStats(d), null, 'no artifact → missing, not an empty graph');
+  const line = strip(renderStatusline(null, null, { ctxPct: null })[0]);
+  assert.match(line, /not built/);
+  assert.match(line, /graft build/);
 });

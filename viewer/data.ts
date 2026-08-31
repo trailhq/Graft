@@ -9,6 +9,17 @@ export interface VizNode {
   type: string;
   summary: string;
   sources: string[];
+  evidence?: Evidence[];
+  owners?: NodeOwner[];
+}
+
+/** A contributor on a node — see `NodeOwner` in src/viz/assemble.ts. */
+export interface NodeOwner {
+  name: string;
+  handle?: string;
+  commits: number;
+  /** `YYYY-MM-DD`; the viewer turns it into "9d ago" when it renders. */
+  last: string;
 }
 
 export interface VizEdge {
@@ -19,8 +30,31 @@ export interface VizEdge {
   confidence?: "extracted" | "inferred";
 }
 
+export interface EvidenceLine {
+  n: number | null;
+  sign: "+" | "-" | " ";
+  text: string;
+}
+
+/** A code snippet shown under a node — see `Evidence` in src/viz/assemble.ts. */
+export interface Evidence {
+  label: string;
+  note?: string;
+  lines: EvidenceLine[];
+  more?: number;
+}
+
 export interface VizGraph {
-  meta: { repoName?: string; nodeCount: number; edgeCount: number; skippedFiles?: number; droppedEdges?: number };
+  meta: {
+    repoName?: string; subtitle?: string;
+    /** Set by `graft viz --export`: the tab whose graph actually has content. */
+    defaultTab?: "context" | "code";
+    /** Tabs this page offers. A blast export ships Context alone. */
+    tabs?: Array<"context" | "code" | "outline">;
+    nodeCount: number; edgeCount: number; skippedFiles?: number; droppedEdges?: number;
+    /** Why the graph is empty, when it is — set by `blast --export-viz`. */
+    emptyNote?: string;
+  };
   nodes: VizNode[];
   edges: VizEdge[];
 }
@@ -63,7 +97,13 @@ export const CHIP_HINT: Record<string, string> = {
 };
 
 /** Node-type → CSS custom property, per tab. */
-const CONTEXT_COLORS: Record<string, string> = { system: "--sys", concept: "--con", file: "--fil", api: "--api" };
+// `changed` / `affected` come from `graft blast --export-viz`, where the graph is a
+// PR's blast radius rather than the concept map: amber for what the diff touched,
+// blue for what depends on it. The legend labels itself from these type names.
+const CONTEXT_COLORS: Record<string, string> = {
+  system: "--sys", concept: "--con", file: "--fil", api: "--api",
+  changed: "--fil", affected: "--sys",
+};
 const CODE_COLORS: Record<string, string> = {
   file: "--k-file", class: "--k-class", function: "--k-fn", method: "--k-method",
   interface: "--k-iface", type: "--k-type", enum: "--k-enum",
@@ -78,7 +118,20 @@ export function cvar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+/**
+ * Graphs inlined by `graft viz --export`, when the page was exported rather than
+ * served. The static file has no server behind it, so a fetch would 404 — but the
+ * viewer must not care which way it was opened, so this is the only place that
+ * knows the difference.
+ */
+interface InlinedData {
+  contextGraph?: VizGraph;
+  codeGraph?: unknown;
+}
+const inlined = (globalThis as { __GRAFT_DATA__?: InlinedData }).__GRAFT_DATA__;
+
 export async function loadContextGraph(): Promise<VizGraph> {
+  if (inlined?.contextGraph) return inlined.contextGraph;
   const res = await fetch("/api/context-graph");
   return (await res.json()) as VizGraph;
 }
@@ -94,9 +147,15 @@ interface CodeGraphV1 {
 
 /** Fetch graph.json and reshape it into the viewer's graph form (null if absent). */
 export async function loadCodeGraph(): Promise<VizGraph | null> {
-  const res = await fetch("/api/code-graph");
-  if (!res.ok) return null;
-  const raw = (await res.json()) as CodeGraphV1;
+  let raw: CodeGraphV1;
+  if (inlined) {
+    if (!inlined.codeGraph) return null;
+    raw = inlined.codeGraph as CodeGraphV1;
+  } else {
+    const res = await fetch("/api/code-graph");
+    if (!res.ok) return null;
+    raw = (await res.json()) as CodeGraphV1;
+  }
   const nodes: VizNode[] = raw.nodes.map((n) => ({
     id: n.id,
     name: n.name,
@@ -112,8 +171,11 @@ export async function loadCodeGraph(): Promise<VizGraph | null> {
   return { meta: { nodeCount: nodes.length, edgeCount: edges.length }, nodes, edges };
 }
 
-/** Subscribe to the server's live-reload channel. */
+/** Subscribe to the server's live-reload channel, when there is a server at all. */
 export function onServerChange(handler: () => void): void {
+  // An exported page has no /events endpoint, and EventSource retries a failed
+  // connection forever — a console error every few seconds on a static file.
+  if (inlined) return;
   const source = new EventSource("/events");
   source.onmessage = (ev) => {
     if (ev.data === "change") handler();

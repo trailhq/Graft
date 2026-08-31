@@ -9,14 +9,17 @@ import { homedir } from 'node:os';
 import { HOSTS, detectHosts, type DetectProbe, type HostTarget } from './registry.js';
 import { upsertSection } from './sections.js';
 import { registerMcpConfigs, type McpWrite } from './mcp-config.js';
-import { installCodexHooks, type HookWrite } from './codex-hooks.js';
+import { installCodexHooks } from './codex-hooks.js';
+import { installCursorHooks } from './cursor-hooks.js';
+import type { ConfigWrite } from './config-write.js';
+import { installAntigravitySkill } from './antigravity.js';
 
 export interface HostsInitResult {
   written: { id: string; path: string; action: string }[];
   skipped: string[];
   unknown: string[];
   mcp: McpWrite[];
-  hooks: HookWrite[];
+  hooks: ConfigWrite[];
 }
 
 function probeFor(home: string, repo: string): DetectProbe {
@@ -75,10 +78,21 @@ export function runHostsInit(
     opts.mcp === false
       ? []
       : registerMcpConfigs(repo, selected.map((h) => h.id), { home, global: opts.global });
-  // Every hook target is user-level, so --no-global suppresses the lot.
+  // The Codex hook targets are user-level (~/.codex), so --no-global suppresses them.
   const hooks =
     opts.hooks === false || opts.global === false || !selected.some((h) => h.id === 'agents')
       ? []
       : installCodexHooks(home);
-  return { written, skipped, unknown, mcp, hooks };
+  // Cursor's hooks are repo-local (.cursor/hooks.json), matching the Cursor-only,
+  // no-global posture — so --no-global does NOT suppress them; only --no-hooks does.
+  const cursorHooks =
+    opts.hooks === false || !selected.some((h) => h.id === 'cursor')
+      ? []
+      : installCursorHooks(repo);
+  // Antigravity's skill is a global write too, so --no-global suppresses it as well.
+  const antigravitySkill =
+    opts.global === false || !selected.some((h) => h.id === 'antigravity')
+      ? []
+      : installAntigravitySkill(home);
+  return { written, skipped, unknown, mcp, hooks: [...hooks, ...cursorHooks, ...antigravitySkill] };
 }

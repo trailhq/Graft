@@ -49,6 +49,11 @@ export interface Fingerprint {
    * clean and queries would keep answering from nodes the old extractor built. */
   extractor: string;
   files: Record<string, Print>;
+  /** Repo-relative directory prefixes this build was limited to (`--only-dir`).
+   * Absent = full tree. Recorded here — not in the source repo's `.graft/config.json`
+   * — so the query-path freshness probe (which never sees a CLI flag) enumerates the
+   * identical whitelisted set and excluded files are never phantom "added" drift. */
+  onlyDirs?: string[];
 }
 
 /** What moved since the last build. Empty in all three arrays = nothing to do. */
@@ -79,11 +84,17 @@ export function readFingerprint(outDir: string): Fingerprint | null {
 /** Project the extraction cache's entries into the probe sidecar. Best-effort:
  * the graph is already on disk when this runs, so a failed write costs the next
  * probe its fast path and nothing more. */
-export function writeFingerprint(outDir: string, entries: Record<string, ExtractEntry>): boolean {
+export function writeFingerprint(
+  outDir: string,
+  entries: Record<string, ExtractEntry>,
+  onlyDirs?: string[],
+): boolean {
   const files: Record<string, Print> = {};
   for (const [rel, e] of Object.entries(entries)) files[rel] = [e.size, e.mtimeMs, e.hash];
   try {
-    writeJsonAtomic(fingerprintPath(outDir), { version: FINGERPRINT_VERSION, extractor: stamp(), files }, true);
+    const record: Fingerprint = { version: FINGERPRINT_VERSION, extractor: stamp(), files };
+    if (onlyDirs && onlyDirs.length > 0) record.onlyDirs = onlyDirs;
+    writeJsonAtomic(fingerprintPath(outDir), record, true);
     pruneSidecars(join(outDir, CACHE_DIR), FINGERPRINT_PREFIX);
     return true;
   } catch {
@@ -143,7 +154,8 @@ export function probeDrift(root: string, outDir: string): Drift | null {
   const drift: Drift = { changed: [], added: [], removed: [] };
   const seen = new Set<string>();
 
-  for (const f of listSourceStats(root, outDir)) {
+  const onlyDirs = fp.onlyDirs && fp.onlyDirs.length > 0 ? new Set(fp.onlyDirs) : undefined;
+  for (const f of listSourceStats(root, outDir, undefined, onlyDirs)) {
     seen.add(f.rel);
     const print = fp.files[f.rel];
     if (!print) {
