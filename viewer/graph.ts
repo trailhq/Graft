@@ -17,7 +17,8 @@ import {
   forceSimulation, forceManyBody, forceLink, forceCenter, forceCollide,
   type Simulation, type SimulationNodeDatum,
 } from "d3-force";
-import { type VizGraph, type VizEdge, famOf, REST, chipKey, colorToken, cvar } from "./data.js";
+import { type VizGraph, type VizEdge, type NodeOwner, famOf, REST, chipKey, colorToken, cvar } from "./data.js";
+import { initials } from "./detail.js";
 
 interface SimNode extends SimulationNodeDatum {
   id: string;
@@ -25,6 +26,7 @@ interface SimNode extends SimulationNodeDatum {
   type: string;
   deg: number;
   r: number;
+  owners?: NodeOwner[];
   fx?: number | null;
   fy?: number | null;
 }
@@ -39,10 +41,47 @@ interface SimEdge {
 
 const NS = "http://www.w3.org/2000/svg";
 
+/** Initials shown on a bubble before the rest become a count. Two faces read as
+ * "someone else owns this"; five read as a pie chart nobody asked for. */
+const MAX_BADGES = 2;
+
 function el<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number>): SVGElementTagNameMap[K] {
   const node = document.createElementNS(NS, tag);
   for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
   return node;
+}
+
+/**
+ * The contributor stack on a bubble: up to {@link MAX_BADGES} sets of initials,
+ * then a `+N`, fanned out from the node's upper right.
+ *
+ * Drawn once at build time and only shown or hidden afterwards, because the
+ * simulation moves the parent group rather than these — a per-tick redraw of two
+ * circles per node is the one thing that would make a large graph stutter.
+ */
+function ownerBadges(node: SimNode): SVGGElement | null {
+  const owners = node.owners ?? [];
+  if (owners.length === 0) return null;
+  const shown = owners.slice(0, MAX_BADGES);
+  const rest = owners.length - shown.length;
+  const chips = [...shown.map((o) => initials(o.handle ?? o.name)), ...(rest > 0 ? [`+${rest}`] : [])];
+
+  const g = el("g", { "pointer-events": "none" });
+  chips.forEach((text, i) => {
+    // A 45° fan off the top-right, one radius out, so the stack never covers the
+    // node's own colour and never collides with the name under it.
+    const cx = node.r * 0.72 + i * 13;
+    const cy = -node.r * 0.72 + i * 8;
+    g.appendChild(el("circle", { cx, cy, r: 8, fill: cvar("--panel"), stroke: cvar("--con"), "stroke-width": 1.2 }));
+    const t = el("text", {
+      x: cx, y: cy + 3, "text-anchor": "middle", "font-size": 7.5, "font-weight": 700, fill: cvar("--con"),
+    });
+    t.textContent = text;
+    const title = el("title", {});
+    title.textContent = owners.map((o) => `${o.handle ? `@${o.handle}` : o.name} — ${o.commits} commits`).join("\n");
+    g.append(t, title);
+  });
+  return g;
 }
 
 export class GraphView {
@@ -53,13 +92,16 @@ export class GraphView {
   private nodes: SimNode[] = [];
   private edges: SimEdge[] = [];
   private edgeEls: { path: SVGPathElement; label: SVGTextElement; edge: SimEdge }[] = [];
-  private nodeEls: { group: SVGGElement; circle: SVGCircleElement; ring: SVGCircleElement; label: SVGTextElement; node: SimNode }[] = [];
+  private nodeEls: { group: SVGGElement; circle: SVGCircleElement; ring: SVGCircleElement; label: SVGTextElement; badges: SVGGElement | null; node: SimNode }[] = [];
   private view = { x: 0, y: 0, k: 1 };
   private tab: "context" | "code" = "context";
   selected: string | null = null;
   query = "";
   hiddenRels: Record<string, boolean> = {};
   hiddenTypes: Record<string, boolean> = {};
+  /** The contributor badges on each bubble. A decoration, not a filter — toggling
+   * it never changes which nodes are on the canvas. */
+  showOwners = true;
   onSelect: (id: string | null) => void = () => {};
 
   constructor(svg: SVGSVGElement) {
@@ -106,7 +148,7 @@ export class GraphView {
       const angle = (i / Math.max(1, graph.nodes.length)) * Math.PI * 2;
       const d = deg[n.id] ?? 0;
       return {
-        id: n.id, name: n.name, type: n.type,
+        id: n.id, name: n.name, type: n.type, owners: n.owners,
         deg: d, r: 11 + Math.min(13, d * 2.6),
         x: p?.x ?? W / 2 + Math.cos(angle) * Math.min(W, H) / 4,
         y: p?.y ?? H / 2 + Math.sin(angle) * Math.min(W, H) / 4,
@@ -155,11 +197,13 @@ export class GraphView {
       const circle = el("circle", { r: node.r, opacity: 0.92 });
       const label = el("text", { y: node.r + 15, "text-anchor": "middle", "font-size": 11.5, "font-weight": 600 });
       label.textContent = node.name;
+      const badges = ownerBadges(node);
       group.append(ring, circle, label);
+      if (badges) group.appendChild(badges);
       group.addEventListener("click", (ev) => { ev.stopPropagation(); this.select(node.id); });
       this.bindDrag(group, node);
       this.viewport.appendChild(group);
-      return { group, circle, ring, label, node };
+      return { group, circle, ring, label, badges, node };
     });
   }
 
@@ -226,7 +270,7 @@ export class GraphView {
       }
     }
 
-    for (const { group, circle, ring, label, node } of this.nodeEls) {
+    for (const { group, circle, ring, label, badges, node } of this.nodeEls) {
       const shown = nodeShown(node);
       group.style.display = shown ? "" : "none";
       if (!shown) continue;
@@ -239,6 +283,7 @@ export class GraphView {
       ring.setAttribute("stroke", color);
       ring.setAttribute("opacity", node.id === this.selected ? "0.55" : "0");
       label.setAttribute("fill", cvar("--ink"));
+      if (badges) badges.style.display = this.showOwners ? "" : "none";
     }
   }
 

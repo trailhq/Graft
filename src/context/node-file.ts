@@ -80,6 +80,12 @@ const MANIFEST_FILE = "manifest.json";
 /** Gitignored cache dir (per-file summaries + extractions), never committed. */
 export const CACHE_DIR = ".cache";
 
+/** Env kill switch — same truthy parsing as `GRAFT_NO_REFRESH` in ../graph/refresh.ts. */
+function envTruthy(name: string): boolean {
+  const v = process.env[name];
+  return v !== undefined && v !== "" && v !== "0" && v !== "false";
+}
+
 /** Turn a display name into a stable, filesystem- and link-safe slug. */
 export function slugify(name: string): string {
   const base = normalizeName(name)
@@ -115,15 +121,23 @@ export function contextDirFor(root: string, override?: string): string {
  * must never abort a build, so write failures are swallowed.
  */
 export function ensureGitignored(root: string, contextDir: string): void {
+  if (envTruthy("GRAFT_NO_GITIGNORE")) return;
   const rel = relPosix(root, contextDir);
   if (rel === "" || rel.startsWith("..")) return; // dir is at/above the repo root — nothing sane to ignore
-  const entry = `${stripTrailingSlashes(rel)}/`;
+  const bare = stripTrailingSlashes(rel); // "graft" (or a `--dir` subpath like "tools/ctx")
+  // Root-ANCHORED, so it ignores exactly this repo's `graft/` and not a directory named
+  // `graft` at any depth. An unanchored `graft/` also matched `.claude/skills/graft/`, so
+  // committing the skill graft just wrote was silently dropped (#79). `rel` is always
+  // repo-relative here, so a leading `/` is always safe (incl. a `--dir` subpath).
+  const entry = `/${bare}/`;
   const path = join(root, ".gitignore");
   let current = "";
   try { current = readFileSync(path, "utf8"); } catch { /* no .gitignore yet — we create one */ }
+  // Accept the anchored form AND the older unanchored `graft/` / `graft`, so existing
+  // repos aren't double-appended and a hand-anchored entry survives the next build.
   const present = current.split("\n").some((l) => {
     const t = l.trim();
-    return t === entry || t === rel;
+    return t === entry || t === `${bare}/` || t === bare;
   });
   if (present) return;
   const gap = current === "" ? "" : current.endsWith("\n") ? "\n" : "\n\n";
@@ -152,6 +166,7 @@ export function ensureGitignored(root: string, contextDir: string): void {
  * must not fail over a convenience file.
  */
 export function ensureSearchable(root: string, contextDir: string): void {
+  if (envTruthy("GRAFT_NO_IGNORE")) return;
   const rel = relPosix(root, contextDir);
   if (rel === "" || rel.startsWith("..")) return; // outside the repo — nothing to re-admit
   const dir = stripTrailingSlashes(rel);
@@ -246,15 +261,76 @@ export interface ParsedNode {
   links: NodeLink[];
 }
 
-/** Read and parse every `.md` node file in a context dir (skips the manifest). */
+/**
+ * Stems of per-file wiring cards that sit at the graft/ top level — i.e. cards
+ * for source files in the repo root. Those cards share a directory with concept
+ * nodes (`graft/<stem>.md`) but are recorded in `manifest.files`, not
+ * `manifest.nodes`. Nested file cards live in subdirs and are never scanned here.
+ *
+ * Incomplete on its own (#261): the graph can write a root card for a source
+ * that the concept pipeline never recorded (different extension lists), so the
+ * stem is absent from `manifest.files`. Combined with isRootFileCard().
+ */
+function rootFileCardStems(dir: string): Set<string> {
+  const manifest = readManifest(dir);
+  if (!manifest) return new Set();
+  const stems = new Set<string>();
+  for (const f of manifest.files) {
+    if (f.path.includes("/")) continue;
+    stems.add(f.path.replace(/\.[^./]+$/, ""));
+  }
+  return stems;
+}
+
+function hasConceptSlug(fm: Record<string, unknown>): boolean {
+  return fm.slug != null && String(fm.slug).length > 0;
+}
+
+/** `writeCovers` used to stamp `covers: []` onto slug-less root file cards. */
+function isCoversOnlyFileCard(fm: Record<string, unknown>): boolean {
+  if (hasConceptSlug(fm) || !("covers" in fm)) return false;
+  return fm.name == null && fm.type == null && fm.sources == null;
+}
+
+/** Wiring cards start with `# <source path with extension>`, optionally followed
+ * by ` · [[slug]]` up-links. A hand-dropped `notes.md` does not. */
+function isWiringCardHeading(content: string): boolean {
+  const line = content.trimStart().split(/\r?\n/, 1)[0] ?? "";
+  return /^# [^\s#]+\.[A-Za-z0-9]{1,12}(?:\s|$)/.test(line);
+}
+
+/**
+ * A top-level `.md` that is a per-file wiring card, not a concept node.
+ * Real concepts always carry `slug` in frontmatter and are never skipped.
+ * A hand-dropped `notes.md` has no slug, no `covers`, and no file-path heading,
+ * so it still surfaces as indexDrift (#215 / #261).
+ */
+function isRootFileCard(
+  stem: string,
+  fm: Record<string, unknown>,
+  content: string,
+  fileCardStems: Set<string>,
+): boolean {
+  if (hasConceptSlug(fm)) return false;
+  if (fileCardStems.has(stem)) return true;
+  if (isCoversOnlyFileCard(fm)) return true;
+  return isWiringCardHeading(content);
+}
+
+/** Read and parse every concept-node `.md` in a context dir (skips INDEX.md
+ * and root-level per-file cards). */
 export function readNodes(dir: string): ParsedNode[] {
   if (!existsSync(dir)) return [];
+  const fileCardStems = rootFileCardStems(dir);
   const out: ParsedNode[] = [];
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith(".md") || entry === "INDEX.md") continue;
-    const fm = matter(readFileSync(join(dir, entry), "utf8")).data as Record<string, unknown>;
+    const parsed = matter(readFileSync(join(dir, entry), "utf8"));
+    const fm = parsed.data as Record<string, unknown>;
+    const fallbackSlug = entry.replace(/\.md$/, "");
+    if (isRootFileCard(fallbackSlug, fm, parsed.content, fileCardStems)) continue;
     out.push({
-      slug: String(fm.slug ?? entry.replace(/\.md$/, "")),
+      slug: String(fm.slug ?? fallbackSlug),
       name: String(fm.name ?? ""),
       type: String(fm.type ?? ""),
       sources: Array.isArray(fm.sources) ? (fm.sources as SourceRef[]) : [],

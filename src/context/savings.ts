@@ -10,7 +10,7 @@
  *
  * `graft ask` keeps its own footer (it carries an escalation nudge and feeds
  * the session saved-token counter); everything else — skeleton, grep, callers,
- * map — routes through {@link savingsFor} + {@link savingsFooter} here.
+ * map — routes through {@link savingsFor} + {@link withSavings} here.
  */
 import type { GraphV1 } from '../graph/types.js';
 
@@ -61,12 +61,12 @@ export const SAVINGS_TURN_NUDGE =
   ' At the end of your reply, tell the user the total graft tokens saved this ' +
   'turn — sum each such line across your graft calls — e.g. "🌱 graft saved ~N tokens this turn".';
 
-/** The one-line footer a command appends to its text output, so the agent gets
+/** The one-line savings estimate for a command's text output, so the agent gets
  * the number for free — no extra tool call. `body` is the exact rendered output
  * the agent reads (the pack). Returns "" when there's nothing honest to claim:
  * no baseline, or the output isn't actually smaller than reading the files
  * (tiny files, where the pointers cost more than the source). */
-export function savingsFooter(body: string, saved: Savings | undefined): string {
+export function savingsLine(body: string, saved: Savings | undefined): string {
   if (!saved || saved.baselineChars <= 0) return '';
   const pack = toTokens(body.length);
   const base = toTokens(saved.baselineChars);
@@ -74,9 +74,37 @@ export function savingsFooter(body: string, saved: Savings | undefined): string 
   const delta = base - pack;
   const pct = Math.round((delta / base) * 100);
   return (
-    `\n\n[graft] tokens saved ≈ ${delta.toLocaleString()} (${pct}%) — this output ≈ ` +
+    `[graft] tokens saved ≈ ${delta.toLocaleString()} (${pct}%) — this output ≈ ` +
     `${pack.toLocaleString()} tok vs reading the ${saved.files} file(s) it covers whole ≈ ` +
     `${base.toLocaleString()} tok (estimate).` +
     SAVINGS_TURN_NUDGE
   );
+}
+
+/**
+ * Sum every `[graft] tokens saved ≈ N` footer in a blob of text — the reader
+ * half of {@link savingsLine}, kept next to the writer so the two never drift.
+ * A single blob can carry several (an agent that made two graft calls in one
+ * turn); the `SAVINGS_TURN_NUDGE` deliberately omits the pattern, so its example
+ * text is not miscounted here.
+ */
+export function sumSavingsFooters(text: string): number {
+  let total = 0;
+  for (const m of text.matchAll(/\[graft\] tokens saved ≈ ([\d,]+)/g)) {
+    total += Number(m[1].replace(/,/g, '')) || 0;
+  }
+  return total;
+}
+
+/** Render `body` with the savings line on TOP.
+ *
+ * Deliberately a header, not a footer: agents routinely pipe graft through
+ * `head -N` (and hosts truncate long tool output from the end), which silently
+ * ate the number and, with it, the PostToolUse accumulator that feeds the
+ * statusline's `~N tok saved`. Every clipper keeps the head, so the number
+ * survives. Emitted once — a second copy at the bottom would be double-counted
+ * by that accumulator's `matchAll`. */
+export function withSavings(body: string, saved: Savings | undefined): string {
+  const line = savingsLine(body, saved);
+  return line ? `${line}\n\n${body}` : body;
 }

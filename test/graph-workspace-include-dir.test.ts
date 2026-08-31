@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { runWorkspaceBuild } from "../src/graph/workspace-cli.js";
 import { buildGraph } from "../src/graph/build.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
-import { writeBuildConfig } from "../src/util/state.js";
+import { readBuildConfig, writeBuildConfig } from "../src/util/state.js";
 import type { GraphV1 } from "../src/graph/types.js";
 
 function workspaceWithBuildDirs(): string {
@@ -38,7 +38,12 @@ function graphOf(childDir: string): GraphV1 | null {
 test("A5: --include-dir on a workspace build reaches every child, which persists it for a later no-flag rebuild", async () => {
   const parent = workspaceWithBuildDirs();
   try {
-    await runWorkspaceBuild(parent, { deep: false, childConfig: {}, includeDirs: ["build"] });
+    await runWorkspaceBuild(parent, {
+      deep: false,
+      childConfig: {},
+      includeDirs: ["build"],
+      followSubmodules: true,
+    });
 
     for (const child of ["repoA", "repoB"]) {
       const g = graphOf(join(parent, child));
@@ -47,6 +52,10 @@ test("A5: --include-dir on a workspace build reaches every child, which persists
         g!.nodes.some((n) => n.id === "build/util.ts#fromBuild"),
         `${child}'s build/ file must be indexed with --include-dir`,
       );
+      assert.deepEqual(readBuildConfig(join(parent, child)), {
+        includeDirs: ["build"],
+        followSubmodules: true,
+      });
     }
 
     // A later no-flag rebuild of a single child (never sees the parent's CLI
@@ -59,6 +68,18 @@ test("A5: --include-dir on a workspace build reaches every child, which persists
       rebuilt!.nodes.some((n) => n.id === "build/util.ts#fromBuild"),
       "child's own persisted include-dir state must survive a no-flag rebuild",
     );
+
+    await runWorkspaceBuild(parent, {
+      deep: false,
+      childConfig: {},
+      followSubmodules: false,
+    });
+    for (const child of ["repoA", "repoB"]) {
+      assert.deepEqual(readBuildConfig(join(parent, child)), {
+        includeDirs: ["build"],
+        followSubmodules: false,
+      });
+    }
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }

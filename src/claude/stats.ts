@@ -2,10 +2,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GraphV1 } from '../graph/types.js';
 import type { Stats } from './state.js';
+import { resolveContextDir } from '../util/state.js';
 
 export function readWiring(projectDir: string): GraphV1 | null {
   try {
-    return JSON.parse(readFileSync(join(projectDir, 'graft', '.graph', 'wiring.json'), 'utf8')) as GraphV1;
+    return JSON.parse(readFileSync(join(resolveContextDir(projectDir), '.graph', 'wiring.json'), 'utf8')) as GraphV1;
   } catch { return null; }
 }
 

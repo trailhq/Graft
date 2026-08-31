@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { underGraft, main, lastFileScopeHint, promptAskTimeout } from '../src/claude/hooks.js';
 import { readStats, readSession } from '../src/claude/state.js';
 import { runSync } from '../src/claude/sync-run.js';
-import { savingsFooter } from '../src/context/savings.js';
-import { writeStats, emptyStats, acquireLock } from '../src/claude/state.js';
+import { savingsLine } from '../src/context/savings.js';
+import { writeStats, emptyStats, acquireLock, resolveContextDir } from '../src/claude/state.js';
 
 test('underGraft detects edits inside graft/', () => {
   assert.equal(underGraft('/repo', '/repo/graft/x.md'), true);
@@ -95,6 +95,31 @@ test('runSync clears dirty/syncing, recomputes stats, releases lock', () => {
   assert.equal(s.readyCount, 1);
   assert.ok(s.syncedAt);
   assert.equal(acquireLock(d), true, 'lock released, so reacquire succeeds');
+});
+
+test("runSync's default build passes --dir <resolved> to graft build when GRAFT_DIR is set", () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-sync-dir-'));
+  mkdirSync(join(d, 'elsewhere', '.graph'), { recursive: true });
+  const argsFile = join(d, 'args-seen.json');
+  const stub = join(d, 'build-stub.cjs');
+  writeFileSync(
+    stub,
+    `const fs = require('fs');\n` +
+      `fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));\n` +
+      `fs.writeFileSync(${JSON.stringify(join(d, 'elsewhere', '.graph', 'wiring.json'))}, JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));\n`,
+  );
+  process.env.GRAFT_TEST_CLI = stub;
+  process.env.GRAFT_DIR = 'elsewhere';
+  try {
+    runSync(d); // exercises the real (non-injected) build path
+    const argsSeen: string[] = JSON.parse(readFileSync(argsFile, 'utf8'));
+    const dirIdx = argsSeen.indexOf('--dir');
+    assert.ok(dirIdx !== -1, 'the build call carries --dir when GRAFT_DIR is set');
+    assert.equal(argsSeen[dirIdx + 1], resolveContextDir(d));
+  } finally {
+    delete process.env.GRAFT_TEST_CLI;
+    delete process.env.GRAFT_DIR;
+  }
 });
 
 test('runSync clears syncing even if build throws (money-safe failure)', () => {
@@ -426,18 +451,121 @@ test('tool-savings is a no-op (no session file) when the tool output has no graf
   }
 });
 
-test('tool-savings counts a REAL savingsFooter (with the turn nudge) exactly once', async () => {
+test('tool-savings counts a REAL savings line (with the turn nudge) exactly once', async () => {
   const d = mkdtempSync(join(tmpdir(), 'graft-savings-real-'));
   process.env.CLAUDE_PROJECT_DIR = d;
   try {
     // body ≈ 10 tok, baseline ≈ 2000 tok → footer claims ≈ 1990 saved. The nudge
     // (with its "🌱 graft saved ~N tokens" example) must NOT be double-counted.
-    const footer = savingsFooter('x'.repeat(40), { files: 2, baselineChars: 8000 });
+    const footer = savingsLine('x'.repeat(40), { files: 2, baselineChars: 8000 });
     const stdin = JSON.stringify({ session_id: 'real', tool_response: { stdout: `callers …${footer}` } });
     await runWithStdin(stdin, () => main('tool-savings'));
     assert.equal(readSession(d, 'real').savedTokens, 1990);
   } finally {
     delete process.env.CLAUDE_PROJECT_DIR;
+  }
+});
+
+// ── the usage-mix counters: graft vs source (both hosts) ───────────────────
+
+test('tool-savings now scores the mix: a Read is a source read, a graft footer is a graft read', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-mix-'));
+  process.env.CLAUDE_PROJECT_DIR = d;
+  try {
+    await runWithStdin(JSON.stringify({ session_id: 'm', tool_name: 'Read', tool_input: { file_path: '/x' } }), () => main('tool-savings'));
+    assert.equal(readSession(d, 'm').sourceReads, 1, 'Read counted as a source read');
+    assert.equal(readSession(d, 'm').graftReads, 0);
+
+    await runWithStdin(JSON.stringify({
+      session_id: 'm', tool_name: 'Bash',
+      tool_response: { stdout: '[graft] tokens saved ≈ 500 — …' },
+    }), () => main('tool-savings'));
+    assert.equal(readSession(d, 'm').graftReads, 1, 'a graft footer counts as a graft read');
+    assert.equal(readSession(d, 'm').savedTokens, 500);
+  } finally {
+    delete process.env.CLAUDE_PROJECT_DIR;
+  }
+});
+
+// ── Cursor hook adapters ────────────────────────────────────────────────────
+
+test('cursor-post-tool: Read → source read, Shell graft → graft read + savings, keyed by conversation_id', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-cursor-pt-'));
+  process.env.CLAUDE_PROJECT_DIR = d;
+  try {
+    await runWithStdin(JSON.stringify({ conversation_id: 'c1', tool_name: 'Read', tool_input: {} }), () => main('cursor-post-tool'));
+    assert.equal(readSession(d, 'c1').sourceReads, 1);
+
+    await runWithStdin(JSON.stringify({
+      conversation_id: 'c1', tool_name: 'Shell',
+      tool_input: { command: 'graft ask "x"' },
+      tool_output: JSON.stringify({ stdout: '…\n[graft] tokens saved ≈ 900 — …' }),
+    }), () => main('cursor-post-tool'));
+    assert.equal(readSession(d, 'c1').graftReads, 1, 'Shell graft CLI is a graft read');
+    assert.equal(readSession(d, 'c1').savedTokens, 900, 'savings parsed out of tool_output');
+  } finally {
+    delete process.env.CLAUDE_PROJECT_DIR;
+  }
+});
+
+test('cursor-post-tool skips graft MCP tools — prefixed AND bare — so afterMCPExecution is the only counter', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-cursor-skip-'));
+  process.env.CLAUDE_PROJECT_DIR = d;
+  try {
+    // prefixed shape
+    await runWithStdin(JSON.stringify({ conversation_id: 'c1', tool_name: 'MCP:graft_find_code', tool_output: '{}' }), () => main('cursor-post-tool'));
+    assert.equal(existsSync(join(d, 'graft', '.cache', 'session', 'c1.json')), false, 'prefixed MCP tool not counted here');
+    // bare shape — the guard, not just the installed matcher, must catch this or it double-counts
+    await runWithStdin(JSON.stringify({ conversation_id: 'c2', tool_name: 'graft_find_code', tool_output: '{}' }), () => main('cursor-post-tool'));
+    assert.equal(existsSync(join(d, 'graft', '.cache', 'session', 'c2.json')), false, 'bare graft MCP tool not counted here');
+  } finally {
+    delete process.env.CLAUDE_PROJECT_DIR;
+  }
+});
+
+test('cursor-mcp: a graft MCP tool is a graft read with savings from result_json; a foreign MCP tool is a no-op', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-cursor-mcp-'));
+  process.env.CLAUDE_PROJECT_DIR = d;
+  try {
+    await runWithStdin(JSON.stringify({
+      conversation_id: 'c1', tool_name: 'graft_find_code',
+      result_json: JSON.stringify({ text: '…\n[graft] tokens saved ≈ 1,200 — …' }),
+    }), () => main('cursor-mcp'));
+    assert.equal(readSession(d, 'c1').graftReads, 1);
+    assert.equal(readSession(d, 'c1').savedTokens, 1200);
+
+    await runWithStdin(JSON.stringify({ conversation_id: 'c2', tool_name: 'some_other_server_tool', result_json: '{}' }), () => main('cursor-mcp'));
+    assert.equal(existsSync(join(d, 'graft', '.cache', 'session', 'c2.json')), false, 'foreign MCP tool ignored');
+  } finally {
+    delete process.env.CLAUDE_PROJECT_DIR;
+  }
+});
+
+test('cursor-session-end force-closes THIS conversation even though its file was just touched (idle gate skipped)', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-cursor-end-'));
+  const home = mkdtempSync(join(tmpdir(), 'graft-cursor-end-home-'));
+  mkdirSync(join(d, 'graft', '.cache', 'session'), { recursive: true });
+  const sfile = join(d, 'graft', '.cache', 'session', 'c1.json');
+  // mtime = now: the idle sweep would skip this, but the end hook must summarize it.
+  writeFileSync(sfile, JSON.stringify({ graftReads: 8, sourceReads: 2, savedTokens: 7400 }));
+
+  // Turn telemetry on against a scratch $HOME so the rollup actually queues (and
+  // marks the file), the observable proof the force-close ran — not just no-throw.
+  const saved = {
+    HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE,
+    KEY: process.env.GRAFT_POSTHOG_KEY, CI: process.env.CI, DNT: process.env.DO_NOT_TRACK,
+  };
+  process.env.HOME = home; process.env.USERPROFILE = home;
+  process.env.GRAFT_POSTHOG_KEY = 'phc_test_key';
+  delete process.env.CI; delete process.env.DO_NOT_TRACK;
+  process.env.CLAUDE_PROJECT_DIR = d;
+  try {
+    await runWithStdin(JSON.stringify({ conversation_id: 'c1' }), () => main('cursor-session-end'));
+    assert.equal(readSession(d, 'c1').summarized, true, 'the just-ended conversation was rolled up');
+  } finally {
+    delete process.env.CLAUDE_PROJECT_DIR;
+    for (const [k, v] of Object.entries({ HOME: saved.HOME, USERPROFILE: saved.USERPROFILE, GRAFT_POSTHOG_KEY: saved.KEY, CI: saved.CI, DO_NOT_TRACK: saved.DNT }))
+      if (v === undefined) delete (process.env as any)[k]; else (process.env as any)[k] = v;
   }
 });
 
@@ -459,15 +587,133 @@ function withSettings(timeout: unknown): string {
 }
 
 test('promptAskTimeout is derived from the installed hook budget', () => {
-  // A repo wired before the budget was raised.
-  assert.equal(promptAskTimeout(withSettings(8000)), 6000);
-  // A repo wired after.
-  assert.equal(promptAskTimeout(withSettings(15000)), 13000);
-  // Never so small the child has no chance.
-  assert.equal(promptAskTimeout(withSettings(1000)), 4000);
+  // User-level settings are one of the sources now, so point them somewhere empty:
+  // otherwise these assertions read whatever the developer running the suite has
+  // wired on their own machine.
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'graft-nouser-'));
+  try {
+    // A repo wired before the budget was raised.
+    assert.equal(promptAskTimeout(withSettings(8000)), 6000);
+    // A repo wired after.
+    assert.equal(promptAskTimeout(withSettings(15000)), 13000);
+    // Never so small the child has no chance.
+    assert.equal(promptAskTimeout(withSettings(1000)), 4000);
 
-  // Nothing readable: assume the conservative 8s budget the other hooks carry.
-  assert.equal(promptAskTimeout(withSettings(undefined)), 6000);
-  assert.equal(promptAskTimeout(withSettings('nonsense')), 6000);
-  assert.equal(promptAskTimeout(mkdtempSync(join(tmpdir(), 'graft-nosettings-'))), 6000);
+    // Nothing readable: assume the conservative 8s budget the other hooks carry.
+    assert.equal(promptAskTimeout(withSettings(undefined)), 6000);
+    assert.equal(promptAskTimeout(withSettings('nonsense')), 6000);
+    assert.equal(promptAskTimeout(mkdtempSync(join(tmpdir(), 'graft-nosettings-'))), 6000);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+});
+
+/**
+ * Hooks can be declared once at the user level, wiring every repo on the machine.
+ * Such a repo has no `.claude/settings.json`, so a lookup that only reads the repo
+ * finds nothing and falls back to the conservative 8s — starving the query in any
+ * repo whose graph takes longer than that, with no error to say so.
+ */
+function withUserSettings(timeout: unknown): string {
+  const d = mkdtempSync(join(tmpdir(), 'graft-userhooks-'));
+  const hooks = timeout === undefined ? {} : {
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node "$HOME/.claude/helpers/graft-hooks.cjs" prompt', timeout }] }],
+  };
+  writeFileSync(join(d, 'settings.json'), JSON.stringify({ hooks }));
+  return d;
+}
+
+test('promptAskTimeout reads a user-level hook when the repo declares none', () => {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  try {
+    process.env.CLAUDE_CONFIG_DIR = withUserSettings(15000);
+    // A repo with no .claude/ of its own still gets the budget it truly runs under.
+    assert.equal(promptAskTimeout(mkdtempSync(join(tmpdir(), 'graft-nosettings-'))), 13000);
+
+    // Declared in both places: Claude Code fires both entries and this process
+    // cannot tell which launched it, so the smallest budget is the only safe one.
+    assert.equal(promptAskTimeout(withSettings(8000)), 6000);
+
+    process.env.CLAUDE_CONFIG_DIR = withUserSettings(8000);
+    assert.equal(promptAskTimeout(withSettings(15000)), 6000);
+
+    // Nothing anywhere still means the conservative default.
+    process.env.CLAUDE_CONFIG_DIR = withUserSettings(undefined);
+    assert.equal(promptAskTimeout(mkdtempSync(join(tmpdir(), 'graft-nosettings-'))), 6000);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+});
+
+// ── GRAFT_DIR: the hooks' own `graft ask`/`graft check` children, and the
+// SessionStart INDEX.md read, must land on the same relocated context dir
+// that readWiring/readStats/patchStats/acquireLock/session state already
+// resolve through resolveContextDir. ──────────────────────────────────────
+
+test('prompt hook passes --dir <resolved> to graft ask when GRAFT_DIR is set', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-prompt-dir-'));
+  mkdirSync(join(d, 'elsewhere', '.graph'), { recursive: true });
+  writeFileSync(join(d, 'elsewhere', '.graph', 'wiring.json'),
+    JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));
+  const { stub, argsFile } = writeAskArgsStub(d);
+  process.env.CLAUDE_PROJECT_DIR = d;
+  process.env.GRAFT_TEST_CLI = stub;
+  process.env.GRAFT_DIR = 'elsewhere';
+  try {
+    await runWithStdin(
+      JSON.stringify({ session_id: 'p-dir', prompt: 'how does the relocated graph get queried' }),
+      () => main('prompt'),
+    );
+    const argsSeen: string[] = JSON.parse(readFileSync(argsFile, 'utf8'));
+    const dirIdx = argsSeen.indexOf('--dir');
+    assert.ok(dirIdx !== -1, 'the ask call carries --dir when GRAFT_DIR is set');
+    assert.equal(argsSeen[dirIdx + 1], resolveContextDir(d));
+  } finally {
+    delete process.env.GRAFT_TEST_CLI;
+    delete process.env.CLAUDE_PROJECT_DIR;
+    delete process.env.GRAFT_DIR;
+  }
+});
+
+test('prompt hook omits --dir when GRAFT_DIR is unset (byte-identical argv to before)', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-prompt-dir-'));
+  mkdirSync(join(d, 'graft', '.graph'), { recursive: true });
+  writeFileSync(join(d, 'graft', '.graph', 'wiring.json'),
+    JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));
+  const { stub, argsFile } = writeAskArgsStub(d);
+  process.env.CLAUDE_PROJECT_DIR = d;
+  process.env.GRAFT_TEST_CLI = stub;
+  try {
+    await runWithStdin(
+      JSON.stringify({ session_id: 'p-nodir', prompt: 'how does the default graph get queried' }),
+      () => main('prompt'),
+    );
+    const argsSeen: string[] = JSON.parse(readFileSync(argsFile, 'utf8'));
+    assert.equal(argsSeen.indexOf('--dir'), -1, 'unconfigured repo: no --dir added');
+  } finally {
+    delete process.env.GRAFT_TEST_CLI;
+    delete process.env.CLAUDE_PROJECT_DIR;
+  }
+});
+
+test('session-start reads INDEX.md from a GRAFT_DIR-relocated context dir', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-session-start-dir-'));
+  mkdirSync(join(d, 'elsewhere'), { recursive: true });
+  writeFileSync(join(d, 'elsewhere', 'INDEX.md'), '# repo map (relocated)\n');
+  process.env.CLAUDE_PROJECT_DIR = d;
+  process.env.GRAFT_DIR = 'elsewhere';
+  const chunks: string[] = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  (process.stdout as any).write = (s: any) => { chunks.push(String(s)); return true; };
+  try {
+    await runWithStdin('{}', () => main('session-start'));
+  } finally {
+    (process.stdout as any).write = orig;
+    delete process.env.CLAUDE_PROJECT_DIR;
+    delete process.env.GRAFT_DIR;
+  }
+  assert.match(chunks.join(''), /repo map \(relocated\)/, 'orientation was built from the relocated INDEX.md');
 });

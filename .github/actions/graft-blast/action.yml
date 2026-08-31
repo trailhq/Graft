@@ -1,0 +1,202 @@
+name: graft blast radius
+description: >-
+  Index the repository with graft, work out what the pull request's diff can
+  affect and who has worked on it, and post that on the PR as one sticky comment
+  with a Mermaid diagram.
+  Requires a checkout with `fetch-depth: 0` — the diff is taken against the merge
+  base, which a shallow clone does not contain.
+
+inputs:
+  base:
+    description: >-
+      Ref to diff against. Defaults to the PR's base ref; the diff is taken from its
+      merge base with HEAD, so commits others merged into the base are not attributed
+      to this PR.
+    required: false
+    default: ""
+  depth:
+    description: 'Hops to walk over incoming edges, or "all" for the full closure.'
+    required: false
+    default: "2"
+  name-areas:
+    description: >-
+      Name the affected areas with one cached LLM call (`graft blast --name`). Needs
+      GRAFT_API_KEY; without one every area is named after its hub symbol, which is
+      still a name a reviewer can grep. This replaces `build --deep` on the PR path:
+      summarising every file in the repo to label six clusters cost ~356 calls and
+      thirteen minutes per run.
+    required: false
+    default: "true"
+  suggest-reviewers:
+    description: >-
+      Name the people behind each affected area, read from git history, so the author
+      can tag them. Needs the same `fetch-depth: 0` checkout the diff already needs.
+      Set false to leave people out of the comment entirely.
+    required: false
+    default: "true"
+  comment:
+    description: Post/update the PR comment. Set false to only produce the outputs.
+    required: false
+    default: "true"
+  viewer-url:
+    description: >-
+      Public URL of the exported viewer for this PR, linked from the comment. Leave
+      empty to omit the link. The comment holds five circles and a table; the graph
+      a reviewer can actually click through lives here.
+    required: false
+    default: ""
+  export-viewer:
+    description: >-
+      Write the standalone viewer for this PR's radius to this directory
+      (`graft blast --export-viz`). Empty skips the export. Publishing it is the
+      caller's job — see blast-pages.yml.
+    required: false
+    default: ""
+  token:
+    description: "Token used to post the comment. Needs `pull-requests: write` permission."
+    required: false
+    default: ${{ github.token }}
+  graft-cmd:
+    description: >-
+      How to invoke graft. The default installs the published CLI, which is what any
+      repo consuming this action wants. graft's OWN workflow overrides it with a
+      locally built binary (see setup-cmd) so a PR's comment is produced by the code
+      in that PR — otherwise this action would review new work with the last release,
+      which cannot run a command the release does not have yet.
+    required: false
+    default: npx --yes @nanonets/graft@latest
+  setup-cmd:
+    description: >-
+      Command run before graft, for the locally-built case (e.g. `npm ci && npm run
+      build`). Empty by default.
+    required: false
+    default: ""
+
+outputs:
+  markdown:
+    description: The comment body (also written to $GITHUB_STEP_SUMMARY).
+    value: ${{ steps.blast.outputs.markdown }}
+
+runs:
+  using: composite
+  steps:
+    # No checkout here on purpose: checkout policy belongs to the calling workflow
+    # (ref, submodules, credentials), and doing it twice would silently discard
+    # whatever the caller had set up. A missing merge base is reported by `graft
+    # blast` itself, naming `fetch-depth: 0` as the fix.
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: "20"
+
+    - name: Prepare the CLI
+      if: inputs.setup-cmd != ''
+      shell: bash
+      env:
+        SETUP_CMD: ${{ inputs.setup-cmd }}
+      run: bash -c "$SETUP_CMD"
+
+    # graft/ is git-ignored (it is a local cache), so the only place a name can
+    # survive between runs is GitHub's cache. Restore-only here: a cache saved by a
+    # PR job is scoped to that PR's branch and no other PR could read it, so the
+    # useful entry is always the one a push-to-main job saved (see blast-cache.yml).
+    - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: graft
+        key: graft-${{ github.event.pull_request.base.sha }}
+        restore-keys: |
+          graft-
+
+    - name: Build the graph
+      id: build
+      shell: bash
+      # Every workflow value reaches the script through env, never through `${{ }}`
+      # inside the shell text: a branch name is attacker-controllable on a fork PR,
+      # and inline interpolation is how that becomes command injection.
+      env:
+        GRAFT: ${{ inputs.graft-cmd }}
+      run: |
+        set -uo pipefail
+        # Structural only: ~4s, no API key, and it is all `blast` reads. The LLM tier
+        # is no longer on this path — `blast --name` below pays for the six labels
+        # the comment actually shows instead of summarising the whole repo.
+        $GRAFT build .
+
+    - name: Compute the blast radius
+      id: blast
+      shell: bash
+      env:
+        BASE: ${{ inputs.base != '' && inputs.base || format('origin/{0}', github.event.pull_request.base.ref) }}
+        DEPTH: ${{ inputs.depth }}
+        NAME_AREAS: ${{ inputs.name-areas }}
+        SUGGEST_REVIEWERS: ${{ inputs.suggest-reviewers }}
+        # Both, because they are two different keys on the same person: CI knows the
+        # login, while the commits in the diff carry the email. Excluding on one alone
+        # tells roughly half of all authors to tag themselves.
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        PR_AUTHOR_EMAIL: ${{ github.event.pull_request.user.email }}
+        VIEWER_URL: ${{ inputs.viewer-url }}
+        EXPORT_VIZ: ${{ inputs.export-viewer }}
+        GRAFT: ${{ inputs.graft-cmd }}
+      run: |
+        set -euo pipefail
+        # An ARRAY, not a string: a value here can contain a space (a git display
+        # name does), and word-splitting an interpolated string is the same class of
+        # bug as interpolating a workflow expression into shell text. Nothing is
+        # ever `eval`ed. Note that a literal GitHub expression cannot appear even in
+        # a comment in this block — the template engine evaluates `run:` before bash
+        # ever sees it, and an empty one fails the whole action to load.
+        args=(blast . --base "$BASE" --depth "$DEPTH")
+        # --name never fails the step: with no key, a spent quota or a refused call
+        # it prints one line on stderr and every area keeps its hub-symbol name.
+        if [ "$NAME_AREAS" = "true" ]; then args+=(--name); fi
+        # One command for both outputs: the page and the comment then describe the
+        # same radius, named once. A second `viz --export` step could drift from it.
+        if [ -n "$EXPORT_VIZ" ]; then args+=(--export-viz "$EXPORT_VIZ"); fi
+        if [ "$SUGGEST_REVIEWERS" = "true" ]; then
+          # Both keys for the same person, and neither is reliable alone: CI has the
+          # login, the commits have the email, and the webhook usually leaves the
+          # email empty. `graft blast` also excludes every author in the diff range
+          # itself, which is what actually covers the empty-email case.
+          authors=()
+          if [ -n "$PR_AUTHOR" ]; then authors+=("$PR_AUTHOR"); fi
+          if [ -n "$PR_AUTHOR_EMAIL" ]; then authors+=("$PR_AUTHOR_EMAIL"); fi
+          if [ ${#authors[@]} -gt 0 ]; then args+=(--pr-author "${authors[@]}"); fi
+        else
+          args+=(--no-owners)
+        fi
+        args+=(--format markdown)
+        $GRAFT "${args[@]}" > blast.md
+        if [ -n "$VIEWER_URL" ]; then
+          printf '\n[**Open the interactive graph →**](%s) — click an area to see its dependent symbols at file:line.\n' "$VIEWER_URL" >> blast.md
+        fi
+        cat blast.md >> "$GITHUB_STEP_SUMMARY"
+        {
+          echo "markdown<<GRAFT_EOF"
+          cat blast.md
+          echo "GRAFT_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Post or update the comment
+      if: inputs.comment == 'true' && github.event.pull_request.number != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        # One comment per PR, edited in place: a new comment on every push turns a
+        # busy PR into a wall of stale diagrams. The marker is how the comment is
+        # found again, and it stays invisible in the rendered body.
+        marker='<!-- graft-blast-radius -->'
+        printf '%s\n' "$marker" > body.md
+        cat blast.md >> body.md
+        # `--paginate` runs the filter per page, so a match could print more than one
+        # line across pages; the first is the comment we own.
+        existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          --jq "map(select(.body | startswith(\"$marker\"))) | .[0].id // empty" | head -1)
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@body.md >/dev/null
+        else
+          gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@body.md >/dev/null
+        fi

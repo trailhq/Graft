@@ -160,6 +160,41 @@ test("A2: extractFile sets NodeV1.owner to the immediate enclosing class/receive
   assert.equal(goNodes.find((x) => x.id === "c.go#Server.Start")?.owner, "Server");
 });
 
+test("PHP trait method: $this->m() resolves via implements (trait-use) edge", () => {
+  const nodes = [
+    n("app.php", "file"),
+    n("app.php#Widget", "class"),
+    n("app.php#Widget.run", "method"),
+    n("app.php#Loggable", "trait"),
+    n("app.php#Loggable.log", "method"),
+  ];
+  const edges = resolveEdges(nodes, [
+    { source: "app.php#Widget", relation: "implements", name: "Loggable", file: "app.php" },
+    { source: "app.php#Widget.run", relation: "calls", name: "log", viaMember: true, recvType: "Widget", file: "app.php" },
+  ]);
+  const call = edges.find((e) => e.relation === "calls");
+  assert.equal(call?.target, "app.php#Loggable.log");
+  assert.equal(call?.confidence, "extracted");
+});
+
+test("PHP trait method: ambiguous when two traits provide the same method", () => {
+  const nodes = [
+    n("app.php", "file"),
+    n("app.php#Widget", "class"),
+    n("app.php#Widget.run", "method"),
+    n("app.php#T1", "trait"),
+    n("app.php#T1.log", "method"),
+    n("app.php#T2", "trait"),
+    n("app.php#T2.log", "method"),
+  ];
+  const edges = resolveEdges(nodes, [
+    { source: "app.php#Widget", relation: "implements", name: "T1", file: "app.php" },
+    { source: "app.php#Widget", relation: "implements", name: "T2", file: "app.php" },
+    { source: "app.php#Widget.run", relation: "calls", name: "log", viaMember: true, recvType: "Widget", file: "app.php" },
+  ]);
+  assert.equal(edges.filter((e) => e.relation === "calls").length, 0);
+});
+
 test("A2: owner-keyed ownerMethod/classParents resolve identically to the old id-slicing scheme (mixed fixture: sibling classes + inheritance)", () => {
   const src = [
     "class Base {",

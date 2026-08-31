@@ -7,7 +7,8 @@ import { planInit } from '../src/hosts/plan.js';
 import {
   KEY_CTRL_C, KEY_DOWN, KEY_ESC, KEY_UP,
   describeWrites, formatNonInteractiveHelp, formatPlan, initialPickerState,
-  keyOf, keysOf, pickedIds, reducePicker, renderPicker, tilde,
+  keyOf, keysOf, pickedHostIds, pickedIds, pickedTelemetry, reducePicker, renderPicker, tilde,
+  TELEMETRY_ROW_ID,
   type PickerKey,
 } from '../src/cli-picker.js';
 
@@ -187,7 +188,7 @@ test('formatPlan separates repo writes from machine-wide ones', () => {
   const globalAt = text.indexOf('affects ALL repos:');
   assert.ok(repoAt >= 0 && globalAt > repoAt, 'repo section comes first');
   assert.ok(text.includes(`~${sep}${join('.codex', 'hooks.json')}`), `plan should name the codex hooks file:\n${text}`);
-  assert.match(text, /PostToolUse: Write\|Edit\|MultiEdit/);
+  assert.match(text, /SessionStart \/ UserPromptSubmit \/ PostToolUse \/ Stop/);
   assert.match(text, /nothing was written \(--dry-run\)/);
   assert.match(text, /--no-global/);
 });
@@ -219,4 +220,69 @@ test('formatNonInteractiveHelp still helps when nothing was detected', () => {
   // still mentions the flag by name).
   assert.doesNotMatch(text, /^ +graft init --yes/m);
   assert.match(text, /--agents claude/);
+});
+
+// --- the telemetry consent row ---
+
+/** Same driver, but with the consent row offered. */
+function driveWithConsent(repo: string, home: string, keys: PickerKey[]) {
+  let state = initialPickerState(planInit(repo, { home }), repo, home, { offerTelemetry: true });
+  for (const k of keys) state = reducePicker(state, k);
+  return state;
+}
+
+test('the consent row is absent unless it is offered', () => {
+  const repo = fresh(); const home = fullHome();
+  const state = initialPickerState(planInit(repo, { home }), repo, home);
+  assert.equal(state.rows.some((r) => r.id === TELEMETRY_ROW_ID), false);
+  assert.equal(pickedTelemetry(state), undefined, 'not offered means no answer, not "no"');
+});
+
+test('when offered, the consent row is last and starts checked', () => {
+  const repo = fresh(); const home = fullHome();
+  const state = initialPickerState(planInit(repo, { home }), repo, home, { offerTelemetry: true });
+  assert.equal(state.rows.at(-1)?.id, TELEMETRY_ROW_ID);
+  assert.equal(state.rows.at(-1)?.kind, 'setting');
+  assert.equal(pickedTelemetry(state), true);
+});
+
+test('unchecking the row is how a user declines', () => {
+  const repo = fresh(); const home = fullHome();
+  // Up from the first row wraps onto the consent row, which is last.
+  const state = driveWithConsent(repo, home, ['up', 'space']);
+  assert.equal(pickedTelemetry(state), false);
+});
+
+test('the consent row is never returned as an agent to wire', () => {
+  const repo = fresh(); const home = fullHome();
+  const state = driveWithConsent(repo, home, ['all']);
+  assert.equal(pickedHostIds(state).includes(TELEMETRY_ROW_ID), false);
+  assert.equal(pickedIds(state).includes(TELEMETRY_ROW_ID), true, 'pickedIds keeps its old meaning');
+});
+
+test('a (toggle all) is about agents and leaves the consent answer alone', () => {
+  const repo = fresh(); const home = fullHome();
+  const n = planInit(repo, { home }).length;
+  // On: every agent selected, consent still the default yes.
+  const on = driveWithConsent(repo, home, ['all']);
+  assert.equal(pickedHostIds(on).length, n);
+  assert.equal(pickedTelemetry(on), true);
+  // Off: no agents, and the consent answer is STILL untouched — "wire nothing"
+  // is not the same statement as "share nothing".
+  const off = driveWithConsent(repo, home, ['all', 'all']);
+  assert.deepEqual(pickedHostIds(off), []);
+  assert.equal(pickedTelemetry(off), true);
+  // And a user who explicitly declined keeps that through a toggle-all.
+  const declined = driveWithConsent(repo, home, ['up', 'space', 'all']);
+  assert.equal(pickedTelemetry(declined), false);
+});
+
+test('the rendered row shows the label, a rule, and what is not collected', () => {
+  const repo = fresh(); const home = fullHome();
+  const out = renderPicker(initialPickerState(planInit(repo, { home }), repo, home, { offerTelemetry: true }), false);
+  assert.match(out, /\[x\] anonymous usage stats/);
+  assert.match(out, /no code, no file paths, no queries/);
+  assert.match(out, /TELEMETRY\.md/);
+  assert.equal(out.includes(TELEMETRY_ROW_ID), false, 'the internal id must never be shown');
+  assert.match(out, /─/, 'a rule separates the settings from the agents');
 });

@@ -203,6 +203,270 @@ test("ask reports coverage: 1.0 when every query term hits, low on mostly-off-co
   }
 });
 
+test("ask file-first selection preserves baseline file order and delays sibling spans", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-ask-file-first-"));
+  try {
+    writeFileSync(
+      join(dir, "a.ts"),
+      `export function quartzAlpha(): string { return "quartz"; }\n` +
+        `export function quartzBeta(): string { return "quartz"; }\n` +
+        `export function quartzGamma(): string { return "quartz"; }\n`,
+    );
+    writeFileSync(join(dir, "b.ts"), `export function quartzDelta(): string { return "quartz"; }\n`);
+    writeFileSync(join(dir, "c.ts"), `export function quartzEpsilon(): string { return "quartz"; }\n`);
+    await buildGraph(dir);
+
+    const baseline = ask(dir, "quartz", { graphRank: false, limit: 20, fileFirst: false });
+    const pathOf = (pointer: string) => pointer.split(":")[0];
+    const baselineFiles = baseline.hits.map((hit) => pathOf(hit.pointer));
+    const baselineFileOrder = [...new Set(baselineFiles)];
+    assert.ok(baselineFileOrder.length >= 3, "fixture produces at least three ranked files");
+    assert.ok(new Set(baselineFiles.slice(0, 3)).size < 3, "baseline prefix contains sibling spans");
+
+    const selected = ask(dir, "quartz", { graphRank: false, limit: 20 });
+    const selectedFiles = selected.hits.map((hit) => pathOf(hit.pointer));
+    assert.deepEqual(
+      selectedFiles.slice(0, baselineFileOrder.length),
+      baselineFileOrder,
+      "the first pass is the exact baseline first-occurrence file order",
+    );
+    assert.equal(selected.hits[0].pointer, baseline.hits[0].pointer, "top hit is frozen by construction");
+    assert.equal(selected.coverage, baseline.coverage, "top-hit relevance coverage is unchanged");
+    assert.equal(selected.coverageStrong, baseline.coverageStrong, "top-hit strength coverage is unchanged");
+    assert.ok(
+      selectedFiles.slice(baselineFileOrder.length).includes("a.ts"),
+      "later rounds retain additional exact spans instead of imposing quota one",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ask bounded file scoring rewards one anchor without moving singleton scores", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-ask-file-complement-"));
+  try {
+    writeFileSync(
+      join(dir, "a.ts"),
+      `export function amberShard(): string { return "amber"; }\n` +
+        `export function cobaltShard(): string { return "cobalt"; }\n`,
+    );
+    writeFileSync(
+      join(dir, "b.ts"),
+      `export function amberCobalt(): string { return "amber cobalt"; }\n`,
+    );
+    await buildGraph(dir);
+
+    const baseline = ask(dir, "amber cobalt", {
+      graphRank: false,
+      limit: 20,
+      fileFirst: false,
+    });
+    const bounded = ask(dir, "amber cobalt", {
+      graphRank: false,
+      limit: 20,
+      fileFirst: false,
+      fileComplement: true,
+    });
+    const byTitle = (hits: AskHit[]) => new Map(hits.map((hit) => [hit.title, hit]));
+    const baselineByTitle = byTitle(baseline.hits);
+    const boundedByTitle = byTitle(bounded.hits);
+
+    const siblingTitles = ["amberShard · function", "cobaltShard · function"];
+    const gains = siblingTitles.map((title) => ({
+      a0: baselineByTitle.get(title)?.score ?? 0,
+      bounded: boundedByTitle.get(title)?.score ?? 0,
+    }));
+    assert.equal(
+      gains.filter((gain) => gain.bounded > gain.a0).length,
+      1,
+      "only the raw-lexical anchor receives the bounded residual",
+    );
+    assert.ok(
+      Math.max(...gains.map((gain) => gain.bounded)) > Math.max(...gains.map((gain) => gain.a0)),
+    );
+    assert.equal(
+      bounded.hits.filter((hit) => hit.pointer.startsWith("a.ts:")).length,
+      1,
+      "true file candidates project one representative instead of retaining sibling documents",
+    );
+
+    const singletonBefore = baselineByTitle.get("amberCobalt · function")?.score;
+    const singletonAfter = boundedByTitle.get("amberCobalt · function")?.score;
+    assert.notEqual(singletonBefore, undefined);
+    assert.equal(singletonAfter, singletonBefore, "the unrelated singleton keeps its exact score");
+    assert.deepEqual(
+      bounded.hits.map((hit) => hit.score),
+      [...bounded.hits].map((hit) => hit.score).sort((a, b) => b - a),
+      "the adapter keeps score-sorted symbol selection when file-first is disabled",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("default file-aware ranking locks the exact baseline top hit and delays secondary spans", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-ask-a5-lock-"));
+  try {
+    writeFileSync(
+      join(dir, "a.ts"),
+      `export function amberShard(): string { return "amber"; }\n` +
+        `export function cobaltShard(): string { return "cobalt"; }\n`,
+    );
+    writeFileSync(
+      join(dir, "b.ts"),
+      `export function amberCobalt(): string { return "amber cobalt"; }\n`,
+    );
+    await buildGraph(dir);
+    writeFileSync(
+      join(dir, "graft", "a5-concept.md"),
+      `---\nslug: a5-concept\nname: Aardvark amber cobalt\nsources:\n  - path: b.ts\n---\n` +
+        `Amber cobalt behavior overview.\n`,
+    );
+
+    const baseline = ask(dir, "amber cobalt", {
+      graphRank: false,
+      limit: 20,
+      fileFirst: false,
+    });
+    const unlocked = ask(dir, "amber cobalt", {
+      graphRank: false,
+      limit: 20,
+      fileFirst: false,
+      fileComplement: true,
+    });
+    const a5 = ask(dir, "amber cobalt", {
+      graphRank: false,
+      limit: 20,
+    });
+    const explicitA5 = ask(dir, "amber cobalt", {
+      graphRank: false,
+      limit: 20,
+      fileFirst: true,
+      fileComplement: true,
+      fileTopLock: true,
+    });
+
+    assert.deepEqual(
+      a5,
+      explicitA5,
+      "the default route is exactly the explicit file-aware configuration",
+    );
+
+    assert.equal(baseline.hits[0].kind, "concept", "fixture gives the baseline a concept top hit");
+    assert.ok(
+      (unlocked.hits.find((hit) => hit.title === "amberShard · function")?.score ?? 0) >
+        (baseline.hits.find((hit) => hit.title === "amberShard · function")?.score ?? 0),
+      "the fixture exercises a live bounded file-score gain under the locked top",
+    );
+    assert.deepEqual(
+      {
+        kind: a5.hits[0].kind,
+        title: a5.hits[0].title,
+        pointer: a5.hits[0].pointer,
+        score: a5.hits[0].score,
+      },
+      {
+        kind: baseline.hits[0].kind,
+        title: baseline.hits[0].title,
+        pointer: baseline.hits[0].pointer,
+        score: baseline.hits[0].score,
+      },
+      "file-aware ranking preserves the exact baseline top candidate, including concepts",
+    );
+    assert.equal(a5.coverage, baseline.coverage);
+    assert.equal(a5.coverageStrong, baseline.coverageStrong);
+
+    const symbolFiles = a5.hits
+      .filter((hit) => hit.kind === "symbol")
+      .map((hit) => hit.pointer.split(":")[0]);
+    assert.deepEqual(symbolFiles.slice(0, 2), ["b.ts", "a.ts"]);
+    assert.ok(
+      symbolFiles.slice(2).includes("a.ts"),
+      "file-aware ranking retains a.ts's second exact span after both files emitted a leader",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("bounded file grouping happens before the output limit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-ask-file-before-limit-"));
+  try {
+    const crowded = Array.from(
+      { length: 45 },
+      (_, index) => `export function crowded${index}(): string { return "needle"; }\n`,
+    ).join("");
+    writeFileSync(join(dir, "crowded.ts"), crowded);
+    writeFileSync(
+      join(dir, "other.ts"),
+      `export function other(): string { return "needle"; }\n`,
+    );
+    await buildGraph(dir);
+
+    const result = ask(dir, "needle", {
+      graphRank: false,
+      limit: 2,
+      fileFirst: false,
+      fileComplement: true,
+    });
+    const files = result.hits.map((hit) => hit.pointer.split(":")[0]);
+
+    assert.equal(result.hits.length, 2);
+    assert.deepEqual(new Set(files), new Set(["crowded.ts", "other.ts"]));
+    const a5 = ask(dir, "needle", {
+      graphRank: false,
+      limit: 2,
+      fileComplement: true,
+      fileTopLock: true,
+    });
+    assert.deepEqual(
+      new Set(a5.hits.map((hit) => hit.pointer.split(":")[0])),
+      new Set(["crowded.ts", "other.ts"]),
+      "file-aware ranking groups the complete candidate set before applying the output limit",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ask bounded file scoring keeps the source first and preserves the outer test penalty", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-ask-file-complement-tests-"));
+  try {
+    writeFileSync(
+      join(dir, "download.ts"),
+      `export function downloadStallFallback(): string { return "download stall fallback"; }\n`,
+    );
+    writeFileSync(
+      join(dir, "download.test.ts"),
+      `export function testDownloadStall(): string { return "download stall"; }\n` +
+        `export function testDownloadFallback(): string { return "download fallback"; }\n`,
+    );
+    await buildGraph(dir);
+
+    const options = { graphRank: false, limit: 20, fileFirst: false } as const;
+    const baseline = ask(dir, "download stall fallback", {
+      ...options,
+    });
+    const bounded = ask(dir, "download stall fallback", {
+      ...options,
+      fileComplement: true,
+    });
+    const scoreByPointer = (hits: AskHit[]) => new Map(hits.map((hit) => [hit.pointer, hit.score]));
+    const baselineScores = scoreByPointer(baseline.hits);
+    const boundedScores = scoreByPointer(bounded.hits);
+
+    assert.match(bounded.hits[0].pointer, /^download\.ts:/, "the source definition remains first");
+    const testPointers = baseline.hits.filter((hit) => hit.pointer.startsWith("download.test.ts:")).map((hit) => hit.pointer);
+    assert.equal(
+      testPointers.filter((pointer) => (boundedScores.get(pointer) ?? 0) > (baselineScores.get(pointer) ?? 0)).length,
+      1,
+      "only one test-file representative receives the discounted file score",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ask finds a symbol by a term that appears only in its body (body-indexing)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft-ask-body-"));
   try {
@@ -407,6 +671,122 @@ test("ask on a multi-scope repo: top hits federate both scopes, labeled, with a 
     assert.match(out, /\[backend\/\] /, "backend hits carry a scope label");
     assert.match(out, /matched in: .*frontend\/ \(\d+\)/, "footer reports frontend's hit count");
     assert.match(out, /matched in: .*backend\/ \(\d+\)/, "footer reports backend's hit count");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-first selection preserves a multi-scope result's top relevance and file order", async () => {
+  const dir = multiScopeFixture();
+  try {
+    await buildGraph(dir);
+    const baseline = ask(dir, "how are errors handled", { limit: 30, fileFirst: false });
+
+    const selected = ask(dir, "how are errors handled", { limit: 30 });
+    const pathOf = (pointer: string) => pointer.split(":")[0];
+    const baselineFileOrder = [...new Set(baseline.hits.map((hit) => pathOf(hit.pointer)))];
+    const selectedFiles = selected.hits.map((hit) => pathOf(hit.pointer));
+
+    assert.deepEqual(selectedFiles.slice(0, baselineFileOrder.length), baselineFileOrder);
+    assert.equal(selected.hits[0].pointer, baseline.hits[0].pointer);
+    assert.equal(selected.coverage, baseline.coverage);
+    assert.equal(selected.coverageStrong, baseline.coverageStrong);
+    assert.deepEqual(selected.scopes, baseline.scopes, "selection does not alter scope participation metadata");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("bounded scoring applies at most one anchor boost per file before comparable-scope combination", async () => {
+  const dir = multiScopeFixture();
+  try {
+    await buildGraph(dir);
+    const query = "errors handled banner reported serialized logged";
+    const baseline = ask(dir, query, {
+      graphRank: false,
+      limit: 100,
+      fileFirst: false,
+    });
+    const bounded = ask(dir, query, {
+      graphRank: false,
+      limit: 100,
+      fileFirst: false,
+      fileComplement: true,
+    });
+    const before = new Map(baseline.hits.map((hit) => [hit.pointer, hit.score]));
+    const changedByFile = new Map<string, number>();
+    for (const hit of bounded.hits) {
+      const old = before.get(hit.pointer);
+      assert.notEqual(old, undefined, `${hit.pointer} remains the same concrete candidate`);
+      assert.ok(hit.score >= old!, "term pooling never lowers an existing candidate score");
+      if (hit.score > old!) {
+        const file = hit.pointer.split(":")[0];
+        changedByFile.set(file, (changedByFile.get(file) ?? 0) + 1);
+      }
+    }
+    assert.ok(changedByFile.size > 0, "the distributed fixture exercises bounded scoring");
+    for (const [file, count] of changedByFile)
+      assert.equal(count, 1, `${file} contributes exactly one boosted representative`);
+    const emittedFiles = bounded.hits.map((hit) => hit.pointer.split(":")[0]);
+    assert.equal(
+      new Set(emittedFiles).size,
+      emittedFiles.length,
+      "comparable-scope combination consumes one representative per exact file",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-aware ranking keeps the exact multi-scope baseline top before queue projection", async () => {
+  const dir = multiScopeFixture();
+  try {
+    await buildGraph(dir);
+    const query = "errors handled banner reported serialized logged";
+    const baseline = ask(dir, query, {
+      graphRank: false,
+      limit: 100,
+      fileFirst: false,
+    });
+    const a5 = ask(dir, query, {
+      graphRank: false,
+      limit: 100,
+      fileComplement: true,
+      fileTopLock: true,
+    });
+
+    assert.deepEqual(
+      {
+        kind: a5.hits[0].kind,
+        title: a5.hits[0].title,
+        pointer: a5.hits[0].pointer,
+        score: a5.hits[0].score,
+        scope: a5.hits[0].scope,
+      },
+      {
+        kind: baseline.hits[0].kind,
+        title: baseline.hits[0].title,
+        pointer: baseline.hits[0].pointer,
+        score: baseline.hits[0].score,
+        scope: baseline.hits[0].scope,
+      },
+    );
+    assert.equal(a5.coverage, baseline.coverage);
+    assert.equal(a5.coverageStrong, baseline.coverageStrong);
+    assert.deepEqual(a5.scopes, baseline.scopes);
+
+    const symbolFiles = a5.hits
+      .filter((hit) => hit.kind === "symbol")
+      .map((hit) => hit.pointer.split(":")[0]);
+    const firstDuplicate = symbolFiles.findIndex(
+      (file, index) => symbolFiles.indexOf(file) !== index,
+    );
+    assert.ok(firstDuplicate > 0, "fixture retains at least one secondary span");
+    assert.equal(
+      new Set(symbolFiles.slice(0, firstDuplicate)).size,
+      firstDuplicate,
+      "no secondary span appears before every preceding file leader",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

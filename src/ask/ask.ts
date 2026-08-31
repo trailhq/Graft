@@ -17,7 +17,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import matter from "gray-matter";
 import { contextDirFor } from "../context/node-file.js";
-import { savingsFooter, savingsFor, SAVINGS_TURN_NUDGE, type Savings } from "../context/savings.js";
+import { withSavings, savingsFor, SAVINGS_TURN_NUDGE, type Savings } from "../context/savings.js";
 import { loadGraphCached, loadAskIndexCached } from "../graph/load.js";
 import {
   assertPrefixIndexed,
@@ -30,8 +30,22 @@ import {
 import { normalizePathPrefix } from "../util/paths.js";
 import { resolveSymbol } from "../graph/traverse.js";
 import type { EdgeV1, GraphV1, NodeV1, Relation } from "../graph/types.js";
-import { rankScopesAndFuse } from "./fuse.js";
-import { personalizedPageRank } from "./graphrank.js";
+import {
+  combineComparableScopes,
+  rankScopesAndFuse,
+  type ScopeRankCandidate,
+} from "./fuse.js";
+import {
+  rankFilesBounded,
+  type FileRankCandidate,
+  type RankedFile,
+} from "./file-rank.js";
+import { fileFirstRoundRobin, roundRobinQueues } from "./file-selection.js";
+import {
+  personalizedPageRank,
+  personalizedPageRankPrepared,
+  preparePageRankPartitions,
+} from "./graphrank.js";
 import { readSourceFile } from "../util/source.js";
 import { counts, tokenize, type AskIndex, type AskIndexDoc } from "./index-file.js";
 
@@ -54,6 +68,30 @@ export interface AskHit {
   scope?: string;
 }
 
+/** Internal file-aware ranking group. The first hit is the one document that
+ * participates in a higher-level ranker; the remaining hits are projected only
+ * after every ranked group has emitted its leader. */
+export interface AskRankingGroup {
+  key: string;
+  hits: AskHit[];
+  /** Exact baseline-scored members of this group, in baseline order. Populated
+   * only in opt-in metadata so a workspace top lock never reuses a pooled
+   * leader score for a secondary span. */
+  baselineHits?: AskHit[];
+  coverage: number;
+  coverageStrong: number;
+}
+
+/** Internal metadata used by workspace federation to fuse file documents
+ * before projecting symbol spans. It is opt-in and never appears in normal
+ * CLI/API results. */
+export interface AskRankingMetadata {
+  groups: AskRankingGroup[];
+  baseline: Array<{ group: string; hit: AskHit }>;
+  baselineCoverage?: number;
+  baselineCoverageStrong?: number;
+}
+
 /** Max source lines to inline per hit — a definition longer than this is
  * truncated with a marker, so one giant function can't blow up the pack. */
 const MAX_SPAN_LINES = 80;
@@ -63,6 +101,9 @@ export interface AskResult {
   mode: "structural" | "lexical" | "empty";
   /** For structural mode: the symbol whose neighbours we walked. */
   subject?: string;
+  /** Authoritative result order. Lexical results preserve each hit's raw
+   * relevance score, but select distinct-file leaders before sibling spans, so
+   * callers must not re-sort this list by `score`. */
   hits: AskHit[];
   note?: string;
   /** Token-saving estimate, set only in `--source` (retriever) mode: the whole
@@ -88,6 +129,8 @@ export interface AskResult {
    * doc id). Drives formatAsk's `matched in:` / `also matched:` footer.
    * Absent on single-scope repos — zero output change there. */
   scopes?: { federated: string[]; alsoMatched: { scope: string; bestId: string }[] };
+  /** @internal Opt-in latent file groups plus the exact pre-file-ranking list. */
+  ranking?: AskRankingMetadata;
 }
 
 /** First real prose line of a node body (skips headings, markers, blanks). */
@@ -219,6 +262,32 @@ function bm25(
     if (tf) s += (idf.get(t) ?? 1) * ((tf * (k1 + 1)) / (tf + norm));
   }
   return s;
+}
+
+/** Exact query terms awarded by the existing lexical fields. Bounded ranking uses
+ * presence only: raw name/path/BM25 magnitudes cannot enter the file residual. */
+function matchedLexicalTerms(
+  query: Map<string, number>,
+  name: Map<string, number>,
+  path: Map<string, number>,
+  body: Map<string, number>,
+): Set<string> {
+  const terms = new Set<string>();
+  for (const term of query.keys())
+    if (name.has(term) || path.has(term) || body.has(term)) terms.add(term);
+  return terms;
+}
+
+/** NAME-only query terms behind file-level strong coverage. This intentionally
+ * mirrors {@link strongShare}'s plural folding while excluding file nodes at
+ * the call site. */
+function matchedStrongTerms(
+  query: Map<string, number>,
+  name: Map<string, number>,
+): Set<string> {
+  const terms = new Set<string>();
+  for (const term of query.keys()) if (hasTerm(name, term)) terms.add(term);
+  return terms;
 }
 
 // ── Structural intent ──────────────────────────────────────────────────────
@@ -392,7 +461,34 @@ function matchedIdfShare(
   return total > 0 ? matched / total : 0;
 }
 
-function lexical(query: string, corpus: Corpus, limit: number, graphRank: boolean, inPrefix?: string): AskResult {
+/** Normalized query-term IDF mass used by file-level union coverage. Presence
+ * comes from the exact term-contribution maps, so plural folding cannot
+ * manufacture evidence that the lexical scorer did not award. */
+function normalizedQueryWeights(
+  q: Map<string, number>,
+  idf: Map<string, number>,
+  dfltIdf: number,
+): Map<string, number> {
+  let total = 0;
+  for (const t of q.keys()) total += idf.get(t) ?? dfltIdf;
+  if (total <= 0) return new Map();
+
+  return new Map(
+    [...q.keys()].map((term) => [term, (idf.get(term) ?? dfltIdf) / total]),
+  );
+}
+
+function lexical(
+  query: string,
+  corpus: Corpus,
+  limit: number,
+  graphRank: boolean,
+  inPrefix?: string,
+  fileFirst = true,
+  fileComplement = false,
+  fileTopLock = false,
+  includeRankingMetadata = false,
+): AskResult {
   // Binary query terms: a word repeated in a pasted issue body counts once, so a
   // ranty description can't linearly amplify an incidental word.
   const q = new Map([...counts(tokenize(query)).keys()].map((t) => [t, 1]));
@@ -496,6 +592,10 @@ function lexical(query: string, corpus: Corpus, limit: number, graphRank: boolea
   // Parallel to matchedOf, but over NAME+PATH only (body dropped) — the
   // match-strength signal exported as `coverageStrong`.
   const matchedStrongOf = new Map<AskHit, number>();
+  // Final listwise selection groups code hits by exact source path. Concepts
+  // use singleton pseudo-groups so they remain ordinary ranked candidates
+  // without masquerading as every file listed in their sources.
+  const selectionGroupOf = new Map<AskHit, string>();
 
   // ── Concepts (prose nodes; not in the wiring graph) ──
   const conceptHits: AskHit[] = [];
@@ -514,6 +614,10 @@ function lexical(query: string, corpus: Corpus, limit: number, graphRank: boolea
       };
       matchedOf.set(hit, matchedIdfShare(q, [name, body], idf, dfltIdf));
       matchedStrongOf.set(hit, matchedIdfShare(q, [name], idf, dfltIdf)); // concepts have no path field
+      // A concept is one singleton partition even if two source entries reuse
+      // the same slug; include its stable encounter index to prevent accidental
+      // grouping by frontmatter alone.
+      selectionGroupOf.set(hit, `concept:${c.slug}:${conceptHits.length}`);
       conceptHits.push(hit);
     }
   }
@@ -527,95 +631,266 @@ function lexical(query: string, corpus: Corpus, limit: number, graphRank: boolea
   };
   const docsById = new Map(symbolDocs.map((d) => [d.n.id, d]));
   const symbolHits: AskHit[] = [];
+  const baselineSymbolHits: AskHit[] = [];
+  const baselineHitById = new Map<string, AskHit>();
+  const fileQueueHitsByGroup = new Map<string, () => AskHit[]>();
+  const baselineQueueHitsByGroup = new Map<string, () => AskHit[]>();
+  const fileGroups: AskRankingGroup[] = [];
+  const needsFileQueues = fileComplement && (fileTopLock || includeRankingMetadata);
+  const makeSymbolHit = (id: string, hitScore: number, scope?: string): AskHit | null => {
+    const n = byId.get(id);
+    if (!n) return null;
+    const hit: AskHit = {
+      kind: "symbol",
+      title: `${n.name} · ${n.kind}`,
+      pointer: n.kind === "file" ? n.path : `${n.path}:${n.span}`,
+      snippet: n.summary?.split("\n")[0].trim() ?? n.signature ?? "",
+      score: hitScore,
+      ...(scope === undefined ? {} : { scope }),
+    };
+    const d = docsById.get(id);
+    matchedOf.set(
+      hit,
+      d ? matchedIdfShare(q, [d.name, d.path, d.body], idf, dfltIdf) : 0,
+    );
+    matchedStrongOf.set(hit, d ? strongShare(q, n, d, idf, dfltIdf) : 0);
+    selectionGroupOf.set(hit, `file:${n.path}`);
+    return hit;
+  };
+  const symbolTitle = (id: string): string => {
+    const n = byId.get(id);
+    return n ? `${n.name} · ${n.kind}` : id;
+  };
   // The single-vs-multi-scope branch keys on `scopesOfGraph` ONLY: one scope
-  // (or no graph) takes the existing path below completely untouched — that
-  // branch is a byte-level regression guarantee for single-scope repos.
+  // (or no graph) keeps the original local scoring path.
   const scopes = graph ? scopesOfGraph(graph) : null;
   let scopeMeta: AskResult["scopes"];
+  // The BM25 length prior, corpus-global like `idf`/`dfltIdf` above. Hoisted out
+  // of the single-scope branch so BOTH paths score against the same statistics
+  // — that shared basis is half of what makes multi-scope scores comparable
+  // (see fuse.ts's module header). Under `--in`, the sidecar's `avgBodyLen`
+  // covers the whole corpus and must not be reused for the filtered set.
+  const avgBodyLen = askIndex && !inPrefix
+    ? askIndex.avgBodyLen
+    : symbolDocs.length
+      ? symbolDocs.reduce((a, d) => a + bodyLen(d.body), 0) / symbolDocs.length
+      : 0;
+  // Populated only for bounded file ranking. The baseline path pays no allocation
+  // or matched-term tracking cost, and their scalar lexical path remains exact.
+  const rawLexicalById = new Map<string, number>();
+  const matchedTermsById = new Map<string, Set<string>>();
+  const matchedStrongTermsById = new Map<string, Set<string>>();
+  const fileQueryWeights = fileComplement
+    ? normalizedQueryWeights(q, idf, dfltIdf)
+    : new Map<string, number>();
+  const spanStart = (span: string): number => {
+    const match = span.match(/^L(\d+)-L\d+$/);
+    return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
+  };
   if (scopes && scopes.length > 1) {
-    // ── Multi-scope repo: rank each sub-project against its OWN corpus (its
-    // IDF, its BM25 length prior, its subgraph walk), then fuse the per-scope
-    // orderings by reciprocal rank — the big scope can't drown the small one.
-    // Same scoring functions and blend as the single-scope path, just fed
-    // per-scope inputs; the fusion itself lives in fuse.ts. ──
+    // ── Multi-scope repo: partition by sub-project and walk each subgraph
+    // separately — so the big scope can't drown the small one — but score every
+    // scope against the repo-wide statistics, so the results stay comparable and
+    // can be ordered by score. Same scoring functions and blend as the
+    // single-scope path; the combination itself lives in fuse.ts. ──
     const byScope = new Map<string, typeof symbolDocs>();
+    const scopeById = new Map<string, string>();
     for (const d of symbolDocs) {
       const s = scopeOf(d.n.path, scopes).prefix;
+      scopeById.set(d.n.id, s);
       const list = byScope.get(s);
       if (list) list.push(d);
       else byScope.set(s, [d]);
     }
-    const idfOf = new Map<string, { idf: Map<string, number>; dflt: number }>();
+    // Lazily build every scope's PageRank topology in one node/edge pass. The
+    // old nodeFilter path rebuilt the full repo adjacency once per matching
+    // scope; on large multi-project repos that turned one query into hundreds
+    // of full graph scans before the participation gate could run. Waiting for
+    // the first walk keeps no-match and graphRank:false queries edge-scan free.
+    let pageRankByScope: ReturnType<typeof preparePageRankPartitions> | undefined;
+    let collapsedComponents: ScopeRankCandidate[] = [];
+    let collapsedComponentById: Map<string, ScopeRankCandidate> | undefined;
+    let collapsedFileByRepresentative: Map<string, RankedFile> | undefined;
     const fusion = rankScopesAndFuse(
       [...byScope.keys()].sort(),
       {
         lex: (s) => {
           const docs = byScope.get(s)!;
-          // Per-scope IDF/BM25 stats: concepts are repo-level so their bags
-          // fold in everywhere, symbol bags come from this scope only. (The
-          // build sidecar's df/avgBodyLen are corpus-global, so multi-scope
-          // always computes these live — from the sidecar's own token maps.)
-          const sIdf = computeIdf([
-            ...conceptBags,
-            ...docs.map((d) => new Set([...d.name.keys(), ...d.path.keys(), ...d.body.keys()])),
-          ]);
-          idfOf.set(s, { idf: sIdf, dflt: Math.log(1 + conceptBags.length + docs.length) });
-          const avg = docs.reduce((a, d) => a + bodyLen(d.body), 0) / docs.length;
+          // Repo-wide IDF and length prior — the SAME `idf`/`avgBodyLen` the
+          // single-scope path uses. Scoring each scope against its own corpus
+          // (as this did before #117) made a term worth a different amount in
+          // every scope, so the resulting scores could not be compared and the
+          // combined order had to fall back on rank. Only the PARTITION is
+          // per-scope now; the statistics are global.
           const out = new Map<string, number>();
           for (const { n, name, path, body } of docs) {
+            const factor = testFactor(n.path);
             const total =
-              (score(q, name, sIdf) * 3 +
-                score(q, path, sIdf) * 2 +
-                bm25(q, body, sIdf, bodyLen(body), avg)) *
-              testFactor(n.path);
-            if (total > 0) out.set(n.id, total);
+              (score(q, name, idf) * 3 +
+                score(q, path, idf) * 2 +
+                bm25(q, body, idf, bodyLen(body), avgBodyLen)) *
+              factor;
+            if (total > 0) {
+              out.set(n.id, total);
+              if (fileComplement) {
+                rawLexicalById.set(n.id, total);
+                matchedTermsById.set(
+                  n.id,
+                  matchedLexicalTerms(q, name, path, body),
+                );
+                if (n.kind !== "file")
+                  matchedStrongTermsById.set(n.id, matchedStrongTerms(q, name));
+              }
+            }
           }
           return out;
         },
-        // The participation gate's match-STRENGTH signal, evaluated once per
-        // scope on that scope's raw-lex top doc — same `strongShare`/
-        // `matchedIdfShare` functions and per-scope idf `lex` (above) just
-        // computed, so this reads the SAME strength `federateAsk` gates on
-        // (see fuse.ts's STRONG_FLOOR/HIGH_FLOOR).
-        strength: (s, id) => {
-          const d = docsById.get(id);
-          const si = idfOf.get(s);
-          if (!d || !si) return { coverage: 0, coverageStrong: 0 };
-          return {
-            coverage: matchedIdfShare(q, [d.name, d.path, d.body], si.idf, si.dflt),
-            coverageStrong: strongShare(q, d.n, d, si.idf, si.dflt),
-          };
+        // Body-only suppression: does any doc in this scope carry a query term
+        // in an identifier (name) or its path, rather than only in prose?
+        hasIdentifierMatch: (s) =>
+          (byScope.get(s) ?? []).some(({ name, path }) => {
+            for (const t of q.keys()) if (hasTerm(name, t) || hasTerm(path, t)) return true;
+            return false;
+          }),
+        walk: (s, seeds) => {
+          if (!graphRank) return new Map<string, number>();
+          pageRankByScope ??= preparePageRankPartitions(graph!, (id) => scopeById.get(id));
+          const topology = pageRankByScope?.get(s);
+          return topology
+            ? personalizedPageRankPrepared(topology, seeds)
+            : new Map<string, number>();
         },
-        walk: (s, seeds) =>
-          graphRank
-            ? personalizedPageRank(graph!, seeds, {
-                nodeFilter: (id) => {
-                  const path = byId.get(id)?.path ?? "";
-                  return scopeOf(path, scopes).prefix === s && (!inPrefix || pathUnderPrefix(path, inPrefix));
-                },
-              })
-            : new Map<string, number>(),
         rankFactor: (_s, id) => testFactor(byId.get(id)?.path ?? ""),
+        collapseCandidates: fileComplement
+          ? (candidates) => {
+              collapsedComponents = [...candidates];
+              collapsedComponentById = new Map(
+                candidates.map((candidate) => [candidate.id, candidate]),
+              );
+              const fileCandidates: FileRankCandidate[] = candidates.map((candidate) => {
+                const n = byId.get(candidate.id);
+                const rawLexical = rawLexicalById.get(candidate.id) ?? 0;
+                return {
+                  id: candidate.id,
+                  file: n?.path ?? "",
+                  kind: n?.kind === "file" ? "file" : "symbol",
+                  rawLexical,
+                  lexical: candidate.lexical,
+                  graph: candidate.graph,
+                  rankFactor: candidate.rankFactor,
+                  baselineScore: candidate.score,
+                  baselineTieKey: symbolTitle(candidate.id),
+                  matchedTerms: matchedTermsById.get(candidate.id) ?? new Set<string>(),
+                  matchedStrongTerms:
+                    matchedStrongTermsById.get(candidate.id) ?? new Set<string>(),
+                  eligible: Boolean(n && n.kind !== "file" && rawLexical > 0),
+                  spanStart: n ? spanStart(n.span) : undefined,
+                };
+              });
+              const rankedFiles = rankFilesBounded(
+                fileCandidates,
+                fileQueryWeights,
+              );
+              collapsedFileByRepresentative = new Map(
+                rankedFiles.map((file) => [file.representative.id, file]),
+              );
+              return rankedFiles.map((file) => {
+                const component = collapsedComponentById!.get(file.representative.id)!;
+                return {
+                  id: file.representative.id,
+                  scope: component.scope,
+                  score: file.score,
+                };
+              });
+            }
+          : undefined,
       },
       GRAPH_WEIGHT,
       RESCUE_FLOOR,
     );
-    for (const rd of fusion.ranked) {
-      const n = byId.get(rd.id);
-      if (!n) continue;
-      const hit: AskHit = {
-        kind: "symbol",
-        title: `${n.name} · ${n.kind}`,
-        pointer: n.kind === "file" ? n.path : `${n.path}:${n.span}`,
-        snippet: n.summary?.split("\n")[0].trim() ?? n.signature ?? "",
-        score: rd.score,
-        scope: rd.scope,
-      };
-      const d = docsById.get(rd.id);
-      const si = idfOf.get(rd.scope);
-      matchedOf.set(hit, d && si ? matchedIdfShare(q, [d.name, d.path, d.body], si.idf, si.dflt) : 0);
-      matchedStrongOf.set(hit, d && si ? strongShare(q, n, d, si.idf, si.dflt) : 0);
-      symbolHits.push(hit);
+    if (needsFileQueues) {
+      const baselineFusion = combineComparableScopes(
+        collapsedComponents.map(({ id, scope, score }) => ({ id, scope, score })),
+      );
+      const baselineScoreById = new Map(
+        baselineFusion.ranked.map((ranked) => [ranked.id, ranked.score]),
+      );
+      const baselineDisplayOrder = (
+        a: { id: string; score: number },
+        b: { id: string; score: number },
+      ): number =>
+        b.score - a.score || symbolTitle(a.id).localeCompare(symbolTitle(b.id));
+      let baselineTopRanked = baselineFusion.ranked[0];
+      for (const ranked of baselineFusion.ranked.slice(1))
+        if (baselineTopRanked && baselineDisplayOrder(ranked, baselineTopRanked) < 0)
+          baselineTopRanked = ranked;
+      const baselineHitsToBuild = includeRankingMetadata
+        ? [...baselineFusion.ranked].sort(baselineDisplayOrder)
+        : baselineTopRanked
+          ? [baselineTopRanked]
+          : [];
+      for (const ranked of baselineHitsToBuild) {
+        const hit = makeSymbolHit(ranked.id, ranked.score, ranked.scope);
+        if (hit) {
+          baselineSymbolHits.push(hit);
+          baselineHitById.set(ranked.id, hit);
+        }
+      }
+      for (const ranked of fusion.ranked) {
+        const file = collapsedFileByRepresentative?.get(ranked.id);
+        if (!file) continue;
+        const materializeFileQueue = (): AskHit[] => file.queue.flatMap((member, index) => {
+          const component = collapsedComponentById?.get(member.id);
+          if (index > 0) {
+            const baselineHit = baselineHitById.get(member.id);
+            if (baselineHit) return [baselineHit];
+          }
+          const hit = makeSymbolHit(
+            member.id,
+            index === 0
+              ? ranked.score
+              : baselineScoreById.get(member.id) ?? member.baselineScore,
+            component?.scope ?? ranked.scope,
+          );
+          return hit ? [hit] : [];
+        });
+        const materializeBaselineQueue = (): AskHit[] => file.queue.flatMap((member) => {
+          const hit = makeSymbolHit(
+            member.id,
+            baselineScoreById.get(member.id) ?? member.baselineScore,
+            collapsedComponentById?.get(member.id)?.scope ?? ranked.scope,
+          );
+          return hit ? [hit] : [];
+        });
+        const hits = includeRankingMetadata
+          ? materializeFileQueue()
+          : (() => {
+              const leader = file.queue[0];
+              if (!leader) return [];
+              const hit = makeSymbolHit(
+                leader.id,
+                ranked.score,
+                collapsedComponentById?.get(leader.id)?.scope ?? ranked.scope,
+              );
+              return hit ? [hit] : [];
+            })();
+        if (hits.length === 0) continue;
+        const group: AskRankingGroup = {
+          key: `file:${file.file}`,
+          hits,
+          coverage: file.unionCoverage,
+          coverageStrong: file.unionStrongCoverage,
+        };
+        fileQueueHitsByGroup.set(group.key, materializeFileQueue);
+        baselineQueueHitsByGroup.set(group.key, materializeBaselineQueue);
+        fileGroups.push(group);
+        symbolHits.push(hits[0]);
+      }
+    } else {
+      for (const ranked of fusion.ranked) {
+        const hit = makeSymbolHit(ranked.id, ranked.score, ranked.scope);
+        if (hit) symbolHits.push(hit);
+      }
     }
     // Label + footer only when federation actually happened (or a scope was
     // gated out and is worth mentioning) — a query matching one scope of a
@@ -625,27 +900,31 @@ function lexical(query: string, corpus: Corpus, limit: number, graphRank: boolea
   } else {
   // Single-scope: the pre-scopes ranking path, byte-identical output when
   // `--in` is absent (Task 3's regression guarantee: `askIndex && !inPrefix`
-  // reduces to plain `askIndex` when `inPrefix` is undefined, so this line is
-  // a no-op change for every non-`--in` caller). Under `--in`, `askIndex`'s
-  // `avgBodyLen` is corpus-global and must not be reused for the filtered set.
-  const avgBodyLen = askIndex && !inPrefix
-    ? askIndex.avgBodyLen
-    : symbolDocs.length
-      ? symbolDocs.reduce((a, d) => a + bodyLen(d.body), 0) / symbolDocs.length
-      : 0;
+  // reduces to plain `askIndex` when `inPrefix` is undefined). `avgBodyLen` is
+  // now defined once above and shared with the multi-scope branch.
   const lex = new Map<string, number>(); // node id → lexical score (>0 only)
   let maxLex = 0;
   for (const { n, name, path, body } of symbolDocs) {
     // Name and path are short identifiers → plain idf-weighted overlap; the body
     // is length-normalized via BM25 so long definitions don't win on bulk.
+    const factor = testFactor(n.path);
     const total =
       (score(q, name, idf) * 3 +
         score(q, path, idf) * 2 +
         bm25(q, body, idf, bodyLen(body), avgBodyLen)) *
-      testFactor(n.path);
+      factor;
     if (total > 0) {
       lex.set(n.id, total);
       maxLex = Math.max(maxLex, total);
+      if (fileComplement) {
+        rawLexicalById.set(n.id, total);
+        matchedTermsById.set(
+          n.id,
+          matchedLexicalTerms(q, name, path, body),
+        );
+        if (n.kind !== "file")
+          matchedStrongTermsById.set(n.id, matchedStrongTerms(q, name));
+      }
     }
   }
 
@@ -662,45 +941,252 @@ function lexical(query: string, corpus: Corpus, limit: number, graphRank: boolea
   const candidates = new Set<string>(lex.keys());
   for (const [id, p] of pr) if (p >= RESCUE_FLOOR) candidates.add(id);
 
+  const singleCandidates: Array<{
+    id: string;
+    n: NodeV1;
+    lexical: number;
+    graph: number;
+    rankFactor: number;
+    baseline: number;
+  }> = [];
   for (const id of candidates) {
     const n = byId.get(id);
     if (!n) continue;
-    const lexN = maxLex > 0 ? (lex.get(id) ?? 0) / maxLex : 0;
+    const lexical = maxLex > 0 ? (lex.get(id) ?? 0) / maxLex : 0;
+    const graphScore = pr.get(id) ?? 0;
+    const rankFactor = testFactor(n.path);
     // Apply the test penalty after normalization too. Applying it only to the
     // raw lexical score is not enough: if a test is still the strongest raw
     // match, dividing by maxLex restores it to 1.0 and erases the de-rank.
-    const blended = (lexN + GRAPH_WEIGHT * (pr.get(id) ?? 0)) * testFactor(n.path);
-    if (blended <= 0) continue;
-    const hit: AskHit = {
-      kind: "symbol",
-      title: `${n.name} · ${n.kind}`,
-      // A file node points at the whole file (locator, no span) so `--source`
-      // never inlines an entire file; symbol nodes keep their exact span.
-      pointer: n.kind === "file" ? n.path : `${n.path}:${n.span}`,
-      snippet: n.summary?.split("\n")[0].trim() ?? n.signature ?? "",
-      score: blended,
-    };
-    const d = docsById.get(id);
-    matchedOf.set(hit, d ? matchedIdfShare(q, [d.name, d.path, d.body], idf, dfltIdf) : 0);
-    matchedStrongOf.set(hit, d ? strongShare(q, n, d, idf, dfltIdf) : 0);
-    symbolHits.push(hit);
+    const baseline = (lexical + GRAPH_WEIGHT * graphScore) * rankFactor;
+    if (baseline <= 0) continue;
+    singleCandidates.push({ id, n, lexical, graph: graphScore, rankFactor, baseline });
+  }
+
+  const candidateById = fileComplement
+    ? new Map(singleCandidates.map((candidate) => [candidate.id, candidate]))
+    : undefined;
+  const rankedFiles = fileComplement
+    ? rankFilesBounded(
+        singleCandidates.map((candidate): FileRankCandidate => {
+          const rawLexical = rawLexicalById.get(candidate.id) ?? 0;
+          return {
+            id: candidate.id,
+            file: candidate.n.path,
+            kind: candidate.n.kind === "file" ? "file" : "symbol",
+            rawLexical,
+            lexical: candidate.lexical,
+            graph: candidate.graph,
+            rankFactor: candidate.rankFactor,
+            baselineScore: candidate.baseline,
+            baselineTieKey: symbolTitle(candidate.id),
+            matchedTerms: matchedTermsById.get(candidate.id) ?? new Set<string>(),
+            matchedStrongTerms:
+              matchedStrongTermsById.get(candidate.id) ?? new Set<string>(),
+            eligible: candidate.n.kind !== "file" && rawLexical > 0,
+            spanStart: spanStart(candidate.n.span),
+          };
+        }),
+        fileQueryWeights,
+      )
+    : undefined;
+
+  if (needsFileQueues && rankedFiles) {
+    const baselineCandidateOrder = (
+      a: (typeof singleCandidates)[number],
+      b: (typeof singleCandidates)[number],
+    ): number =>
+      b.baseline - a.baseline ||
+      `${a.n.name} · ${a.n.kind}`.localeCompare(`${b.n.name} · ${b.n.kind}`);
+    let baselineTopCandidate = singleCandidates[0];
+    for (const candidate of singleCandidates.slice(1))
+      if (baselineTopCandidate && baselineCandidateOrder(candidate, baselineTopCandidate) < 0)
+        baselineTopCandidate = candidate;
+    const baselineCandidatesToBuild = includeRankingMetadata
+      ? [...singleCandidates].sort(baselineCandidateOrder)
+      : baselineTopCandidate
+        ? [baselineTopCandidate]
+        : [];
+    for (const candidate of baselineCandidatesToBuild) {
+      const hit = makeSymbolHit(candidate.id, candidate.baseline);
+      if (hit) {
+        baselineSymbolHits.push(hit);
+        baselineHitById.set(candidate.id, hit);
+      }
+    }
+    for (const file of rankedFiles) {
+      const materializeFileQueue = (): AskHit[] => file.queue.flatMap((member, index) => {
+        if (index > 0) {
+          const baselineHit = baselineHitById.get(member.id);
+          if (baselineHit) return [baselineHit];
+        }
+        const hit = makeSymbolHit(
+          member.id,
+          index === 0 ? file.score : member.baselineScore,
+        );
+        return hit ? [hit] : [];
+      });
+      const materializeBaselineQueue = (): AskHit[] => file.queue.flatMap((member) => {
+        const hit = makeSymbolHit(member.id, member.baselineScore);
+        return hit ? [hit] : [];
+      });
+      const hits = includeRankingMetadata
+        ? materializeFileQueue()
+        : (() => {
+            const leader = file.queue[0];
+            if (!leader) return [];
+            const hit = makeSymbolHit(leader.id, file.score);
+            return hit ? [hit] : [];
+          })();
+      if (hits.length === 0) continue;
+      const group: AskRankingGroup = {
+        key: `file:${file.file}`,
+        hits,
+        coverage: file.unionCoverage,
+        coverageStrong: file.unionStrongCoverage,
+      };
+      fileQueueHitsByGroup.set(group.key, materializeFileQueue);
+      baselineQueueHitsByGroup.set(group.key, materializeBaselineQueue);
+      fileGroups.push(group);
+      symbolHits.push(hits[0]);
+    }
+  } else if (rankedFiles) {
+    for (const file of rankedFiles) {
+      const candidate = candidateById?.get(file.representative.id);
+      const hit = candidate ? makeSymbolHit(candidate.id, file.score) : null;
+      if (hit) symbolHits.push(hit);
+    }
+  } else {
+    for (const candidate of singleCandidates) {
+      const hit = makeSymbolHit(candidate.id, candidate.baseline);
+      if (hit) symbolHits.push(hit);
+    }
   }
   }
 
   // Concepts and symbols live on comparable 0..~1.5 scales so they merge fairly:
-  // concept scores are normalized to their own max, symbol scores are the
+  // concept scores are normalized to their own max; symbol scores use the
   // lexical-normalized + graph-weighted blend.
   for (const h of conceptHits) h.score = maxConcept > 0 ? h.score / maxConcept : 0;
 
   const scored = [...conceptHits, ...symbolHits];
   scored.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
+  const baselineScored = needsFileQueues
+    ? [...conceptHits, ...baselineSymbolHits].sort(
+        (a, b) => b.score - a.score || a.title.localeCompare(b.title),
+      )
+    : scored;
+  const conceptGroups: AskRankingGroup[] = conceptHits.map((hit, index) => ({
+    key: selectionGroupOf.get(hit) ?? `concept:${index}`,
+    hits: [hit],
+    coverage: matchedOf.get(hit) ?? 0,
+    coverageStrong: matchedStrongOf.get(hit) ?? 0,
+  }));
+  const unlockedGroups = [...conceptGroups, ...fileGroups].sort(
+    (a, b) =>
+      b.hits[0].score - a.hits[0].score ||
+      a.hits[0].title.localeCompare(b.hits[0].title),
+  );
+  const sameHit = (a: AskHit, b: AskHit): boolean =>
+    a.kind === b.kind && a.pointer === b.pointer && a.title === b.title;
+  let projectedGroups = unlockedGroups;
+  let lockedGroupKey: string | undefined;
+  if (fileTopLock && fileFirst && baselineScored[0]) {
+    const baselineTop = baselineScored[0];
+    const key = selectionGroupOf.get(baselineTop) ?? "locked:top";
+    lockedGroupKey = key;
+    const existing = unlockedGroups.find((group) => group.key === key);
+    const baselineQueue = includeRankingMetadata || limit > unlockedGroups.length
+      ? baselineQueueHitsByGroup.get(key)?.() ?? baselineScored.filter(
+          (hit) => (selectionGroupOf.get(hit) ?? "") === key,
+        )
+      : [];
+    const locked: AskRankingGroup = existing
+      ? {
+          ...existing,
+          hits: [
+            baselineTop,
+            ...baselineQueue.filter((hit) => !sameHit(hit, baselineTop)),
+          ],
+        }
+      : {
+          key,
+          hits: baselineQueue.length ? baselineQueue : [baselineTop],
+          coverage: matchedOf.get(baselineTop) ?? 0,
+          coverageStrong: matchedStrongOf.get(baselineTop) ?? 0,
+        };
+    projectedGroups = [
+      locked,
+      ...unlockedGroups.filter((group) => group.key !== key),
+    ];
+  }
+
+  // Ranking always sees the complete candidate universe, but a normal bounded
+  // request usually needs only one leader per file. Materialize secondary span
+  // queues only when the requested output can actually reach a second round.
+  if (
+    fileTopLock &&
+    fileFirst &&
+    !includeRankingMetadata &&
+    limit > projectedGroups.length
+  ) {
+    projectedGroups = projectedGroups.map((group) => {
+      if (group.key === lockedGroupKey) return group;
+      const materialize = fileQueueHitsByGroup.get(group.key);
+      return materialize ? { ...group, hits: materialize() } : group;
+    });
+  }
+
+  // File-aware ranking feeds latent groups to the existing file-first frontier.
+  // Leaders are listed first so every file/concept emits once before any
+  // secondary span; each group's remaining queue retains baseline order.
+  const selected = fileTopLock && fileFirst
+    ? roundRobinQueues(projectedGroups.map((group) => group.hits), limit)
+    : fileFirst
+      ? fileFirstRoundRobin(
+          scored.map((hit, index) => ({
+            group: selectionGroupOf.get(hit) ?? `ungrouped:${index}`,
+            value: hit,
+          })),
+          limit,
+        )
+      : scored;
+  const top = selected[0] ?? scored[0];
+  if (fileTopLock && top?.scope && scopeMeta) {
+    scopeMeta = {
+      federated: [...new Set([top.scope, ...scopeMeta.federated])],
+      alsoMatched: scopeMeta.alsoMatched.filter((match) => match.scope !== top.scope),
+    };
+  }
+  const ranking = includeRankingMetadata && needsFileQueues
+    ? {
+        groups: unlockedGroups.slice(0, limit).map((group) => ({
+          ...group,
+          hits: group.hits.slice(0, limit),
+          baselineHits: baselineScored
+            .filter((hit) => selectionGroupOf.get(hit) === group.key)
+            .slice(0, limit),
+        })),
+        baseline: baselineScored.slice(0, limit).map((hit, index) => ({
+          group: selectionGroupOf.get(hit) ?? `ungrouped:${index}`,
+          hit,
+        })),
+        baselineCoverage: baselineScored[0]
+          ? matchedOf.get(baselineScored[0]) ?? 0
+          : undefined,
+        baselineCoverageStrong: baselineScored[0]
+          ? matchedStrongOf.get(baselineScored[0]) ?? 0
+          : undefined,
+      }
+    : undefined;
   return {
     query,
     mode: scored.length ? "lexical" : "empty",
-    hits: scored.slice(0, limit),
+    hits: selected.slice(0, limit),
     scopes: scopeMeta,
-    coverage: scored.length && q.size > 0 ? matchedOf.get(scored[0]) ?? 0 : undefined,
-    coverageStrong: scored.length && q.size > 0 ? matchedStrongOf.get(scored[0]) ?? 0 : undefined,
+    coverage: top && q.size > 0 ? matchedOf.get(top) ?? 0 : undefined,
+    coverageStrong: top && q.size > 0 ? matchedStrongOf.get(top) ?? 0 : undefined,
+    ...(ranking ? { ranking } : {}),
     // Zero hits on a genuinely multi-scope graph names the scopes that exist,
     // so a query that missed everywhere still tells the caller where to look.
     note: scored.length
@@ -731,6 +1217,18 @@ export interface AskOptions {
    * existing multi-scope machinery degrades to its single-scope passthrough
    * with no scope labels. A prefix matching nothing indexed throws. */
   in?: string;
+  /** @internal Defer file-first projection to a downstream authoritative
+   * ranking stage (currently workspace federation). Direct callers should
+   * leave this unset. */
+  fileFirst?: boolean;
+  /** @internal Bounded file scoring control. */
+  fileComplement?: boolean;
+  /** @internal Exact baseline top-hit lock. Requires bounded file
+   * scoring and composes it with the file-first frontier. */
+  fileTopLock?: boolean;
+  /** @internal Return latent file queues and the exact baseline list so a
+   * workspace parent can fuse files before projecting spans. */
+  includeRankingMetadata?: boolean;
 }
 
 /** Parse a `path:Lx-Ly` pointer into its parts, or null if it isn't one
@@ -814,6 +1312,12 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
   const limit = opts.limit ?? 8;
   const corpus = loadCorpus(outDir);
   const graphRank = opts.graphRank ?? true;
+  const fileFirst = opts.fileFirst ?? true;
+  // The production path uses bounded file scoring plus an exact baseline top lock.
+  // Internal/raw callers can still request the baseline by disabling
+  // file-first selection. A top lock is projected only on a file-first list.
+  const fileTopLock = opts.fileTopLock ?? fileFirst;
+  const fileComplement = (opts.fileComplement ?? false) || fileTopLock;
   // Normalized ONCE, up front, and this value used everywhere below
   // (validation, filtering, structural). `ask --in frontend/` must work exactly
   // like `--in frontend` — `scopeLabel`/the footer's own `--in <scope>/`
@@ -831,7 +1335,17 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
     if (outcome && "result" in outcome) {
       result = outcome.result;
     } else {
-      result = lexical(query, corpus, limit, graphRank, inPrefix);
+      result = lexical(
+        query,
+        corpus,
+        limit,
+        graphRank,
+        inPrefix,
+        fileFirst,
+        fileComplement,
+        fileTopLock,
+        opts.includeRankingMetadata ?? false,
+      );
       // A structural-intent query that couldn't be answered structurally still
       // gets a prominent note on the lexical fallback result — never silent.
       if (outcome && "fallthroughNote" in outcome) {
@@ -839,10 +1353,33 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
       }
     }
   } else {
-    result = lexical(query, corpus, limit, graphRank, inPrefix);
+    result = lexical(
+      query,
+      corpus,
+      limit,
+      graphRank,
+      inPrefix,
+      fileFirst,
+      fileComplement,
+      fileTopLock,
+      opts.includeRankingMetadata ?? false,
+    );
   }
   if (opts.source) {
     inlineSource(root, result.hits, corpus.graph, opts.full ?? false);
+    if (result.ranking) {
+      const internalHits = [
+        ...result.ranking.groups.flatMap((group) => group.hits),
+        ...result.ranking.groups.flatMap((group) => group.baselineHits ?? []),
+        ...result.ranking.baseline.map((entry) => entry.hit),
+      ];
+      inlineSource(
+        root,
+        [...new Set(internalHits)],
+        corpus.graph,
+        opts.full ?? false,
+      );
+    }
     // The pack is truly substitutive only in retriever mode (spans inlined), so
     // the "vs reading whole files" estimate is only honest here.
     result.saved = baselineFor(result.hits, corpus.graph);
@@ -914,7 +1451,7 @@ export function formatSkeleton(r: SkeletonResult): string {
     return `- ${e.span}  ${e.kind} ${e.name}${sig}${sum}`;
   });
   const body = `${head}\n${lines.join("\n")}`;
-  return body + savingsFooter(body, r.saved) + "\n";
+  return withSavings(body, r.saved) + "\n";
 }
 
 /** Rough tokens for a byte length (≈ 4 chars/token; good enough for an estimate). */
@@ -964,7 +1501,8 @@ export function formatAsk(r: AskResult): string {
     lines.push(...scopeFooterLines(r));
   }
   const body = lines.join("\n").trimEnd();
-  return body + askSavingsFooter(r, body) + escalationNudge(r) + "\n";
+  const savings = askSavingsLine(r, body);
+  return (savings ? `${savings}\n\n${body}` : body) + escalationNudge(r) + "\n";
 }
 
 /** When a lexical `ask` returns thin/no results, the productive next move is a
@@ -981,10 +1519,12 @@ function escalationNudge(r: AskResult): string {
   );
 }
 
-/** The one-line token-saving estimate `ask` appends in retriever mode, so the
+/** The one-line token-saving estimate `ask` prepends in retriever mode, so the
  * agent gets the number for free in the tool output — no extra work on its end.
- * `packChars` is measured from the rendered body: exactly what the agent reads. */
-function askSavingsFooter(r: AskResult, body: string): string {
+ * `packChars` is measured from the rendered body: exactly what the agent reads.
+ * Header, not footer, for the reason documented on `withSavings`: a trailing
+ * line dies to `head -N` and to host output truncation. */
+function askSavingsLine(r: AskResult, body: string): string {
   if (!r.saved || r.saved.baselineChars <= 0) return "";
   const pack = toTokens(body.length);
   const base = toTokens(r.saved.baselineChars);
@@ -992,7 +1532,7 @@ function askSavingsFooter(r: AskResult, body: string): string {
   const saved = base - pack;
   const pct = Math.round((saved / base) * 100);
   return (
-    `\n\n[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%) — this pack ≈ ` +
+    `[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%) — this pack ≈ ` +
     `${pack.toLocaleString()} tok vs reading the ${r.saved.files} source file(s) whole ≈ ` +
     `${base.toLocaleString()} tok. Estimate (baseline = those files read in full).` +
     SAVINGS_TURN_NUDGE

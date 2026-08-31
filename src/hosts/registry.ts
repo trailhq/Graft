@@ -63,6 +63,41 @@ export const HOSTS: HostTarget[] = [
     detect: (p) => p.dirExists(join(p.home, '.gemini')),
   },
   {
+    id: 'grok',
+    name: 'Grok (xAI)',
+    kind: 'owned',
+    relPath: join('.grok', 'skills', 'graft', 'SKILL.md'),
+    content: skillTemplate,
+    detect: (p) => p.dirExists(join(p.home, '.grok')) || p.dirExists(join(p.repo, '.grok')),
+  },
+  {
+    id: 'hermes',
+    name: 'Hermes Agent (Nous Research)',
+    kind: 'section',
+    relPath: 'AGENTS.md',
+    content: instructionBody,
+    // Hermes is repo-aware: it reads AGENTS.md at the repo root (and the
+    // Graft-for-Hermes plugin keeps the graph fresh on every session start).
+    detect: (p) =>
+      p.dirExists(join(p.home, '.hermes')) ||
+      p.dirExists(join(p.home, 'AppData', 'Local', 'hermes')) ||
+      p.dirExists(join(p.repo, '.hermes')),
+  },
+  {
+    id: 'antigravity',
+    name: 'Google Antigravity',
+    kind: 'section',
+    relPath: 'AGENTS.md',
+    content: instructionBody,
+    // Antigravity-specific markers, NOT the bare `~/.gemini` (which is also Gemini CLI's):
+    // its global config dir (`~/.gemini/config/`, where mcp_config.json + hooks.json live)
+    // or a workspace `.agents/` dir. Keeps a plain Gemini-CLI user from auto-selecting it.
+    detect: (p) =>
+      p.dirExists(join(p.home, '.gemini', 'config')) ||
+      p.dirExists(join(p.home, '.gemini', 'antigravity-cli')) ||
+      p.dirExists(join(p.repo, '.agents')),
+  },
+  {
     id: 'copilot',
     name: 'GitHub Copilot',
     kind: 'section',

@@ -13,10 +13,11 @@ test('empty settings gets the full Graft blocks', () => {
   for (const e of ['PostToolUse', 'UserPromptSubmit', 'SessionStart', 'Stop']) {
     assert.ok(merged.hooks[e][0].hooks[0].command.includes('graft-hooks.cjs'), `${e} wired`);
   }
-  // PostToolUse carries a second graft block: the tokens-saved accumulator over
-  // the retrieval tools (Bash `graft …` + the graft_* MCP tools).
+  // PostToolUse carries a second graft block: the usage-mix + tokens-saved
+  // accumulator over the retrieval tools (Bash `graft …`, the graft_* MCP tools)
+  // and the source-read tools (Read/Grep/Glob) it scores against.
   const savings = merged.hooks.PostToolUse[1];
-  assert.equal(savings.matcher, 'Bash|mcp__graft__');
+  assert.equal(savings.matcher, 'Bash|mcp__graft__|Read|Grep|Glob');
   assert.ok(savings.hooks[0].command.includes('tool-savings'), 'savings hook wired');
   assert.ok(merged.footerLinksRegexes.includes('graft/[\\w./-]+\\.md'));
   assert.deepEqual(warnings, []);
@@ -27,6 +28,54 @@ test('foreign statusLine is preserved with a warning; Graft not forced in', () =
   assert.equal(merged.statusLine.command, 'my-bar.sh');
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /statusLine/);
+});
+
+test('a prior Graft statusLine (helper path, old command) is updated to the current command', () => {
+  const { merged, warnings } = mergeGraftSettings({
+    statusLine: { type: 'command', command: 'node .claude/helpers/graft-statusline.cjs' },
+    subagentStatusLine: { type: 'command', command: 'node .claude/helpers/graft-statusline.cjs' },
+  });
+  assert.equal(merged.statusLine.command, SL);
+  assert.equal(merged.subagentStatusLine.command, SL);
+  assert.deepEqual(warnings, []);
+});
+
+test('statusline: false does not install a statusLine on empty settings', () => {
+  const { merged } = mergeGraftSettings({}, { statusline: false });
+  assert.equal(merged.statusLine, undefined);
+  assert.equal(merged.subagentStatusLine, undefined);
+  assert.ok(Array.isArray(merged.hooks.Stop), 'hooks still wired');
+});
+
+test('statusline: false strips a prior Graft statusLine so a user-level one can show', () => {
+  const { merged } = mergeGraftSettings({
+    statusLine: { type: 'command', command: SL },
+    subagentStatusLine: { type: 'command', command: SL },
+  }, { statusline: false });
+  assert.equal(merged.statusLine, undefined);
+  assert.equal(merged.subagentStatusLine, undefined);
+});
+
+test('statusline: false still leaves a foreign statusLine alone', () => {
+  const { merged, warnings } = mergeGraftSettings(
+    { statusLine: { type: 'command', command: 'my-bar.sh' } },
+    { statusline: false },
+  );
+  assert.equal(merged.statusLine.command, 'my-bar.sh');
+  assert.match(warnings.join('\n'), /statusLine/);
+});
+
+test('GRAFT_NO_STATUSLINE=1 skips installing a statusLine', () => {
+  const prev = process.env.GRAFT_NO_STATUSLINE;
+  process.env.GRAFT_NO_STATUSLINE = '1';
+  try {
+    const { merged } = mergeGraftSettings({});
+    assert.equal(merged.statusLine, undefined);
+    assert.equal(merged.subagentStatusLine, undefined);
+  } finally {
+    if (prev === undefined) delete process.env.GRAFT_NO_STATUSLINE;
+    else process.env.GRAFT_NO_STATUSLINE = prev;
+  }
 });
 
 test('existing foreign hooks are preserved; Graft appended', () => {

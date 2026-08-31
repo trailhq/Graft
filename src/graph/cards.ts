@@ -23,6 +23,9 @@ import { CACHE_DIR, readNodes } from "../context/node-file.js";
 import { GRAPH_DIR } from "./write.js";
 
 const INDEX_FILE = "INDEX.md";
+/** Where a root-level file card goes when `graft/<stem>.md` is already a concept
+ * node (same stem as a slug — Laravel `server.php` vs a "Server" concept). */
+const ROOT_CARD_DIR = "_root";
 
 export interface CardFileInfo {
   /** Card path relative to the context dir, e.g. "src/ai/providers.md". */
@@ -38,10 +41,26 @@ export interface CardStats {
   files: CardFileInfo[];
 }
 
-/** The card path for a source path: mirror the tree, swap the extension for .md. */
+/** True when `path` is an existing concept node (frontmatter carries `slug`). */
+function isConceptNodeFile(path: string): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    const fm = matter(readFileSync(path, "utf8")).data as Record<string, unknown>;
+    return fm.slug != null && String(fm.slug).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** The card path for a source path: mirror the tree, swap the extension for .md.
+ * Root-level sources share `graft/` with concept nodes. If that filename is
+ * already a concept, park the file card under `_root/` instead of clobbering it. */
 function cardPathFor(outDir: string, sourcePath: string): string {
   const md = sourcePath.replace(/\.[^./]+$/, "") + ".md";
-  return join(outDir, md);
+  const primary = join(outDir, md);
+  if (sourcePath.includes("/")) return primary;
+  if (isConceptNodeFile(primary)) return join(outDir, ROOT_CARD_DIR, md);
+  return primary;
 }
 
 /** Starting line of an "L43-L55" span, for stable ordering (0 if unparseable). */
@@ -113,7 +132,8 @@ function listExistingCards(outDir: string): string[] {
     }
   };
   for (const e of readdirSync(outDir, { withFileTypes: true })) {
-    // Concept nodes and INDEX.md are top-level files — skip. Cards are in subdirs.
+    // Concept nodes and INDEX.md are top-level files — skip. Cards live in
+    // subdirs (`src/…`, and `_root/` when a root card would collide with a concept).
     if (e.isDirectory() && e.name !== CACHE_DIR && e.name !== GRAPH_DIR) {
       walk(join(outDir, e.name));
     }
@@ -247,9 +267,10 @@ export interface CoverRef {
  *
  * A surgical frontmatter patch: the generated body and every other key are
  * preserved verbatim; only `covers` is added/replaced. Concept nodes are the
- * top-level `.md` files (cards live in subdirs; INDEX.md is skipped). On a $0
- * structure-only build there are no concept nodes, so this is a no-op. Returns
- * the number of nodes enriched.
+ * top-level `.md` files that carry a `slug` (cards live in subdirs, or at the
+ * top level without a slug when they mirror a root source; INDEX.md is skipped).
+ * On a $0 structure-only build there are no concept nodes, so this is a no-op.
+ * Returns the number of nodes enriched.
  */
 export function writeCovers(graph: GraphV1, outDir: string): number {
   if (!existsSync(outDir)) return 0;
@@ -270,6 +291,9 @@ export function writeCovers(graph: GraphV1, outDir: string): number {
     if (!entry.endsWith(".md") || entry === INDEX_FILE) continue;
     const full = join(outDir, entry);
     const parsed = matter(readFileSync(full, "utf8"));
+    // Root-level file cards have no concept slug; stamping `covers: []` onto
+    // them made readNodes treat them as concept nodes (#261).
+    if (parsed.data.slug == null || String(parsed.data.slug).length === 0) continue;
     const sources = Array.isArray(parsed.data.sources)
       ? (parsed.data.sources as Array<{ path?: string }>)
       : [];

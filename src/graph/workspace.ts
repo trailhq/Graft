@@ -8,9 +8,13 @@
  *   { "version": 1, "children": ["repoA", "repoB"] }
  *
  * Queries run at the parent federate across the children: `ask` fuses every
- * child's ranked hits with the same RRF `fuseScopes` used inside a single
- * multi-scope repo (so the big repo can't drown the small one), `grep`/`map`/
- * `check`/`callers` run per child and merge, always labeled `<child>/`.
+ * child's ranked hits with `fuseScopes`, reciprocal-rank fusion, so the big
+ * repo can't drown the small one. Scopes INSIDE one repo no longer take that
+ * path — they share corpus statistics and a normalization denominator, so they
+ * are combined by score (see `ask/fuse.ts`). Separate child repositories have
+ * no such shared scale, which is exactly the case rank fusion is for.
+ * `grep`/`map`/`check`/`callers` run per child and merge, always labeled
+ * `<child>/`.
  *
  * This module owns the pure/core pieces (the format, its readers/writers, graph
  * loading, and the federated command bodies that return renderable data). The
@@ -33,11 +37,20 @@ import {
 import { edgeWalk, resolveSymbol, type Direction } from "./traverse.js";
 import { wiringPath } from "./write.js";
 import type { GraphV1 } from "./types.js";
-import { ask, type AskHit, type AskResult } from "../ask/ask.js";
+import {
+  ask,
+  type AskHit,
+  type AskRankingMetadata,
+  type AskResult,
+} from "../ask/ask.js";
+import {
+  fileFirstRoundRobin,
+  roundRobinQueues,
+} from "../ask/file-selection.js";
 import { fuseScopes, STRONG_FLOOR, HIGH_FLOOR, type ScopedDoc } from "../ask/fuse.js";
 import { grepGraph, type GrepGroup, type GrepResult } from "../search/grep.js";
 import { formatGrepResult, zeroHitNote } from "../search/grep-cli.js";
-import { savingsFooter, type Savings } from "../context/savings.js";
+import { withSavings, type Savings } from "../context/savings.js";
 
 /** The parent index written to `<parent>/graft/workspace.json`. Nodes/edges
  * never live at the parent — they live in each child's own `graft/`. */
@@ -164,6 +177,12 @@ function prefixPointer(child: string, pointer: string): string {
     .join(", ");
 }
 
+/** The exact child-relative file owning a lexical symbol hit. File nodes use a
+ * bare path; definition hits append `:Lx-Ly`. */
+function hitFile(pointer: string): string {
+  return pointer.match(/^(.*):L\d+-L\d+$/)?.[1] ?? pointer;
+}
+
 export interface FederateAskOptions {
   limit?: number;
   source?: boolean;
@@ -172,6 +191,8 @@ export interface FederateAskOptions {
   /** Narrow to one child (`repoA`) or a sub-scope within it (`repoA/backend`).
    * A prefix matching NO child throws, listing the repos. */
   in?: string;
+  /** @internal File-level child RRF plus an exact workspace baseline top lock. */
+  fileTopLock?: boolean;
 }
 
 interface ChildRun {
@@ -183,23 +204,35 @@ interface ChildRun {
   /** Same, but over name+path ONLY (body dropped) — the match-STRENGTH signal.
    * A body-only incidental collision has `coverageStrong === 0`. */
   coverageStrong: number;
+  /** Exact baseline top-hit coverage used only to compute the workspace top lock. */
+  baselineCoverage: number;
+  baselineCoverageStrong: number;
+  /** Present only for the internal file-aware path. */
+  ranking?: AskRankingMetadata;
 }
 
 // STRONG_FLOOR / HIGH_FLOOR (a child federates if its top hit matched a
 // query term in a NAME/PATH field ≥ STRONG_FLOOR, OR its overall name+path+
 // body coverage is broad enough to be real even body-only, ≥ HIGH_FLOOR) are
-// defined ONCE in `../ask/fuse.js` and imported here — `rankScopesAndFuse`
-// (single-graph multi-scope, `src/ask/fuse.ts`) gates on the exact same two
-// floors, so the two paths that solve the identical "a weak scope must not
-// federate beside a strong one" problem can never drift apart again.
+// defined ONCE in `../ask/fuse.js` and imported here. This is now their only
+// caller: a share-of-the-query threshold is the best available signal when the
+// candidates carry no common score scale, which is the situation across child
+// repositories. `rankScopesAndFuse` used to gate on them for the same reason
+// and no longer needs to — within one repo the scores are comparable, so a
+// weak scope is held back by scoring low rather than by a strength floor.
 
 /**
- * Federated `ask` across a workspace: run each child's own per-scope ask
- * pipeline, then fuse ALL the children's scope lists with the same
- * `fuseScopes` used inside a single multi-scope repo. Each child contributes
- * one fusion scope per intra-child scope, labeled `<child>/<scope>` (or just
- * `<child>` for a child's root scope), so a big repo can't drown a small one —
- * rank positions are comparable across repos where raw scores are not.
+ * Federated `ask` across a workspace: run each child's own ask pipeline, then
+ * fuse ALL the children's scope lists with `fuseScopes` (reciprocal rank). Each
+ * child contributes one fusion scope per intra-child scope, labeled
+ * `<child>/<scope>` (or just `<child>` for a child's root scope), so a big repo
+ * can't drown a small one — rank positions are comparable across repos where
+ * raw scores are not.
+ *
+ * Rank fusion is still right HERE, and only here: each child was scored against
+ * its own corpus, so cross-child scores share no scale. Within a single repo
+ * that is no longer true — `rankScopesAndFuse` gives every scope the same
+ * statistics and the same denominator and combines them by score.
  *
  * Returns a normal `AskResult`; `formatAsk` renders it unchanged, labeling each
  * hit `[<child>/…]` via the standard multi-scope path.
@@ -212,6 +245,7 @@ export function federateAsk(
 ): AskResult {
   const wg = loadWorkspaceGraphs(root, override);
   const limit = opts.limit ?? 8;
+  const fileTopLock = opts.fileTopLock ?? true;
 
   // `--in` scopes to a single child (and, past the first segment, a sub-scope
   // within it). A prefix naming no known child at all is a caller mistake.
@@ -242,12 +276,27 @@ export function federateAsk(
         full: opts.full,
         graphRank: opts.graphRank,
         in: childIn,
+        // The parent owns the final cross-repo ranking. Selecting inside each
+        // child would be undone by fusion and could truncate a hybrid list.
+        fileFirst: false,
+        fileComplement: fileTopLock,
+        includeRankingMetadata: fileTopLock,
       });
     } catch {
       continue; // corrupt child, or a sub-scope --in matching nothing here
     }
     if (r.hits.length === 0) continue;
-    runs.push({ child, hits: r.hits, coverage: r.coverage ?? 0, coverageStrong: r.coverageStrong ?? 0 });
+    const topGroup = r.ranking?.groups[0];
+    runs.push({
+      child,
+      hits: r.hits,
+      coverage: topGroup?.coverage ?? r.coverage ?? 0,
+      coverageStrong: topGroup?.coverageStrong ?? r.coverageStrong ?? 0,
+      baselineCoverage: r.ranking?.baselineCoverage ?? r.coverage ?? 0,
+      baselineCoverageStrong:
+        r.ranking?.baselineCoverageStrong ?? r.coverageStrong ?? 0,
+      ranking: r.ranking,
+    });
   }
 
   // Cross-child participation gate on match STRENGTH, not a lenient ratio.
@@ -268,9 +317,197 @@ export function federateAsk(
   // every run (there is at most one) survives, matching a standalone child ask.
   const gatedOut: { scope: string; bestId: string }[] = [];
   const survivors: ChildRun[] = [];
+  const baselineSurvivors: ChildRun[] = [];
   for (const run of runs) {
-    if (onlyChild || run.coverageStrong >= STRONG_FLOOR || run.coverage >= HIGH_FLOOR) survivors.push(run);
-    else gatedOut.push({ scope: run.child, bestId: prefixPointer(run.child, run.hits[0].pointer) });
+    const baselineEligible =
+      onlyChild ||
+      run.baselineCoverageStrong >= STRONG_FLOOR ||
+      run.baselineCoverage >= HIGH_FLOOR;
+    const fileEligible =
+      onlyChild ||
+      run.coverageStrong >= STRONG_FLOOR ||
+      run.coverage >= HIGH_FLOOR;
+    if (baselineEligible) baselineSurvivors.push(run);
+    // Distributed file evidence may admit a child, but the exact baseline
+    // top lock must never resurrect a child that the final stream calls gated
+    // out. The production survivor set is therefore the union of both gates;
+    // baselineSurvivors remains the strict baseline subset used only to choose the
+    // locked pointer.
+    if (baselineEligible || fileEligible) survivors.push(run);
+    else {
+      const best = run.ranking?.groups[0]?.hits[0] ?? run.hits[0];
+      gatedOut.push({ scope: run.child, bestId: prefixPointer(run.child, best.pointer) });
+    }
+  }
+
+  if (fileTopLock) {
+    type WorkspaceGroup = {
+      key: string;
+      child: string;
+      hits: AskHit[];
+      baselineHits: AskHit[];
+    };
+    const qualifyHit = (
+      child: string,
+      hit: AskHit,
+      score = hit.score,
+      scope = hit.scope ? `${child}/${hit.scope}` : child,
+    ): AskHit => ({
+      ...hit,
+      score,
+      scope,
+      pointer: prefixPointer(child, hit.pointer),
+    });
+    const sameHit = (a: AskHit, b: AskHit): boolean =>
+      a.kind === b.kind && a.pointer === b.pointer && a.title === b.title;
+
+    // Baseline workspace stream: reproduce the all-span RRF exactly so the
+    // final lock owns the same concrete pointer and fused score as the baseline.
+    const baselineDocs: ScopedDoc[] = [];
+    const baselineBack = new Map<
+      string,
+      { child: string; group: string; hit: AskHit }
+    >();
+    for (const run of baselineSurvivors) {
+      const entries = run.ranking?.baseline ?? run.hits.map((hit, index) => ({
+        group: `singleton:${index}`,
+        hit,
+      }));
+      entries.forEach((entry, index) => {
+        // Keep the legacy id shape so equal-score baseline ties remain exact.
+        const id = `${run.child} ${index}`;
+        const scope = entry.hit.scope
+          ? `${run.child}/${entry.hit.scope}`
+          : run.child;
+        baselineDocs.push({ id, scope, score: entry.hit.score });
+        baselineBack.set(id, {
+          child: run.child,
+          group: `${run.child}\0${entry.group}`,
+          hit: entry.hit,
+        });
+      });
+    }
+    const baselineFused = fuseScopes(baselineDocs);
+    const baselineTopRanked = baselineFused.ranked[0];
+    const baselineTopBack = baselineTopRanked
+      ? baselineBack.get(baselineTopRanked.id)
+      : undefined;
+    const baselineTop = baselineTopRanked && baselineTopBack
+      ? qualifyHit(
+          baselineTopBack.child,
+          baselineTopBack.hit,
+          baselineTopRanked.score,
+          baselineTopRanked.scope,
+        )
+      : undefined;
+
+    // File-aware workspace stream: exactly one leader per child/file (concepts stay
+    // singleton groups) participates in RRF. Span queues remain in a side map
+    // and cannot consume reciprocal-rank positions.
+    const fileDocs: ScopedDoc[] = [];
+    const fileBack = new Map<string, WorkspaceGroup>();
+    for (const run of survivors) {
+      const groups = run.ranking?.groups ?? run.hits.map((hit, index) => ({
+        key: `singleton:${index}`,
+        hits: [hit],
+        baselineHits: [hit],
+        coverage: 0,
+        coverageStrong: 0,
+      }));
+      groups.forEach((group, index) => {
+        const leader = group.hits[0];
+        if (!leader) return;
+        const id = `${run.child} file ${String(index).padStart(8, "0")}`;
+        const scope = leader.scope ? `${run.child}/${leader.scope}` : run.child;
+        const key = `${run.child}\0${group.key}`;
+        fileDocs.push({ id, scope, score: leader.score });
+        fileBack.set(id, {
+          key,
+          child: run.child,
+          hits: group.hits,
+          baselineHits: group.baselineHits ?? [leader],
+        });
+      });
+    }
+    const fileFused = fuseScopes(fileDocs);
+    const rankedGroups: WorkspaceGroup[] = fileFused.ranked.flatMap((ranked) => {
+      const group = fileBack.get(ranked.id);
+      if (!group) return [];
+      return [{
+        ...group,
+        // These spans are projections of one cross-child file document. Keep
+        // their public score on that same RRF scale; child-local tail scores are
+        // not comparable after workspace fusion and downstream re-sorting would
+        // otherwise silently undo the file ordering.
+        hits: group.hits.map((hit) =>
+          qualifyHit(
+            group.child,
+            hit,
+            ranked.score,
+            hit.scope ? `${group.child}/${hit.scope}` : group.child,
+          ),
+        ),
+        baselineHits: group.baselineHits.map((hit) => qualifyHit(group.child, hit)),
+      }];
+    });
+
+    let projectedGroups = rankedGroups;
+    if (baselineTop && baselineTopBack) {
+      const key = baselineTopBack.group;
+      const existing = rankedGroups.find((group) => group.key === key);
+      const baselineQueue = existing?.baselineHits ?? [baselineTop];
+      const projectedScore = existing?.hits[0]?.score ?? baselineTop.score;
+      const locked: WorkspaceGroup = existing
+        ? {
+            ...existing,
+            hits: [
+              baselineTop,
+              ...baselineQueue
+                .filter((hit) => !sameHit(hit, baselineTop))
+                .map((hit) => ({ ...hit, score: projectedScore })),
+            ],
+          }
+        : {
+            key,
+            child: baselineTopBack.child,
+            hits: [baselineTop],
+            baselineHits: [baselineTop],
+          };
+      projectedGroups = [
+        locked,
+        ...rankedGroups.filter((group) => group.key !== key),
+      ];
+    }
+
+    const hits = roundRobinQueues(
+      projectedGroups.map((group) => group.hits),
+      limit,
+    );
+    const unmatched = [...fileFused.alsoMatched, ...gatedOut];
+    const note = coverageNote(wg);
+    const result: AskResult = {
+      query,
+      mode: hits.length ? "lexical" : "empty",
+      hits,
+    };
+    if (hits.length) {
+      const lockedScope = baselineTop?.scope;
+      const federated = [
+        ...new Set([
+          ...(lockedScope ? [lockedScope] : []),
+          ...fileFused.federated,
+        ]),
+      ];
+      const federatedSet = new Set(federated);
+      result.scopes = {
+        federated,
+        alsoMatched: unmatched.filter((match) => !federatedSet.has(match.scope)),
+      };
+    } else {
+      result.note = `no matching nodes across ${wg.loaded.length} workspace repo(s) — try different words, or \`graft build\` at a child`;
+    }
+    if (note) result.note = result.note ? `${result.note}\n${note}` : note;
+    return result;
   }
 
   // Fuse the survivors' scope lists (within-child fusion is left untouched —
@@ -287,10 +524,25 @@ export function federateAsk(
   }
 
   const fused = fuseScopes(docs);
-  const hits: AskHit[] = fused.ranked.slice(0, limit).map((rd) => {
+  const rankedHits = fused.ranked.map((rd) => {
     const { child, hit } = back.get(rd.id)!;
-    return { ...hit, score: rd.score, scope: rd.scope, pointer: prefixPointer(child, hit.pointer) };
+    const value: AskHit = {
+      ...hit,
+      score: rd.score,
+      scope: rd.scope,
+      pointer: prefixPointer(child, hit.pointer),
+    };
+    return {
+      // Lexical symbols share a file queue. Concepts and structural neighbours
+      // remain singleton partitions, so this lexical selection layer cannot
+      // reorder `who calls` / `dependencies of` answers.
+      group: hit.kind === "symbol"
+        ? `file:${child}/${hitFile(hit.pointer)}`
+        : `singleton:${child}:${rd.id}`,
+      value,
+    };
   });
+  const hits = fileFirstRoundRobin(rankedHits, limit);
 
   const alsoMatched = [...fused.alsoMatched, ...gatedOut];
   const note = coverageNote(wg);
@@ -375,15 +627,15 @@ export function federateMap(
 
 /** Per-child drift status. `ok` is false when any BUILT child is stale — an
  * unbuilt child is surfaced (coverage), never a failure. */
-export function federateCheck(
+export async function federateCheck(
   root: string,
   override?: string,
-): { text: string; ok: boolean } {
+): Promise<{ text: string; ok: boolean }> {
   const wg = loadWorkspaceGraphs(root, override);
   const lines = [`workspace check — ${wg.loaded.length + wg.missing.length} repo(s)`, ""];
   let ok = true;
   for (const { child } of wg.loaded) {
-    const g = checkGraph(join(root, child));
+    const g = await checkGraph(join(root, child));
     if (g.ok) {
       lines.push(`${child}/: OK`);
     } else {
@@ -429,7 +681,7 @@ export function federateCallers(
       else for (const h of hits) lines.push(hitLine(direction, h, showDepth));
     }
     const body = lines.join("\n");
-    blocks.push(body + savingsFooter(body, callersSavings(graph, results)));
+    blocks.push(withSavings(body, callersSavings(graph, results)));
   }
 
   const cov = coverageNote(wg);

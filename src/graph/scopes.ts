@@ -3,7 +3,7 @@
  * stay per-scope instead of pooling a monorepo's biggest sub-project against
  * everything else. A "scope" is rooted at a directory that carries a
  * project-marker file (`package.json`, `go.mod`, `pyproject.toml`, `setup.py`,
- * `Cargo.toml`).
+ * `Cargo.toml`, `pom.xml`, `build.gradle`, `build.gradle.kts`).
  *
  * Discovery rules (see task brief for the numbered spec):
  *  1. Any directory with >=1 marker file is a scope candidate.
@@ -25,11 +25,11 @@ import { existsSync, readdirSync, readFileSync, type Dirent } from "node:fs";
 import { join, resolve } from "node:path";
 import { shouldSkipDir, walkDir } from "../ingest/fs.js";
 import { relPosix } from "../util/paths.js";
-import { readIncludeDirs } from "../util/state.js";
+import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
 import type { GraphV1, ScopeV1 } from "./types.js";
 
 /** Project-marker files, checked in this order (also the order `markers` is built in). */
-const MARKERS = ["package.json", "go.mod", "pyproject.toml", "setup.py", "Cargo.toml"];
+const MARKERS = ["package.json", "go.mod", "pyproject.toml", "setup.py", "Cargo.toml", "composer.json", "pom.xml", "build.gradle", "build.gradle.kts"];
 
 const CANONICAL_ROOT: ScopeV1[] = [{ prefix: "", label: "", markers: [] }];
 
@@ -128,11 +128,14 @@ interface Candidate {
   isWorkspace: boolean;
 }
 
-/** Walk the tree (reusing `walkDir`'s skip rules, including the repo's persisted
- * `--include-dir` override) and find project-marker dirs. */
+/** Walk the tree (reusing `walkDir`'s persisted directory and submodule
+ * choices) and find project-marker dirs. */
 export function discoverScopes(
   root: string,
-  repoFiles: string[] = walkDir(root, readIncludeDirs(resolve(root))),
+  repoFiles: string[] = walkDir(root, readIncludeDirs(resolve(root)), {
+    followSubmodules: readFollowSubmodules(resolve(root)),
+    followNestedRepos: readFollowNestedRepos(resolve(root)),
+  }),
 ): ScopeV1[] {
   const absRoot = resolve(root);
   const dirs = collectDirs(absRoot, repoFiles);

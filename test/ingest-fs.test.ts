@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve, sep, isAbsolute } from "node:path";
 import { shouldSkipDir, walkDir, SKIP_DIRS } from "../src/ingest/fs.js";
 import { discoverScopes, discoverWorkspaceChildren } from "../src/graph/scopes.js";
 
@@ -18,8 +18,33 @@ function write(root: string, path: string, content = "export const value = 1;\n"
   writeFileSync(join(root, path), content);
 }
 
-function walked(root: string, includes?: ReadonlySet<string>): string[] {
-  return walkDir(root, includes)
+function runGit(root: string, args: string[]): void {
+  execFileSync("git", args, { cwd: root, stdio: "ignore" });
+}
+
+function commitAll(root: string, message: string, forcePaths: string[] = []): void {
+  runGit(root, ["add", "-A"]);
+  if (forcePaths.length > 0) runGit(root, ["add", "-f", "--", ...forcePaths]);
+  runGit(root, [
+    "-c", "user.name=Graft Tests",
+    "-c", "user.email=graft-tests@example.invalid",
+    "commit", "-qm", message,
+  ]);
+}
+
+function addLocalSubmodule(parent: string, source: string, path: string): void {
+  runGit(parent, [
+    "-c", "protocol.file.allow=always",
+    "submodule", "add", "-q", source.replace(/\\/g, "/"), path,
+  ]);
+}
+
+function walked(
+  root: string,
+  includes?: ReadonlySet<string>,
+  followSubmodules = false,
+): string[] {
+  return walkDir(root, includes, { followSubmodules })
     .map((path) => relative(root, path).replace(/\\/g, "/"))
     .sort();
 }
@@ -58,6 +83,88 @@ test("walkDir keeps tracked files that match an ignore rule and untracked visibl
     assert.deepEqual(walked(dir), ["tracked.generated.ts", "visible.ts"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("walkDir follows initialized submodules only when enabled, with their own Git visibility (#74)", () => {
+  const parent = fixture("submodule-parent");
+  const child = fixture("submodule-child");
+  const nested = fixture("submodule-nested");
+  try {
+    write(nested, ".gitignore", "*.generated.ts\n");
+    write(nested, "src/nested.ts");
+    commitAll(nested, "nested fixture");
+
+    write(child, ".gitignore", "*.generated.ts\n");
+    write(child, "src/tracked.ts");
+    write(child, "src/forced.generated.ts");
+    write(child, "build/handwritten.ts");
+    commitAll(child, "child fixture", ["src/forced.generated.ts"]);
+    addLocalSubmodule(child, nested, "components/nested module");
+    commitAll(child, "add nested submodule");
+
+    write(parent, ".gitignore", "deps/child module/src/untracked.ts\n");
+    write(parent, "src/root.ts");
+    commitAll(parent, "parent fixture");
+    addLocalSubmodule(parent, child, "deps/child module");
+    addLocalSubmodule(parent, child, "vendor/skipped child");
+    commitAll(parent, "add child submodules");
+    runGit(parent, [
+      "-c", "protocol.file.allow=always",
+      "submodule", "update", "--init", "--recursive", "--", "deps/child module",
+    ]);
+
+    const childCheckout = join(parent, "deps", "child module");
+    const nestedCheckout = join(childCheckout, "components", "nested module");
+    write(childCheckout, "src/untracked.ts");
+    write(childCheckout, "src/untracked.generated.ts");
+    write(nestedCheckout, "src/nested-untracked.ts");
+    write(nestedCheckout, "src/nested-untracked.generated.ts");
+
+    assert.deepEqual(
+      walked(parent),
+      ["src/root.ts"],
+      "the backwards-compatible default stops at superproject gitlinks",
+    );
+
+    assert.deepEqual(walked(parent, undefined, true), [
+      "deps/child module/components/nested module/src/nested-untracked.ts",
+      "deps/child module/components/nested module/src/nested.ts",
+      "deps/child module/src/forced.generated.ts",
+      "deps/child module/src/tracked.ts",
+      "deps/child module/src/untracked.ts",
+      "src/root.ts",
+    ]);
+
+    const withVendor = walked(parent, new Set(["vendor"]), true);
+    assert.ok(withVendor.includes("vendor/skipped child/src/tracked.ts"), "an initialized gitlink is included when its mount's built-in skip is lifted");
+    assert.ok(!withVendor.includes("vendor/skipped child/build/handwritten.ts"), "the child's own build/ directory remains skipped");
+    assert.ok(!withVendor.some((path) => path.endsWith("untracked.generated.ts")), "--include-dir never overrides a child's Git ignore rules");
+
+    const withVendorAndBuild = walked(parent, new Set(["vendor", "build"]), true);
+    assert.ok(withVendorAndBuild.includes("vendor/skipped child/build/handwritten.ts"));
+
+    const childGitFile = join(childCheckout, ".git");
+    const childGitBackup = join(childCheckout, "git-pointer.backup");
+    renameSync(childGitFile, childGitBackup);
+    writeFileSync(childGitFile, "gitdir: missing-gitdir\n");
+    assert.ok(
+      walked(parent, undefined, true).includes("deps/child module/src/tracked.ts"),
+      "a child Git failure falls back locally instead of producing a healthy but incomplete graph",
+    );
+    rmSync(childGitFile, { force: true });
+    renameSync(childGitBackup, childGitFile);
+
+    runGit(parent, ["submodule", "deinit", "-f", "--all"]);
+    assert.deepEqual(
+      walked(parent, undefined, true),
+      ["src/root.ts"],
+      "deinitialized gitlinks must not resolve upward and duplicate the parent",
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(child, { recursive: true, force: true });
+    rmSync(nested, { recursive: true, force: true });
   }
 });
 
@@ -219,6 +326,127 @@ test("workspace-glob resolution (scopes.ts's resolveGlob over visible-file dirs)
     assert.ok(prefixes.includes("app"), "the normal dir must still resolve as a workspace match");
     for (const name of SKIP_DIRS) assert.ok(!prefixes.includes(name), `the glob must not resolve into ${name}`);
     assert.ok(!prefixes.includes(".hidden"), "the glob must not resolve into the dot-dir");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * #143 — the *input root* may be a directory symlink (nix-store -devel paths).
+ * Follow that root once. Do not follow symlinks *inside* the tree: that is how
+ * loops and outside-root escapes are prevented, and it keeps git-tracked
+ * symlink files skipped via `lstat`.
+ *
+ * Windows: directory links are junctions so CI does not need Developer Mode.
+ */
+function symlinkDirectory(target: string, path: string): void {
+  symlinkSync(target, path, process.platform === "win32" ? "junction" : "dir");
+}
+
+function underRoot(root: string, abs: string): boolean {
+  const rel = relative(root, abs);
+  return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+test("walkDir indexes a directory when the input root itself is a symlink (#143)", () => {
+  const real = mkdtempSync(join(tmpdir(), "graft-walk-symlink-real-"));
+  const wrap = mkdtempSync(join(tmpdir(), "graft-walk-symlink-wrap-"));
+  const link = join(wrap, "root");
+  try {
+    write(real, "src/app.ts");
+    write(real, "src/util.ts", "export const util = 2;\n");
+    symlinkDirectory(real, link);
+
+    const rels = walked(link);
+    assert.deepEqual(rels, ["src/app.ts", "src/util.ts"]);
+    assert.ok(rels.every((r) => !r.startsWith("..")), "relative paths must stay inside the requested root");
+    for (const abs of walkDir(link)) {
+      assert.ok(underRoot(resolve(link), abs), "emitted paths stay on the caller-facing root, not a leaked realpath");
+    }
+  } finally {
+    rmSync(wrap, { recursive: true, force: true });
+    rmSync(real, { recursive: true, force: true });
+  }
+});
+
+test("walkDir indexes a Git repo when the input root is a symlink to that repo (#143)", () => {
+  const real = fixture("symlink-git-real");
+  const wrap = mkdtempSync(join(tmpdir(), "graft-walk-symlink-gitwrap-"));
+  const link = join(wrap, "root");
+  try {
+    write(real, "src/app.ts");
+    symlinkDirectory(real, link);
+    assert.deepEqual(walked(link), ["src/app.ts"]);
+  } finally {
+    rmSync(wrap, { recursive: true, force: true });
+    rmSync(real, { recursive: true, force: true });
+  }
+});
+
+test("walkDir reports a broken symlink root instead of a generic scandir ENOENT (#143)", (t) => {
+  const wrap = mkdtempSync(join(tmpdir(), "graft-walk-broken-link-"));
+  const link = join(wrap, "root");
+  try {
+    try {
+      symlinkSync(join(wrap, "missing-target"), link, process.platform === "win32" ? "junction" : "dir");
+    } catch (err) {
+      t.skip(`cannot create a dangling directory link (${err instanceof Error ? err.message : err})`);
+      return;
+    }
+    assert.throws(() => walkDir(link), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /broken symbolic link/i);
+      assert.doesNotMatch(err.message, /scandir/i);
+      return true;
+    });
+  } finally {
+    rmSync(wrap, { recursive: true, force: true });
+  }
+});
+
+test("walkDir does not follow an internal file or directory symlink (#143)", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-walk-internal-link-"));
+  const outside = mkdtempSync(join(tmpdir(), "graft-walk-outside-"));
+  try {
+    write(dir, "src/app.ts");
+    write(dir, "src/real.ts", "export const real = 1;\n");
+    write(outside, "leaked.ts", "export const leaked = 1;\n");
+    let fileLink = false;
+    try {
+      symlinkSync(join(dir, "src", "real.ts"), join(dir, "src", "alias.ts"));
+      fileLink = true;
+    } catch (err) {
+      t.diagnostic(`skipping internal file-symlink assertion: ${err instanceof Error ? err.message : err}`);
+    }
+    symlinkDirectory(outside, join(dir, "escape"));
+
+    const rels = walked(dir);
+    assert.deepEqual(rels, ["src/app.ts", "src/real.ts"]);
+    if (fileLink) assert.ok(!rels.includes("src/alias.ts"), "an internal file symlink is not a source file");
+    assert.ok(!rels.some((r) => r.includes("leaked.ts")), "a directory symlink must not escape the root");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("walkDir does not recurse forever through an internal symlink to the root (#143)", { timeout: 5_000 }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-walk-loop-"));
+  try {
+    write(dir, "src/app.ts");
+    symlinkDirectory(dir, join(dir, "src", "loop"));
+    assert.deepEqual(walked(dir), ["src/app.ts"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("walkDir on an ordinary directory is unchanged when siblings are symlink fixtures (#143)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-walk-ordinary-"));
+  try {
+    write(dir, "src/app.ts");
+    write(dir, "node_modules/pkg/index.ts");
+    assert.deepEqual(walked(dir), ["src/app.ts"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
