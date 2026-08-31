@@ -23,7 +23,9 @@ import {
   containerLangOf,
   containerExtensions,
   isContainerWarm,
+  isJavaScriptScript,
 } from "../src/graph/container.js";
+import { loadWasmLanguage, parseWasm, type TsNode } from "../src/graph/generic.js";
 import { supportedExtensions } from "../src/graph/source-files.js";
 import { buildGraph } from "../src/graph/build.js";
 import { checkGraph } from "../src/graph/check.js";
@@ -562,4 +564,58 @@ test("container: Vue does not descend into the template — nesting is opt-in pe
   const { nodes } = extractContainer("Nested.vue", sfc(lines), VUE);
   assert.equal(nodes.length, 1, "file node only");
   assert.ok(!nodes.some((n) => n.name === "inTemplate"));
+});
+
+/** The first `script_element` in a parsed snippet. Only `isJavaScriptScript`
+ * needs one directly — every other test goes through `extractContainer`,
+ * because what matters there is which spans come back, not which node was
+ * handed to which helper. */
+async function firstScriptElement(markup: string): Promise<TsNode> {
+  const language = await loadWasmLanguage("astro");
+  assert.ok(language, "astro grammar must be available in tree-sitter-wasms");
+  const root = parseWasm(language, markup);
+  assert.ok(root, "snippet must parse");
+  const stack: TsNode[] = [root];
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (node.type === "script_element") return node;
+    for (let i = (node.namedChildCount ?? 0) - 1; i >= 0; i--) {
+      const child = node.namedChild?.(i);
+      if (child) stack.push(child);
+    }
+  }
+  throw new Error(`no script_element in: ${markup}`);
+}
+
+test("container: isJavaScriptScript classifies a <script> by its type attribute", async () => {
+  // The predicate's own truth table, asserted directly. The extraction-level
+  // test above covers the same ground behaviourally; this one exists so the
+  // rule is legible as a rule, and so a future `type` value can be added here
+  // without reasoning about spans.
+  for (const [tag, isJs] of [
+    ["<script>", true],
+    ["<script is:inline>", true],
+    ["<script defer async>", true],
+    ['<script src="/boot.js">', true],
+    ["<script type>", true],
+    ['<script type="">', true],
+    ['<script type="module">', true],
+    ["<script type=module>", true],
+    ['<script type="MODULE">', true],
+    ['<script type=" text/javascript ">', true],
+    ['<script type="application/javascript">', true],
+    ['<script type="text/typescript">', true],
+    ['<script type="application/ld+json">', false],
+    ['<script type="application/json">', false],
+    ["<script type=application/json>", false],
+    ['<script type="importmap">', false],
+    ['<script type="speculationrules">', false],
+    ['<script type="text/plain">', false],
+    // Present but not readable without evaluating the expression. Treated as
+    // data: one un-indexed block beats guessing at content we cannot see.
+    ["<script type={contentType}>", false],
+  ] as const) {
+    const node = await firstScriptElement(`<div>${tag}const x = 1;</script></div>`);
+    assert.equal(isJavaScriptScript(node), isJs, `${tag} should be ${isJs ? "" : "not "}JavaScript`);
+  }
 });

@@ -186,9 +186,11 @@ const JS_SCRIPT_TYPES = new Set([
   "text/babel",
 ]);
 
-/** Read one attribute's value off a `start_tag`, or null when it is absent or
- * not a literal. Quoted and bare values differ by one nesting level, so both
- * shapes are walked rather than assumed. */
+/** Read one attribute's value off a `start_tag`: the empty string when the
+ * attribute is absent or carries no value, and null only when it is present but
+ * NOT A LITERAL (`type={expr}`) — the two cases mean different things to the
+ * caller. Quoted and bare values differ by one nesting level, so both shapes
+ * are walked rather than assumed. */
 function attrValue(tag: TsNode, name: string): string | null {
   const kids = tag.namedChildCount ?? 0;
   for (let i = 0; i < kids; i++) {
@@ -213,7 +215,10 @@ function attrValue(tag: TsNode, name: string): string | null {
       // An interpolated value (`type={expr}`) — present but not readable.
       return null;
     }
-    if (matched) return null; // bare `type` with no value at all
+    // A bare `type` with no value at all. HTML reads that as the empty string,
+    // and an empty `type` is a classic script — so it is JavaScript, not an
+    // unreadable value.
+    if (matched) return "";
   }
   return "";
 }
