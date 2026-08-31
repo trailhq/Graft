@@ -1,8 +1,10 @@
 /**
- * Tier-2 "meaning" call for the code graph — batched one request per file.
+ * Tier-2 "meaning" call for the code graph — batched per file, chunked by symbol
+ * count so a dense file cannot blow `maxTokens` and drop the whole reply (#260).
  *
  * Given a source file (with 1-based line numbers) and the list of definitions in
- * it, one call returns, for each definition:
+ * it, one call (or several chunks of {@link CRUX_CHUNK_SIZE}) returns, for each
+ * definition:
  *   1. `summary` — one plain-English sentence: what the symbol is *for*, at the
  *      business-logic level, not a restatement of its signature.
  *   2. `crux_start`/`crux_end` — the smallest contiguous range of FILE line
@@ -10,9 +12,10 @@
  *      the decision or rule the code encodes. `0/0` means there is no single
  *      crux (a trivial getter, a plain data holder).
  *
- * Batching per file means N definitions cost one request, not N — and the model
- * sees each symbol's neighbours, which sharpens the summaries. Line numbers are
- * consumed once, at write time, to slice the crux text verbatim from source.
+ * Small files still cost one request. Files denser than {@link CRUX_CHUNK_SIZE}
+ * are split, the chunks merged, and a `finish_reason=length` stop is logged
+ * instead of silently discarding every target. Line numbers are consumed once,
+ * at write time, to slice the crux text verbatim from source.
  */
 import type { ChatModel, ChatResponse } from "./llm/types.js";
 import { recoverToolArgsFromContent, warnToolChoiceIgnored } from "./llm/recover-tool.js";
@@ -78,6 +81,19 @@ export function formatCruxMiss(kind: CruxMissKind, finishReason: string | null):
   return `model returned no usable symbol summaries [${kind}, finish_reason=${fr}]`;
 }
 
+/** One stderr line when a crux call stopped because the completion hit maxTokens (#260). */
+function warnCruxTruncated(
+  path: string,
+  requested: number,
+  parsed: number,
+  finishReason: string | null,
+): void {
+  const fr = finishReason == null || finishReason === "" ? "null" : finishReason;
+  console.error(
+    `⚠ crux: ${path}: truncated tool response [finish_reason=${fr}] for ${requested} targets (${parsed} parsed) — keeping any other chunks instead of dropping the file`,
+  );
+}
+
 const SYSTEM_PROMPT = `You explain code definitions for a code graph that helps engineers navigate a codebase.
 
 You are given ONE source file with 1-based line numbers, and a list of TARGET definitions in it. Describe EVERY target via the record_symbols tool.
@@ -109,6 +125,21 @@ const SYMBOLS_SCHEMA = {
   },
   required: ["symbols"],
 } as const;
+
+/**
+ * Max targets packed into one crux LLM call (#260). At ~90 completion tokens per
+ * entry, 80 × 90 stays under `maxTokens: 8192`. A file with more symbols is split
+ * and the chunks merged; raising maxTokens cannot cover a 698-symbol file.
+ * Pinned by `test/crux-chunk.test.ts` — do not raise it silently.
+ */
+export const CRUX_CHUNK_SIZE = 80;
+
+/** Split `nodes` into batches of at most `size` (default {@link CRUX_CHUNK_SIZE}). */
+export function chunkCruxTargets<T>(nodes: readonly T[], size = CRUX_CHUNK_SIZE): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < nodes.length; i += size) out.push(nodes.slice(i, i + size));
+  return out;
+}
 
 /** Cap the file text sent per request so one huge file can't blow the context. */
 const MAX_CODE_CHARS = 18_000;
@@ -180,6 +211,29 @@ export class ChatCruxSummarizer implements CruxSummarizer {
   async describeFile(input: FileCruxInput): Promise<NodeCrux[]> {
     this.lastMiss = null;
     if (input.nodes.length === 0) return [];
+    const merged: NodeCrux[] = [];
+    const seen = new Set<string>();
+    let miss: CruxMiss | null = null;
+
+    for (const nodes of chunkCruxTargets(input.nodes)) {
+      const { parsed, res } = await this.describeChunk({ ...input, nodes });
+      if (isTruncatedStop(res.stopReason)) {
+        warnCruxTruncated(input.path, nodes.length, parsed.length, res.stopReason);
+      }
+      const chunkMiss = classifyCruxMiss(res, parsed);
+      if (chunkMiss) miss = chunkMiss;
+      for (const r of parsed) {
+        if (seen.has(r.id)) continue;
+        seen.add(r.id);
+        merged.push(r);
+      }
+    }
+
+    this.lastMiss = merged.some((p) => p.summary.trim()) ? null : miss;
+    return merged;
+  }
+
+  private async describeChunk(input: FileCruxInput): Promise<{ parsed: NodeCrux[]; res: ChatResponse }> {
     const res = await this.model.create({
       temperature: 0,
       maxTokens: 8192,
@@ -196,8 +250,6 @@ export class ChatCruxSummarizer implements CruxSummarizer {
         { role: "user", content: userContent(input) },
       ],
     });
-    const parsed = parseResults(argsFromResponse(res));
-    this.lastMiss = classifyCruxMiss(res, parsed);
-    return parsed;
+    return { parsed: parseResults(argsFromResponse(res)), res };
   }
 }
