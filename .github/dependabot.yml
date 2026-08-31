@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    ignore:
+      # Upgrading this independently of the pinned tree-sitter runtime breaks
+      # peer resolution; see the overrides block in package.json.
+      - dependency-name: tree-sitter-typescript
 
   - package-ecosystem: github-actions
     directory: /

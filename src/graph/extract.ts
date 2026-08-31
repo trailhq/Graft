@@ -374,11 +374,12 @@ interface DefDescriptor {
   variadic?: boolean; // last parameter is a vararg, so `arity` is a minimum
 }
 
-/** tree-sitter's string `parse()` fails with "Invalid argument" on any input
- * ≥ 32 KB, which silently drops large files — often the most important ones (a
- * 2000-line command module, a core tab implementation). The callback form has
- * no such limit as long as each returned chunk is under 32 KB, so we always feed
- * the source in <32 KB slices. Code-unit indexing matches `String.slice`. */
+/** The chunked-callback parse predates tree-sitter 0.22, which lifted the
+ * string `parse()` size limit that used to fail with "Invalid argument" on
+ * any input ≥ 32 KB and silently drop large files — often the most important
+ * ones (a 2000-line command module, a core tab implementation). Kept because
+ * it is behavior-identical and exercised by existing tests. Code-unit
+ * indexing matches `String.slice`. */
 const PARSE_CHUNK = 16384;
 function parseSource(source: string): Parser.SyntaxNode {
   return parser.parse((index: number) => source.slice(index, index + PARSE_CHUNK)).rootNode;
@@ -457,7 +458,8 @@ export function mintId(base: string, minted: Set<string>): string {
  * tree-sitter-php 0.23.x cannot parse a `const` inside an enum body (#145). An
  * array initializer collapses the whole `enum_declaration` into ERROR; the
  * method is recovered as a sibling `function_definition`. 0.24.2 parses this
- * natively but is ABI 15 and cannot load on Graft's tree-sitter 0.21.1.
+ * natively, and the 0.25 runtime can load it, so this workaround stands only
+ * until tree-sitter-php is bumped separately — it stops firing once it is.
  *
  * Bound: only an ERROR that already contains `enum_case` + `name` is treated as
  * a collapsed enum. Only `const_declaration` / `function_definition` /
