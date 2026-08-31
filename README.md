@@ -42,6 +42,7 @@
 - [Benchmark](#benchmark)
 - [SWE-bench Verified](#swe-bench-verified)
 - [How the graph gets built](#how-the-graph-gets-built)
+- [Supported languages](#supported-languages)
 - [What's in a node](#whats-in-a-node)
 - [What runs where](#what-runs-where)
 - [Agent integration](#agent-integration) — [MCP server](#mcp-server) · [Claude Code (deep integration)](#claude-code-deep-integration)
@@ -186,6 +187,39 @@ Every pass is cached by content hash — the LLM ones and the tree-sitter parse 
 That cheapness is what lets **every query refresh the graph before it answers**. A retrieval call stats the tree against the last build's fingerprint (~3ms), and rebuilds only if something moved — so `ask`/`grep`/`callers`/`skeleton`/`map` describe the code as it is right now, including edits that are unsaved to git: uncommitted, unstaged, or staged all look the same to graft, which never reads git at all. The refresh is structural and `$0`; it never calls the LLM. Turn it off per-command with `--no-refresh`, or everywhere with `GRAFT_NO_REFRESH=1`.
 
 Alongside the markdown graph, `graft build` builds `graft/.graph/wiring.json` — a per-symbol code graph — plus a per-file wiring card mirroring your source tree. Tier 1 is pure tree-sitter (every function, class, and call edge; deterministic, no model, no network), which is why plain `graft build` needs no key. The `--deep` pass adds a one-line summary and a crux excerpt per symbol, cached by body hash.
+
+---
+
+## Supported languages
+
+Graft parses with tree-sitter at two levels of fidelity, plus an optional
+compiler-grade layer — all `$0` and deterministic (no model, no key):
+
+- **Full-fidelity** — hand-written extractors with scope-aware, cross-file call
+  and import resolution:
+  **TypeScript / JavaScript** (incl. JSX & TSX), **Python**, **Go**, **Java**,
+  **Kotlin**, **PHP**, **Swift** (classes, structs, enums, actors, protocols;
+  extension members attach to the extended type), **R** (`.R`/`.r` — plain
+  functions, S3/S4/R6 classes and methods, roxygen `@export`,
+  `library()`/`source()` imports), **Ruby** (`.rb` — classes, modules,
+  instance/singleton methods, private/protected/public visibility,
+  include/extend/prepend mixin composition, attr_accessor/reader/writer and
+  define_method synthesis).
+
+- **Broad** — symbols (functions, classes, methods, types, …) plus name-resolved
+  call edges via a generic tree-sitter extractor, one grammar per language:
+  **Rust, C, C++, C#, Scala, Elixir, Solidity,
+  OCaml, Zig, Dart, Clojure, Nix, Lua**.
+
+- **Compiler-grade edges (opt-in)** — `graft build --lsp` adds precise
+  `lsp_resolved` call edges (member calls the static pass can't type) when a
+  language server is on your `PATH`: **rust-analyzer** (Rust), **clangd** (C/C++),
+  **gopls** (Go), **pyright** (Python), **typescript-language-server** (TS/JS).
+  It's best-effort — with no server installed the graph is unchanged.
+
+Twenty-four languages in total. A file whose language isn't listed is skipped, not
+indexed. Adding a broad-tier language is a small contribution — see
+[CREDITS.md](CREDITS.md) for the folks who added the current set.
 
 ---
 

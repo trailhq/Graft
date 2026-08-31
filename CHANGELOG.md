@@ -4,11 +4,7 @@
 
 ### Added
 
-- feat: add Ruby language support (Phase 1: flat class/module/method extraction)
-- feat: add Ruby language support (Phase 2: singleton methods)
-- feat: add Ruby language support (Phase 3: private/protected/public visibility)
-- feat: add Ruby language support (Phase 4: include/extend/prepend mixin edges)
-- feat: add Ruby language support (Phase 5: attr_accessor/reader/writer and define_method synthesis)
+- feat: add Ruby language support (classes, modules, instance/singleton methods, visibility, mixin composition, attr_* and define_method synthesis)
 - **C/C++ language support.** One `"cpp"` grammar (`tree-sitter-cpp`) parses the
   whole family — `.c/.h/.cpp/.hpp/.cc/.cxx/.hh/.hxx` — uniformly, the same
   approach clangd and most polyglot tooling take; there's no separate `.c`-only
