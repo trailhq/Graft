@@ -98,7 +98,12 @@ export function resolveEdges(
           : resolveImport(e.specifier, e.file, byId);
       add(e.source, target, "imports", "extracted");
     } else if (e.relation === "extends" || e.relation === "implements") {
-      const kinds: Kind[] = e.relation === "implements" ? ["interface"] : ["class", "interface"];
+      // "module" is Ruby-only (see types.ts) and only ever shows up here via
+      // Phase 4's include/extend/prepend mixin edges, which reuse the
+      // `extends` relation and always target a module, never a class — so
+      // widening this list can't change resolution for any other language's
+      // `extends`/`implements` edges, which never target a "module"-kind node.
+      const kinds: Kind[] = e.relation === "implements" ? ["interface"] : ["class", "interface", "module"];
       const hit = resolveName(e.name!, e.file, kinds, perFileName, globalName);
       // an unresolved base is usually an external/imported type — keep the name.
       add(e.source, hit?.id ?? e.name!, e.relation, hit?.confidence ?? "inferred");

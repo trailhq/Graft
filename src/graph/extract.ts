@@ -555,6 +555,13 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     // find its public=/private=/active= arguments (there's no other path to
     // them), and it must not ALSO be treated as an ordinary call to a
     // function literally named "R6Class"/"list".
+    const rubyMixins = ctx.lang === "ruby" && ctx.enclosingClass !== null ? rubyMixinTargets(node) : [];
+    if (rubyMixins.length > 0) {
+      for (const target of rubyMixins) {
+        edges.push({ source: ctx.parentId, relation: "extends", name: target, file: ctx.rel });
+      }
+      return;
+    }
     const consumedCallee = ctx.lang === "r" && node.type === "call" ? rCalleeName(node) : null;
     const isConsumedRClassCall =
       consumedCallee === "R6Class" || (consumedCallee === "list" && rIsMixinContainer(node));
@@ -1374,7 +1381,33 @@ function rubyCallee(node: Parser.SyntaxNode): { name: string; viaMember: boolean
   if (!methodNode) return null;
   const receiverNode = node.childForFieldName("receiver");
   if (receiverNode?.type === "self") return { name: methodNode.text, viaMember: true, receiver: "self" };
+  // Phase 4: a receiver present but not `self` (an explicit obj.method(),
+  // Klass.method(), or — with no receiver at all — a bare call inside a
+  // class body) has no type-binding table to resolve against (see spec
+  // Non-goals), so it's a bare-name match widened to also match "method"
+  // kind nodes — the same RawEdge.kinds override R's own Phase 4
+  // introduced, resolve.ts already handles it generically. This is what
+  // makes a mixed-in module's methods reachable: resolveName() doesn't
+  // distinguish "defined directly on this class" from "pulled in via
+  // include" — it just matches by name and kind.
+  if (receiverNode) return { name: methodNode.text, viaMember: false, kinds: ["function", "method"] };
   return { name: methodNode.text, viaMember: false };
+}
+
+const RUBY_MIXIN_KEYWORDS = new Set(["include", "extend", "prepend"]);
+
+/**
+ * `include Mod`/`extend Mod`/`prepend Mod` (bare, no receiver) inside a
+ * class/module body — every named `constant` argument becomes a mixin
+ * target. Returns [] for anything else (an ordinary call, or `foo.include
+ * Bar` with an explicit receiver, which isn't mixin composition).
+ */
+function rubyMixinTargets(node: Parser.SyntaxNode): string[] {
+  const methodNode = node.childForFieldName("method");
+  if (methodNode?.type !== "identifier" || !RUBY_MIXIN_KEYWORDS.has(methodNode.text)) return [];
+  if (node.childForFieldName("receiver")) return [];
+  const args = node.childForFieldName("arguments");
+  return (args?.namedChildren ?? []).filter((c) => c.type === "constant").map((c) => c.text);
 }
 
 /**
