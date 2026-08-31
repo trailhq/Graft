@@ -20,7 +20,8 @@ export type Kind =
   | "interface" // TS + Go
   | "type" // TS + Go (type alias / named type)
   | "enum" // TS only
-  | "struct"; // Go only
+  | "struct" // Go only
+  | "module"; // Ruby only
 
 /** How confident we are an edge is true. */
 export type Confidence = "extracted" | "inferred";

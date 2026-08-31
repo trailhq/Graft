@@ -73,6 +73,22 @@ end
   assert.equal(nodes.find((n) => n.name === "b")?.exported, true);
 });
 
+test("ruby Phase 3: private :a, :b (multi-symbol post-hoc form) marks every listed name", () => {
+  const src = `
+class Widget
+  def a; end
+  def b; end
+  def c; end
+
+  private :a, :b
+end
+`;
+  const { nodes } = extractFile("widget.rb", src, "ruby");
+  assert.equal(nodes.find((n) => n.name === "a")?.exported, false);
+  assert.equal(nodes.find((n) => n.name === "b")?.exported, false);
+  assert.equal(nodes.find((n) => n.name === "c")?.exported, true);
+});
+
 test("ruby Phase 3: initialize stays private regardless of the surrounding visibility mode", () => {
   const src = `
 class Widget

@@ -1320,8 +1320,10 @@ function rubyPostHocVisibility(classOrModuleNode: Parser.SyntaxNode): ReadonlyMa
     if (methodNode?.type !== "identifier") continue;
     if (methodNode.text !== "private" && methodNode.text !== "protected") continue;
     const args = stmt.childForFieldName("arguments");
-    const sym = args?.namedChildren[0];
-    if (sym?.type === "simple_symbol") out.set(sym.text.slice(1), methodNode.text as "protected" | "private");
+    if (!args) continue;
+    for (const sym of args.namedChildren) {
+      if (sym.type === "simple_symbol") out.set(sym.text.slice(1), methodNode.text as "protected" | "private");
+    }
   }
   return out;
 }
