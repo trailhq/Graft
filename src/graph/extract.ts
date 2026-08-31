@@ -1225,6 +1225,22 @@ function describeRuby(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | nu
       hashNode: body ?? node,
     };
   }
+  if (node.type === "singleton_method") {
+    const nameNode = node.childForFieldName("name");
+    if (!nameNode) return null;
+    const body = node.childForFieldName("body");
+    return {
+      name: nameNode.text,
+      // Owned by the enclosing class regardless of whether the receiver was
+      // `self` or an arbitrary object expression (`def obj.x`) — Phase 2's
+      // scope is recognizing the shape, not modeling per-object singleton
+      // methods distinctly (no schema field exists for that distinction
+      // anyway; see Java's own static methods for precedent).
+      kind: "method",
+      headerEnd: (body ?? node).startIndex,
+      hashNode: body ?? node,
+    };
+  }
   return null;
 }
 
