@@ -562,6 +562,13 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       }
       return;
     }
+    if (ctx.lang === "ruby" && ctx.enclosingClass !== null) {
+      const synthesized = rubySynthesizedMethods(node, ctx);
+      if (synthesized.length > 0) {
+        for (const s of synthesized) emitRubySynthesizedMethod(s, ctx, out, edges, minted);
+        return;
+      }
+    }
     const consumedCallee = ctx.lang === "r" && node.type === "call" ? rCalleeName(node) : null;
     const isConsumedRClassCall =
       consumedCallee === "R6Class" || (consumedCallee === "list" && rIsMixinContainer(node));
@@ -592,8 +599,19 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     // same accepted-noise tradeoff as every other untyped bare-name match in
     // this file. Every other position (assignment RHS, call argument,
     // return value, operand, interpolation) is deliberately NOT treated as
-    // a call candidate — see `isRubyBareCallCandidate`'s doc comment.
-    edges.push({ source: ctx.parentId, relation: "calls", name: node.text, viaMember: false, file: ctx.rel });
+    // a call candidate — see `isRubyBareCallCandidate`'s doc comment. Widened
+    // to also match "method" kind nodes for the same reason as rubyCallee's
+    // no-receiver case (see its doc comment) — a paren-less bare word inside
+    // a class body is just as likely to name a sibling method as a
+    // top-level function.
+    edges.push({
+      source: ctx.parentId,
+      relation: "calls",
+      name: node.text,
+      viaMember: false,
+      file: ctx.rel,
+      kinds: ["function", "method"],
+    });
   } else if (
     node.type === "identifier" &&
     !isDirectCallee(node, callType) &&
@@ -1391,7 +1409,17 @@ function rubyCallee(node: Parser.SyntaxNode): { name: string; viaMember: boolean
   // distinguish "defined directly on this class" from "pulled in via
   // include" — it just matches by name and kind.
   if (receiverNode) return { name: methodNode.text, viaMember: false, kinds: ["function", "method"] };
-  return { name: methodNode.text, viaMember: false };
+  // No receiver at all — per this same comment's own enumeration above, a
+  // paren'd/argumented bare call (`helper(1)`) inside a class body needs the
+  // identical "method" widening a non-self receiver gets, for the same
+  // reason (a sibling method, or one pulled in via a mixin, is a legitimate
+  // target and resolveName() can't otherwise see it). Discovered as a real
+  // gap in Phase 5 (a `def`'s bare-call-to-a-sibling-method case had no
+  // working precedent to copy — see rubySynthesizedMethods' define_method
+  // test), not merely theoretical: without this, `def a; helper; end` /
+  // `def a; helper(1); end` inside a class never resolves to `def helper`
+  // defined alongside it.
+  return { name: methodNode.text, viaMember: false, kinds: ["function", "method"] };
 }
 
 const RUBY_MIXIN_KEYWORDS = new Set(["include", "extend", "prepend"]);
@@ -1408,6 +1436,86 @@ function rubyMixinTargets(node: Parser.SyntaxNode): string[] {
   if (node.childForFieldName("receiver")) return [];
   const args = node.childForFieldName("arguments");
   return (args?.namedChildren ?? []).filter((c) => c.type === "constant").map((c) => c.text);
+}
+
+interface RubySynthesizedMethod {
+  name: string;
+  hashNode: Parser.SyntaxNode; // span for signature/body_hash/body_text
+  headerEnd: number;
+}
+
+/**
+ * `attr_accessor`/`attr_reader`/`attr_writer :sym[, ...]` and
+ * `define_method(:name) { ... }` — call shapes that stand for one or more
+ * method definitions with no `def`/`method` node of their own. Returns []
+ * for anything else, so the caller can safely fall through to the ordinary
+ * call-edge path.
+ */
+function rubySynthesizedMethods(node: Parser.SyntaxNode, ctx: WalkCtx): RubySynthesizedMethod[] {
+  const methodNode = node.childForFieldName("method");
+  if (methodNode?.type !== "identifier") return [];
+  if (node.childForFieldName("receiver")) return [];
+  const args = node.childForFieldName("arguments");
+  const symbols = (args?.namedChildren ?? []).filter((c) => c.type === "simple_symbol").map((c) => c.text.slice(1));
+
+  if (methodNode.text === "attr_reader") return symbols.map((s) => ({ name: s, hashNode: node, headerEnd: node.startIndex }));
+  if (methodNode.text === "attr_writer") return symbols.map((s) => ({ name: `${s}=`, hashNode: node, headerEnd: node.startIndex }));
+  if (methodNode.text === "attr_accessor") {
+    return symbols.flatMap((s) => [
+      { name: s, hashNode: node, headerEnd: node.startIndex },
+      { name: `${s}=`, hashNode: node, headerEnd: node.startIndex },
+    ]);
+  }
+  if (methodNode.text === "define_method") {
+    const sym = args?.namedChildren[0];
+    if (sym?.type !== "simple_symbol") return [];
+    const block = node.childForFieldName("block");
+    if (!block) return [];
+    return [{ name: sym.text.slice(1), hashNode: block, headerEnd: block.startIndex }];
+  }
+  return [];
+}
+
+function emitRubySynthesizedMethod(
+  m: RubySynthesizedMethod,
+  ctx: WalkCtx,
+  out: NodeV1[],
+  edges: RawEdge[],
+  minted: Set<string>,
+): void {
+  const base = `${ctx.rel}#${[...ctx.scope, m.name].join(".")}`;
+  const id = mintId(base, minted);
+  out.push({
+    id,
+    name: m.name,
+    kind: "method",
+    path: ctx.rel,
+    span: `L${m.hashNode.startPosition.row + 1}-L${m.hashNode.endPosition.row + 1}`,
+    signature: clean(ctx.source.slice(m.hashNode.startIndex, m.headerEnd)),
+    exported: rubyExported(m.name, ctx),
+    origin: "ast",
+    body_hash: contentHash(m.hashNode.text),
+    body_text: searchBody(m.hashNode.text),
+    summary_state: "pending",
+    summary: null,
+    crux: null,
+    owner: ctx.enclosingClass ?? undefined,
+  });
+  edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
+  // define_method's block body can contain further calls/definitions — walk
+  // it under a child scope exactly like an ordinary method body would get.
+  // attr_* synthesized methods have no such body (m.hashNode is the whole
+  // call node, nothing further to descend into beyond what the outer walk
+  // already will).
+  if (m.hashNode.type === "block" || m.hashNode.type === "do_block") {
+    const childCtx: WalkCtx = {
+      ...ctx,
+      scope: [...ctx.scope, m.name],
+      enclosingKind: "method",
+      parentId: id,
+    };
+    for (const child of m.hashNode.namedChildren) walk(child, childCtx, out, edges, minted);
+  }
 }
 
 /**
