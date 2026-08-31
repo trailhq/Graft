@@ -30,7 +30,16 @@
  * centrally by `track()` and are deliberately not repeated per event.
  */
 export const EVENTS: Record<string, ReadonlySet<string>> = {
-  /** Once per machine, when the install id is first minted. The denominator. */
+  /** Once per machine per version, from the npm postinstall hook. The real
+   *  denominator: a machine that installs graft and never runs a command emits
+   *  this event and no other, so it is the only place the "installed, never
+   *  used" leak is visible at all. Version-scoped rather than once-ever so an
+   *  upgrade counts; distinct install ids still give unique machines.
+   *  `global` separates `npm i -g graft` from a project dependency, which is
+   *  roughly the difference between a person and a lockfile. */
+  install: new Set<string>(['global']),
+  /** Once per machine, the first time a command actually runs. Paired with
+   *  `install`, the gap between the two is the top of the funnel. */
   first_run: new Set<string>(),
   /** `graft init` completed. Tells us which agents people actually wire, and
    *  how many decline telemetry at the picker. */

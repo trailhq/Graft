@@ -73,9 +73,10 @@ test('every event carries the common properties, and no identifier beyond them',
   assert.match(ev.distinct_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 });
 
-test('the contract lists exactly the six documented events', () => {
+test('the contract lists exactly the seven documented events', () => {
   assert.deepEqual(Object.keys(EVENTS).sort(), [
-    'build_completed', 'build_failed', 'first_run', 'init_completed', 'query', 'session_summary',
+    'build_completed', 'build_failed', 'first_run', 'init_completed', 'install', 'query',
+    'session_summary',
   ]);
 });
 

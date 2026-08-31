@@ -8,7 +8,7 @@
  */
 export { EVENTS, COMMON_KEYS, isTrackedCommand, errorCode, filesBucket, durationBucket, countBucket, savedTokensBucket, langsValue } from './contract.js';
 export type { AgentHost, Surface, TrackedCommand, BuildStage, ErrorCode } from './contract.js';
-export { track, trackFirstRunIfNew, detectHost } from './track.js';
+export { track, trackFirstRunIfNew, trackInstallIfNew, detectHost } from './track.js';
 export type { QueuedEvent, TrackContext } from './track.js';
 export { telemetryOn, offReason, explainOff } from './gate.js';
 export { maybeFlushInBackground, runFlush } from './flush.js';
