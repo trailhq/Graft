@@ -21,3 +21,6 @@ transcripts/
 # and never part of a PR diff (the hook helpers/skills alongside them stay tracked).
 .claude/settings.json
 .claude/settings.local.json
+
+# Local git worktrees for isolated feature work
+.worktrees/
