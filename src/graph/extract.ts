@@ -553,12 +553,15 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     // read — tree-sitter-ruby emits a plain `identifier` for both, unlike
     // `helper(1)` / `helper 1`, which get a real `call` node (see
     // `rubyCallee`'s own doc comment). Per spec ("bare `foo(...)`/`foo`...
-    // resolve by name the same way R's Phase 1 does"), every such bare-word
-    // that isn't a declaration/parameter/assignment-target is a call
-    // candidate — a local-variable read misfires as an edge here, but it
-    // only resolves if some method/function elsewhere happens to share the
-    // name, same accepted-noise tradeoff as every other untyped bare-name
-    // match in this file.
+    // resolve by name the same way R's Phase 1 does"), a bare-word standing
+    // alone in statement position (see `isRubyBareCallCandidate`) is a call
+    // candidate — a local variable that's ALSO read that way (its own,
+    // otherwise-unused statement) misfires as an edge here, but it only
+    // resolves if some method/function elsewhere happens to share the name,
+    // same accepted-noise tradeoff as every other untyped bare-name match in
+    // this file. Every other position (assignment RHS, call argument,
+    // return value, operand, interpolation) is deliberately NOT treated as
+    // a call candidate — see `isRubyBareCallCandidate`'s doc comment.
     edges.push({ source: ctx.parentId, relation: "calls", name: node.text, viaMember: false, file: ctx.rel });
   } else if (
     node.type === "identifier" &&
@@ -1256,35 +1259,31 @@ function rubyCallee(node: Parser.SyntaxNode): { name: string; viaMember: boolean
   return { name: methodNode.text, viaMember: false };
 }
 
-/** Does this bare `identifier` look like a paren-less method invocation
- * rather than a local-variable read, a declaration name, or a parameter?
- * See the call site's own doc comment for why the grammar can't tell these
- * apart on its own. */
+/**
+ * Does this bare `identifier` look like a paren-less, standalone method
+ * invocation — as opposed to a local-variable/parameter read appearing
+ * anywhere an expression is expected (an assignment's right-hand side, a
+ * call argument, a `return` value, a binary-operator operand, or a string
+ * interpolation)? Restricted to genuine *statement position*: the direct
+ * child of a `body_statement` (a method/block body's own statement list).
+ *
+ * Confirmed directly against the grammar (not assumed): only a bare
+ * identifier standing alone as its own statement — `def caller; helper; end`
+ * — has `body_statement` as its immediate parent. Every other position
+ * (`self.x = helper`, `foo(helper)`, `return helper`, `helper + 1`,
+ * `"#{helper}"`) nests the identifier one level deeper, inside
+ * `assignment`/`argument_list`/`return`/`binary`/`interpolation` instead —
+ * so this one check is narrower AND simpler than enumerating every
+ * exclusion (declaration names, assignment targets, parameters, ...) the
+ * earlier version of this function tried to list by hand, and doesn't miss
+ * a shape that list-based approach didn't think of. The cost is a
+ * false-negative for a call used purely for its return value (`x =
+ * helper()`'s paren-less sibling `x = helper` isn't caught) — accepted per
+ * this file's usual "erring toward false negatives" precedent for Ruby's
+ * genuinely ambiguous bare-word shapes.
+ */
 function isRubyBareCallCandidate(node: Parser.SyntaxNode): boolean {
-  const parent = node.parent;
-  if (!parent) return false;
-  // Already captured via the `call`-node dispatch (rubyCallee) — don't double-emit.
-  if (
-    parent.type === "call" &&
-    (parent.childForFieldName("method") === node || parent.childForFieldName("receiver") === node)
-  ) {
-    return false;
-  }
-  if (isDeclarationName(node)) return false; // a def/class/module's own name
-  if (parent.type === "assignment" && parent.childForFieldName("left") === node) return false;
-  if (parent.type === "left_assignment_list") return false;
-  const PARAMETER_PARENTS = new Set([
-    "method_parameters",
-    "block_parameters",
-    "optional_parameter",
-    "keyword_parameter",
-    "splat_parameter",
-    "hash_splat_parameter",
-    "block_parameter",
-    "destructured_parameter",
-  ]);
-  if (PARAMETER_PARENTS.has(parent.type)) return false;
-  return true;
+  return node.parent?.type === "body_statement";
 }
 
 /** The receiver's base type name for a Go method, unwrapping a pointer receiver

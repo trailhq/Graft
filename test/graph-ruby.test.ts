@@ -171,3 +171,37 @@ end
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("ruby Phase 1: a bare identifier used as an assignment RHS (a parameter read) is not a call candidate", async () => {
+  // `name` exists as a real top-level function in this file, so a
+  // false-positive "calls" edge from `@name = name` (where `name` is
+  // unambiguously the `initialize` parameter, not a call) would actually
+  // resolve to it — proving the assertion below isn't vacuous the way it
+  // would be if `name` resolved to nothing regardless.
+  const src = `
+def name
+  "shadow"
+end
+
+class Person
+  def initialize(name)
+    @name = name
+  end
+end
+`;
+  const { dir, graph } = await buildAndRead({ "person.rb": src });
+  try {
+    assert.equal(
+      graph.edges.some(
+        (e) =>
+          e.relation === "calls" &&
+          e.source === "person.rb#Person.initialize" &&
+          e.target === "person.rb#name",
+      ),
+      false,
+      "a bare identifier on an assignment's right-hand side must not be treated as a call",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
