@@ -12,6 +12,7 @@ import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
 import Cpp from "tree-sitter-cpp";
 import R from "tree-sitter-r";
+import Ruby from "tree-sitter-ruby";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import {
@@ -25,7 +26,7 @@ import {
 } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "r";
+export type Language = "typescript" | "tsx" | "python" | "go" | "cpp" | "r" | "ruby";
 
 /**
  * Extension → the tree-sitter grammar that parses it, and the label a human expects
@@ -64,6 +65,7 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".cc", grammar: "cpp", label: "cpp" },
   { ext: ".cxx", grammar: "cpp", label: "cpp" },
   { ext: ".h", grammar: "cpp", label: "cpp" },
+  { ext: ".rb", grammar: "ruby", label: "ruby" },
   // `entryFor` lower-cases the path before matching, so this one entry covers
   // both `.R` (the conventional case in real R codebases) and `.r`.
   { ext: ".r", grammar: "r", label: "r" },
@@ -196,6 +198,13 @@ const CPP_KINDS: Record<string, Kind> = {
 // Go's own table — never consulted, kept only to satisfy KINDS_BY_LANG's type.
 const R_KINDS: Record<string, Kind> = {};
 
+// Ruby: `class`/`module`/`method`/`singleton_method` all carry a real `name`
+// field, but a bare `method` node's KIND depends on whether it's lexically
+// inside a class/module (→ "method") or at top level (→ "function") — same
+// promotion Python does for `function_definition` — so it's resolved
+// dynamically in describeRuby() rather than a static table lookup.
+const RUBY_KINDS: Record<string, Kind> = {};
+
 const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   typescript: TS_KINDS,
   tsx: TS_KINDS,
@@ -203,6 +212,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   go: GO_KINDS,
   cpp: CPP_KINDS,
   r: R_KINDS,
+  ruby: RUBY_KINDS,
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -222,6 +232,7 @@ const GRAMMARS: Record<Language, unknown> = {
   go: Go,
   cpp: Cpp,
   r: R,
+  ruby: Ruby,
 };
 
 export interface WalkCtx {
@@ -397,7 +408,9 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
               ? cppExported(ctx)
               : ctx.lang === "r"
                 ? rExported(desc.name, ctx, node)
-                : tsExported(node),
+                : ctx.lang === "ruby"
+                  ? rubyExported(desc.name)
+                  : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -411,8 +424,12 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     // class heritage
     if (desc.kind === "class" || desc.kind === "struct") edges.push(...heritageEdges(node, id, ctx));
 
+    // Ruby modules own methods and are mixin targets exactly like classes do
+    // (see Phase 4) — `enclosingClass` is reused as the generic "nearest
+    // owning type" slot, not literally class-only.
+    const rubyModuleDecl = ctx.lang === "ruby" && desc.kind === "module";
     const enclosingClass =
-      desc.kind === "class" || desc.kind === "struct"
+      desc.kind === "class" || desc.kind === "struct" || rubyModuleDecl
         ? desc.name
         : isGoMethod
           ? goReceiverType(node)
@@ -500,7 +517,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
   // there's no separate import-statement grammar construct to key off, so isImport
   // must be checked before the generic calls path or every import call would be
   // captured as a (harmlessly unresolvable, but wrong) `calls` edge instead.
-  const callType = ctx.lang === "python" || ctx.lang === "r" ? "call" : "call_expression";
+  const callType = ctx.lang === "python" || ctx.lang === "r" || ctx.lang === "ruby" ? "call" : "call_expression";
   if (isImport(node, ctx.lang)) {
     const spec = importSpecifier(node, ctx.lang);
     if (spec) edges.push({ source: ctx.rel, relation: "imports", specifier: spec, file: ctx.rel });
@@ -530,6 +547,19 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       const recvType = callee.recvType ?? resolveRecvType(callee.receiver, ctx);
       edges.push(recvType ? { ...callEdge, recvType } : callEdge);
     }
+  } else if (ctx.lang === "ruby" && node.type === "identifier" && isRubyBareCallCandidate(node)) {
+    // Ruby's optional parens mean a paren-less, argument-less method call
+    // (`helper`) is syntactically indistinguishable from a local-variable
+    // read — tree-sitter-ruby emits a plain `identifier` for both, unlike
+    // `helper(1)` / `helper 1`, which get a real `call` node (see
+    // `rubyCallee`'s own doc comment). Per spec ("bare `foo(...)`/`foo`...
+    // resolve by name the same way R's Phase 1 does"), every such bare-word
+    // that isn't a declaration/parameter/assignment-target is a call
+    // candidate — a local-variable read misfires as an edge here, but it
+    // only resolves if some method/function elsewhere happens to share the
+    // name, same accepted-noise tradeoff as every other untyped bare-name
+    // match in this file.
+    edges.push({ source: ctx.parentId, relation: "calls", name: node.text, viaMember: false, file: ctx.rel });
   } else if (
     node.type === "identifier" &&
     !isDirectCallee(node, callType) &&
@@ -652,6 +682,7 @@ function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "go") return describeGo(node, ctx);
   if (ctx.lang === "cpp") return describeCpp(node, ctx);
   if (ctx.lang === "r") return describeR(node, ctx);
+  if (ctx.lang === "ruby") return describeRuby(node, ctx);
 
   const mapped = ctx.kinds[node.type];
   if (mapped) {
@@ -1154,6 +1185,108 @@ function rRoxygenExported(node: Parser.SyntaxNode): boolean | null {
   return sawRoxygen ? exported : null;
 }
 
+/**
+ * Ruby definition shapes for Phase 1: `class`, `module`, and `def` (plain
+ * instance/top-level methods — `def self.x`/`def obj.x`/`class << self` land
+ * in Phase 2). Unlike R, Ruby's grammar hands us real class/module nodes
+ * directly — there's no S3/S4-style naming-convention inference to do here.
+ */
+function describeRuby(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
+  if (node.type === "class" || node.type === "module") {
+    const nameNode = node.childForFieldName("name");
+    // `class A::B` (compact nesting) names itself via a `scope_resolution`
+    // node, not a plain `constant` — deliberately unhandled (Phase 1 stays to
+    // the common `class Foo` / `module Foo` shape; see spec's "erring toward
+    // false negatives" precedent).
+    if (nameNode?.type !== "constant") return null;
+    const body = node.childForFieldName("body");
+    const hashNode = body ?? node;
+    return {
+      name: nameNode.text,
+      kind: node.type === "class" ? "class" : "module",
+      headerEnd: (body ?? node).startIndex,
+      hashNode,
+    };
+  }
+  if (node.type === "method") {
+    const nameNode = node.childForFieldName("name");
+    if (!nameNode) return null;
+    const body = node.childForFieldName("body");
+    return {
+      name: nameNode.text,
+      // A `def` promotes to "method" only when lexically nested inside a
+      // class/module — a top-level `def` is a free function for our
+      // purposes, mirroring Python's own function→method promotion.
+      kind: ctx.enclosingClass !== null ? "method" : "function",
+      headerEnd: (body ?? node).startIndex,
+      hashNode: body ?? node,
+    };
+  }
+  return null;
+}
+
+/**
+ * Phase 1 baseline, ahead of Phase 3's real private/protected/public
+ * tracking: `initialize` is unconditionally private by Ruby language rule
+ * regardless of the surrounding visibility mode, so it's correct standalone
+ * and Phase 3 layers on top of it rather than replacing it.
+ */
+function rubyExported(name: string): boolean {
+  return name !== "initialize";
+}
+
+/**
+ * Ruby's `call` node splits the callee into `receiver` + `method` fields
+ * (never a single `function` field), so it's intercepted before the shared
+ * lookup every other language uses. `self.method` resolves directly to the
+ * enclosing class via the already-generic "self" handling in
+ * resolveRecvType — no Ruby-specific binding table needed. Every other
+ * receiver shape (`obj.method`, `Klass.method`, or no receiver at all) is a
+ * bare-name match: there's no type-binding table (see spec Non-goals), so
+ * `receiver` is deliberately left unset rather than passed through as an
+ * unresolvable string. `super(...)`'s implicit callee (no `method` field at
+ * all) returns null — no call edge, matching the "erring toward false
+ * negatives" precedent.
+ */
+function rubyCallee(node: Parser.SyntaxNode): { name: string; viaMember: boolean; receiver?: string; kinds?: Kind[] } | null {
+  const methodNode = node.childForFieldName("method");
+  if (!methodNode) return null;
+  const receiverNode = node.childForFieldName("receiver");
+  if (receiverNode?.type === "self") return { name: methodNode.text, viaMember: true, receiver: "self" };
+  return { name: methodNode.text, viaMember: false };
+}
+
+/** Does this bare `identifier` look like a paren-less method invocation
+ * rather than a local-variable read, a declaration name, or a parameter?
+ * See the call site's own doc comment for why the grammar can't tell these
+ * apart on its own. */
+function isRubyBareCallCandidate(node: Parser.SyntaxNode): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  // Already captured via the `call`-node dispatch (rubyCallee) — don't double-emit.
+  if (
+    parent.type === "call" &&
+    (parent.childForFieldName("method") === node || parent.childForFieldName("receiver") === node)
+  ) {
+    return false;
+  }
+  if (isDeclarationName(node)) return false; // a def/class/module's own name
+  if (parent.type === "assignment" && parent.childForFieldName("left") === node) return false;
+  if (parent.type === "left_assignment_list") return false;
+  const PARAMETER_PARENTS = new Set([
+    "method_parameters",
+    "block_parameters",
+    "optional_parameter",
+    "keyword_parameter",
+    "splat_parameter",
+    "hash_splat_parameter",
+    "block_parameter",
+    "destructured_parameter",
+  ]);
+  if (PARAMETER_PARENTS.has(parent.type)) return false;
+  return true;
+}
+
 /** The receiver's base type name for a Go method, unwrapping a pointer receiver
  * (`func (u *User) …` → `User`). Null if it can't be read. */
 function goReceiverType(node: Parser.SyntaxNode): string | null {
@@ -1281,6 +1414,14 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
     }
     return edges;
   }
+  if (ctx.lang === "ruby") {
+    const superclass = node.childForFieldName("superclass");
+    const constant = superclass?.namedChildren[0];
+    if (constant?.type === "constant") {
+      edges.push({ source: classId, relation: "extends", name: constant.text, file: ctx.rel });
+    }
+    return edges;
+  }
   const heritage = node.namedChildren.find((c) => c.type === "class_heritage");
   for (const clause of heritage?.namedChildren ?? []) {
     const relation: Relation | null =
@@ -1303,6 +1444,7 @@ function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
 ): { name: string; viaMember: boolean; receiver?: string; recvType?: string; kinds?: Kind[] } | null {
+  if (lang === "ruby") return rubyCallee(node);
   const fn = node.childForFieldName("function");
   if (!fn) return null;
   if (fn.type === "identifier") return { name: fn.text, viaMember: false };
