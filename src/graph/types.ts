@@ -22,10 +22,11 @@ export type Kind =
   | "enum" // TS + PHP + Java
   | "struct" // Go only
   | "trait" // PHP only
-  // The generic (tags.scm) breadth tier also emits these — every tree-sitter
-  // grammar's tags.scm uses the tree-sitter tags @definition.<X> vocabulary, and
-  // module/constant/variable are common across the long tail (Ruby modules,
-  // Rust consts, top-level lets, …). Kept distinct rather than coerced so the
+  // Also Ruby's own full-fidelity module kind (see extract.ts's describeRuby),
+  // not just the generic (tags.scm) breadth tier's use below — every
+  // tree-sitter grammar's tags.scm uses the tree-sitter tags @definition.<X>
+  // vocabulary, and module/constant/variable are common across the long tail
+  // (Rust consts, top-level lets, …). Kept distinct rather than coerced so the
   // breadth tier's kinds read truthfully in cards/skeleton.
   | "module"
   | "constant"

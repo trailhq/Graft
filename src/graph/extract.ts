@@ -12,6 +12,7 @@ import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
 import Cpp from "tree-sitter-cpp";
 import R from "tree-sitter-r";
+import Ruby from "tree-sitter-ruby";
 import Java from "tree-sitter-java";
 import Kotlin from "tree-sitter-kotlin";
 import Swift from "tree-sitter-swift";
@@ -36,6 +37,7 @@ export type Language =
   | "go"
   | "cpp"
   | "r"
+  | "ruby"
   | "java"
   | "kotlin"
   | "swift"
@@ -78,6 +80,7 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".cc", grammar: "cpp", label: "cpp" },
   { ext: ".cxx", grammar: "cpp", label: "cpp" },
   { ext: ".h", grammar: "cpp", label: "cpp" },
+  { ext: ".rb", grammar: "ruby", label: "ruby" },
   { ext: ".java", grammar: "java", label: "java" },
   { ext: ".kt", grammar: "kotlin", label: "kotlin" },
   { ext: ".kts", grammar: "kotlin", label: "kotlin" },
@@ -300,6 +303,13 @@ const PHP_KINDS: Record<string, Kind> = {
   enum_declaration: "enum",
 };
 
+// Ruby: `class`/`module`/`method`/`singleton_method` all carry a real `name`
+// field, but a bare `method` node's KIND depends on whether it's lexically
+// inside a class/module (→ "method") or at top level (→ "function") — same
+// promotion Python does for `function_definition` — so it's resolved
+// dynamically in describeRuby() rather than a static table lookup.
+const RUBY_KINDS: Record<string, Kind> = {};
+
 const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   typescript: TS_KINDS,
   tsx: TS_KINDS,
@@ -307,6 +317,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   go: GO_KINDS,
   cpp: CPP_KINDS,
   r: R_KINDS,
+  ruby: RUBY_KINDS,
   java: JAVA_KINDS,
   kotlin: KOTLIN_KINDS,
   swift: SWIFT_KINDS,
@@ -338,6 +349,7 @@ const CALL_TYPES: Record<Language, ReadonlySet<string>> = {
     "scoped_call_expression",
   ]),
   r: new Set(["call"]),
+  ruby: new Set(["call"]),
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -348,6 +360,7 @@ const FUNCTION_VALUE_TYPES = new Set([
 ]);
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
+const EMPTY_MAP: ReadonlyMap<string, "protected" | "private"> = new Map();
 
 const parser = new Parser();
 const GRAMMARS: Record<Language, unknown> = {
@@ -357,6 +370,7 @@ const GRAMMARS: Record<Language, unknown> = {
   go: Go,
   cpp: Cpp,
   r: R,
+  ruby: Ruby,
   java: Java,
   kotlin: Kotlin,
   swift: Swift,
@@ -399,6 +413,21 @@ export interface WalkCtx {
   // for the method's whole body, only changing when a genuinely different
   // class is entered. Null outside any class, or for a class with no parent.
   rSuperClass: string | null;
+  // Ruby (Phase 3): the current visibility mode inside a class/module body —
+  // starts "public", switches on a bare `private`/`protected`/`public`
+  // identifier statement, and applies FORWARD ONLY to subsequent sibling
+  // defs (Ruby language semantics). Reset to "public" whenever a genuinely
+  // new class/module body is entered (mirrors rSuperClass's reset rule) —
+  // NOT reset per-definition, since it must stay live across sibling defs.
+  rubyVisibility: "public" | "protected" | "private";
+  // Ruby (Phase 3): names marked private/protected by a POST-HOC symbol
+  // call (`private :foo`) anywhere in the CURRENT class/module body,
+  // pre-scanned once when that body is entered (see rubyPostHocVisibility())
+  // — because such a call can appear textually after the def it targets,
+  // a single forward pass over rubyVisibility can't see it in time. Reset
+  // whenever a new class/module body is entered, same trigger as
+  // rubyVisibility.
+  rubyPostHoc: ReadonlyMap<string, "protected" | "private">;
 }
 
 /** A definition we're about to emit, normalized across the shapes we handle. */
@@ -473,6 +502,8 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
     rR6Access: null,
     rGenerics,
     rSuperClass: null,
+    rubyVisibility: "public",
+    rubyPostHoc: EMPTY_MAP,
   };
   // Every id minted this file, seeded with the file node's own id (`rel`) so a
   // top-level definition can never collide with it. Threaded as its own
@@ -645,15 +676,17 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
               ? cppExported(ctx)
               : ctx.lang === "r"
                 ? rExported(desc.name, ctx, node)
-                : ctx.lang === "java"
-                  ? javaExported(node)
-                  : ctx.lang === "kotlin"
-                    ? kotlinExported(node)
-                    : ctx.lang === "swift"
-                      ? swiftExported(node)
-                      : ctx.lang === "php"
-                        ? phpExported(node)
-                        : tsExported(node),
+                : ctx.lang === "ruby"
+                  ? rubyExported(desc.name, ctx)
+                  : ctx.lang === "java"
+                    ? javaExported(node)
+                    : ctx.lang === "kotlin"
+                      ? kotlinExported(node)
+                      : ctx.lang === "swift"
+                        ? swiftExported(node)
+                        : ctx.lang === "php"
+                          ? phpExported(node)
+                          : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -676,8 +709,17 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     if (ctx.lang === "php") edges.push(...phpAttributeReferenceEdges(node, id, ctx));
     if (ctx.lang === "java") edges.push(...javaAnnotationReferenceEdges(node, id, ctx));
 
+    // Ruby modules own methods and are mixin targets exactly like classes do
+    // (see Phase 4) — `enclosingClass` is reused as the generic "nearest
+    // owning type" slot, not literally class-only.
+    const rubyModuleDecl = ctx.lang === "ruby" && desc.kind === "module";
     const enclosingClass =
-      desc.kind === "class" || desc.kind === "struct" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl
+      desc.kind === "class" ||
+      desc.kind === "struct" ||
+      rubyModuleDecl ||
+      javaTypeDecl ||
+      kotlinTypeDecl ||
+      swiftTypeDecl
         ? desc.name
         : isGoMethod
           ? goReceiverType(node)
@@ -703,6 +745,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
       // (a method's own body, or — vanishingly rare but possible — another class
       // defined inside one).
       rR6Access: null,
+      // Unlike rR6Access, only reset when entering a genuinely new class (so it
       // stays live through a method's whole body, where super$ / super. calls
       // actually happen) — inherited unchanged for every other definition kind.
       // Swift reads it off the declaration's own `:` clause, so `super.ping()`
@@ -715,6 +758,12 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
               ? swiftSuperClassName(node)
               : null
           : ctx.rSuperClass,
+      rubyVisibility:
+        ctx.lang === "ruby" && (desc.kind === "class" || desc.kind === "module") ? "public" : ctx.rubyVisibility,
+      rubyPostHoc:
+        ctx.lang === "ruby" && (desc.kind === "class" || desc.kind === "module")
+          ? rubyPostHocVisibility(node)
+          : ctx.rubyPostHoc,
     };
     walkNamedChildren(node.namedChildren, childCtx, out, edges, minted);
     return;
@@ -787,6 +836,20 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     // find its public=/private=/active= arguments (there's no other path to
     // them), and it must not ALSO be treated as an ordinary call to a
     // function literally named "R6Class"/"list".
+    const rubyMixins = ctx.lang === "ruby" && ctx.enclosingClass !== null ? rubyMixinTargets(node) : [];
+    if (rubyMixins.length > 0) {
+      for (const target of rubyMixins) {
+        edges.push({ source: ctx.parentId, relation: "extends", name: target, file: ctx.rel });
+      }
+      return;
+    }
+    if (ctx.lang === "ruby" && ctx.enclosingClass !== null) {
+      const synthesized = rubySynthesizedMethods(node, ctx);
+      if (synthesized.length > 0) {
+        for (const s of synthesized) emitRubySynthesizedMethod(s, ctx, out, edges, minted);
+        return;
+      }
+    }
     const consumedCallee = ctx.lang === "r" && node.type === "call" ? rCalleeName(node) : null;
     const isConsumedRClassCall =
       consumedCallee === "R6Class" || (consumedCallee === "list" && rIsMixinContainer(node));
@@ -839,6 +902,33 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         edges.push(recvType ? { ...callEdge, recvType } : callEdge);
       }
     }
+  } else if (ctx.lang === "ruby" && node.type === "identifier" && isRubyBareCallCandidate(node)) {
+    // Ruby's optional parens mean a paren-less, argument-less method call
+    // (`helper`) is syntactically indistinguishable from a local-variable
+    // read — tree-sitter-ruby emits a plain `identifier` for both, unlike
+    // `helper(1)` / `helper 1`, which get a real `call` node (see
+    // `rubyCallee`'s own doc comment). Per spec ("bare `foo(...)`/`foo`...
+    // resolve by name the same way R's Phase 1 does"), a bare-word standing
+    // alone in statement position (see `isRubyBareCallCandidate`) is a call
+    // candidate — a local variable that's ALSO read that way (its own,
+    // otherwise-unused statement) misfires as an edge here, but it only
+    // resolves if some method/function elsewhere happens to share the name,
+    // same accepted-noise tradeoff as every other untyped bare-name match in
+    // this file. Every other position (assignment RHS, call argument,
+    // return value, operand, interpolation) is deliberately NOT treated as
+    // a call candidate — see `isRubyBareCallCandidate`'s doc comment. Widened
+    // to also match "method" kind nodes for the same reason as rubyCallee's
+    // no-receiver case (see its doc comment) — a paren-less bare word inside
+    // a class body is just as likely to name a sibling method as a
+    // top-level function.
+    edges.push({
+      source: ctx.parentId,
+      relation: "calls",
+      name: node.text,
+      viaMember: false,
+      file: ctx.rel,
+      kinds: ["function", "method"],
+    });
   } else if (ctx.lang === "php" && node.type === "use_declaration") {
     // Trait composition inside a class body (`use HasFactory, Notifiable;`).
     // Modelled as `implements`: like an interface, a trait is a contract of
@@ -864,6 +954,24 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         file: ctx.rel,
       });
     }
+  }
+
+  if (ctx.lang === "ruby" && node.type === "body_statement") {
+    let visibility = ctx.rubyVisibility;
+    for (const child of node.namedChildren) {
+      const switchTo = rubyVisibilitySwitch(child);
+      if (switchTo) {
+        visibility = switchTo;
+        continue;
+      }
+      const inline = rubyInlineVisibility(child);
+      if (inline) {
+        walk(inline.methodNode, { ...ctx, rubyVisibility: inline.visibility }, out, edges, minted);
+        continue;
+      }
+      walk(child, { ...ctx, rubyVisibility: visibility }, out, edges, minted);
+    }
+    return;
   }
 
   // Java anonymous class (`new Type() { … }`): tree-sitter-java has no
@@ -1179,6 +1287,7 @@ function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "go") return describeGo(node, ctx);
   if (ctx.lang === "cpp") return describeCpp(node, ctx);
   if (ctx.lang === "r") return describeR(node, ctx);
+  if (ctx.lang === "ruby") return describeRuby(node, ctx);
   if (ctx.lang === "java") return describeJava(node, ctx);
   if (ctx.lang === "kotlin") return describeKotlin(node, ctx);
   if (ctx.lang === "swift") return describeSwift(node, ctx);
@@ -1720,6 +1829,297 @@ function rRoxygenExported(node: Parser.SyntaxNode): boolean | null {
   return sawRoxygen ? exported : null;
 }
 
+/**
+ * Ruby definition shapes for Phase 1: `class`, `module`, and `def` (plain
+ * instance/top-level methods — `def self.x`/`def obj.x`/`class << self` land
+ * in Phase 2). Unlike R, Ruby's grammar hands us real class/module nodes
+ * directly — there's no S3/S4-style naming-convention inference to do here.
+ */
+function describeRuby(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
+  if (node.type === "class" || node.type === "module") {
+    const nameNode = node.childForFieldName("name");
+    // `class A::B` (compact nesting) names itself via a `scope_resolution`
+    // node, not a plain `constant` — deliberately unhandled (Phase 1 stays to
+    // the common `class Foo` / `module Foo` shape; see spec's "erring toward
+    // false negatives" precedent).
+    if (nameNode?.type !== "constant") return null;
+    const body = node.childForFieldName("body");
+    const hashNode = body ?? node;
+    return {
+      name: nameNode.text,
+      kind: node.type === "class" ? "class" : "module",
+      headerEnd: (body ?? node).startIndex,
+      hashNode,
+    };
+  }
+  if (node.type === "method") {
+    const nameNode = node.childForFieldName("name");
+    if (!nameNode) return null;
+    const body = node.childForFieldName("body");
+    return {
+      name: nameNode.text,
+      // A `def` promotes to "method" only when lexically nested inside a
+      // class/module — a top-level `def` is a free function for our
+      // purposes, mirroring Python's own function→method promotion.
+      kind: ctx.enclosingClass !== null ? "method" : "function",
+      headerEnd: (body ?? node).startIndex,
+      hashNode: body ?? node,
+    };
+  }
+  if (node.type === "singleton_method") {
+    const nameNode = node.childForFieldName("name");
+    if (!nameNode) return null;
+    const body = node.childForFieldName("body");
+    return {
+      name: nameNode.text,
+      // Owned by the enclosing class regardless of whether the receiver was
+      // `self` or an arbitrary object expression (`def obj.x`) — Phase 2's
+      // scope is recognizing the shape, not modeling per-object singleton
+      // methods distinctly (no schema field exists for that distinction
+      // anyway; see Java's own static methods for precedent).
+      kind: "method",
+      headerEnd: (body ?? node).startIndex,
+      hashNode: body ?? node,
+    };
+  }
+  return null;
+}
+
+/**
+ * `initialize` is unconditionally private by Ruby language rule, regardless
+ * of the surrounding visibility mode. Otherwise: a post-hoc `private
+ * :name`/`protected :name` in the current class/module body wins over the
+ * forward mode-switch state (it's a more specific, deliberate override);
+ * absent that, the current mode-switch state (already resolved to an inline
+ * override, if any, by the caller passing a one-off ctx — see
+ * rubyInlineVisibility) decides.
+ */
+function rubyExported(name: string, ctx: WalkCtx): boolean {
+  if (name === "initialize") return false;
+  const postHoc = ctx.rubyPostHoc.get(name);
+  if (postHoc) return false;
+  return ctx.rubyVisibility === "public";
+}
+
+/**
+ * One shallow pass over a class/module's own `body`, collecting every
+ * `private :sym`/`protected :sym` post-hoc call — see WalkCtx.rubyPostHoc's
+ * doc comment for why this can't be folded into the forward
+ * rubyVisibility pass. Deliberately shallow (direct body children only,
+ * `namedChildren` not a full recursive walk) — a `private :sym` nested
+ * inside a conditional or another method body is not a class-level
+ * visibility declaration and should not be treated as one.
+ */
+function rubyPostHocVisibility(classOrModuleNode: Parser.SyntaxNode): ReadonlyMap<string, "protected" | "private"> {
+  const body = classOrModuleNode.childForFieldName("body");
+  if (!body) return EMPTY_MAP;
+  const out = new Map<string, "protected" | "private">();
+  for (const stmt of body.namedChildren) {
+    if (stmt.type !== "call") continue;
+    const methodNode = stmt.childForFieldName("method");
+    if (methodNode?.type !== "identifier") continue;
+    if (methodNode.text !== "private" && methodNode.text !== "protected") continue;
+    const args = stmt.childForFieldName("arguments");
+    if (!args) continue;
+    for (const sym of args.namedChildren) {
+      if (sym.type === "simple_symbol") out.set(sym.text.slice(1), methodNode.text as "protected" | "private");
+    }
+  }
+  return out;
+}
+
+/** A bare `private`/`protected`/`public` statement (no call, no args) — the
+ * mode-switch form. Returns the mode to switch to, or null if `node` isn't
+ * one. `module_function` is deliberately NOT handled — it has dual
+ * public-singleton-method/private-instance-method semantics with no clean
+ * fit in this schema; see the plan's Task 3 notes. */
+function rubyVisibilitySwitch(node: Parser.SyntaxNode): "public" | "protected" | "private" | null {
+  if (node.type !== "identifier") return null;
+  if (node.text === "private" || node.text === "protected" || node.text === "public") return node.text;
+  return null;
+}
+
+/** `private def foo; end` / `protected def foo; end` — the inline form.
+ * Returns the wrapped method node and the one-off visibility to apply to it
+ * (independent of, and without mutating, the surrounding mode-switch
+ * state), or null if `node` isn't this shape. */
+function rubyInlineVisibility(
+  node: Parser.SyntaxNode,
+): { methodNode: Parser.SyntaxNode; visibility: "protected" | "private" } | null {
+  if (node.type !== "call") return null;
+  const methodField = node.childForFieldName("method");
+  if (methodField?.type !== "identifier") return null;
+  if (methodField.text !== "private" && methodField.text !== "protected") return null;
+  const args = node.childForFieldName("arguments");
+  const sole = args?.namedChildren[0];
+  if (sole?.type !== "method" && sole?.type !== "singleton_method") return null;
+  return { methodNode: sole, visibility: methodField.text as "protected" | "private" };
+}
+
+/**
+ * Ruby's `call` node splits the callee into `receiver` + `method` fields
+ * (never a single `function` field), so it's intercepted before the shared
+ * lookup every other language uses. `self.method` resolves directly to the
+ * enclosing class via the already-generic "self" handling in
+ * resolveRecvType — no Ruby-specific binding table needed. Every other
+ * receiver shape (`obj.method`, `Klass.method`, or no receiver at all) is a
+ * bare-name match: there's no type-binding table (see spec Non-goals), so
+ * `receiver` is deliberately left unset rather than passed through as an
+ * unresolvable string. `super(...)`'s implicit callee (no `method` field at
+ * all) returns null — no call edge, matching the "erring toward false
+ * negatives" precedent.
+ */
+function rubyCallee(node: Parser.SyntaxNode): { name: string; viaMember: boolean; receiver?: string; kinds?: Kind[] } | null {
+  const methodNode = node.childForFieldName("method");
+  if (!methodNode) return null;
+  const receiverNode = node.childForFieldName("receiver");
+  if (receiverNode?.type === "self") return { name: methodNode.text, viaMember: true, receiver: "self" };
+  // Phase 4: a receiver present but not `self` (an explicit obj.method(),
+  // Klass.method(), or — with no receiver at all — a bare call inside a
+  // class body) has no type-binding table to resolve against (see spec
+  // Non-goals), so it's a bare-name match widened to also match "method"
+  // kind nodes — the same RawEdge.kinds override R's own Phase 4
+  // introduced, resolve.ts already handles it generically. This is what
+  // makes a mixed-in module's methods reachable: resolveName() doesn't
+  // distinguish "defined directly on this class" from "pulled in via
+  // include" — it just matches by name and kind.
+  if (receiverNode) return { name: methodNode.text, viaMember: false, kinds: ["function", "method"] };
+  // No receiver at all — per this same comment's own enumeration above, a
+  // paren'd/argumented bare call (`helper(1)`) inside a class body needs the
+  // identical "method" widening a non-self receiver gets, for the same
+  // reason (a sibling method, or one pulled in via a mixin, is a legitimate
+  // target and resolveName() can't otherwise see it). Discovered as a real
+  // gap in Phase 5 (a `def`'s bare-call-to-a-sibling-method case had no
+  // working precedent to copy — see rubySynthesizedMethods' define_method
+  // test), not merely theoretical: without this, `def a; helper; end` /
+  // `def a; helper(1); end` inside a class never resolves to `def helper`
+  // defined alongside it.
+  return { name: methodNode.text, viaMember: false, kinds: ["function", "method"] };
+}
+
+const RUBY_MIXIN_KEYWORDS = new Set(["include", "extend", "prepend"]);
+
+/**
+ * `include Mod`/`extend Mod`/`prepend Mod` (bare, no receiver) inside a
+ * class/module body — every named `constant` argument becomes a mixin
+ * target. Returns [] for anything else (an ordinary call, or `foo.include
+ * Bar` with an explicit receiver, which isn't mixin composition).
+ */
+function rubyMixinTargets(node: Parser.SyntaxNode): string[] {
+  const methodNode = node.childForFieldName("method");
+  if (methodNode?.type !== "identifier" || !RUBY_MIXIN_KEYWORDS.has(methodNode.text)) return [];
+  if (node.childForFieldName("receiver")) return [];
+  const args = node.childForFieldName("arguments");
+  return (args?.namedChildren ?? []).filter((c) => c.type === "constant").map((c) => c.text);
+}
+
+interface RubySynthesizedMethod {
+  name: string;
+  hashNode: Parser.SyntaxNode; // span for signature/body_hash/body_text
+  headerEnd: number;
+}
+
+/**
+ * `attr_accessor`/`attr_reader`/`attr_writer :sym[, ...]` and
+ * `define_method(:name) { ... }` — call shapes that stand for one or more
+ * method definitions with no `def`/`method` node of their own. Returns []
+ * for anything else, so the caller can safely fall through to the ordinary
+ * call-edge path.
+ */
+function rubySynthesizedMethods(node: Parser.SyntaxNode, ctx: WalkCtx): RubySynthesizedMethod[] {
+  const methodNode = node.childForFieldName("method");
+  if (methodNode?.type !== "identifier") return [];
+  if (node.childForFieldName("receiver")) return [];
+  const args = node.childForFieldName("arguments");
+  const symbols = (args?.namedChildren ?? []).filter((c) => c.type === "simple_symbol").map((c) => c.text.slice(1));
+
+  if (methodNode.text === "attr_reader") return symbols.map((s) => ({ name: s, hashNode: node, headerEnd: node.startIndex }));
+  if (methodNode.text === "attr_writer") return symbols.map((s) => ({ name: `${s}=`, hashNode: node, headerEnd: node.startIndex }));
+  if (methodNode.text === "attr_accessor") {
+    return symbols.flatMap((s) => [
+      { name: s, hashNode: node, headerEnd: node.startIndex },
+      { name: `${s}=`, hashNode: node, headerEnd: node.startIndex },
+    ]);
+  }
+  if (methodNode.text === "define_method") {
+    const sym = args?.namedChildren[0];
+    if (sym?.type !== "simple_symbol") return [];
+    const block = node.childForFieldName("block");
+    if (!block) return [];
+    return [{ name: sym.text.slice(1), hashNode: block, headerEnd: block.startIndex }];
+  }
+  return [];
+}
+
+function emitRubySynthesizedMethod(
+  m: RubySynthesizedMethod,
+  ctx: WalkCtx,
+  out: NodeV1[],
+  edges: RawEdge[],
+  minted: Set<string>,
+): void {
+  const base = `${ctx.rel}#${[...ctx.scope, m.name].join(".")}`;
+  const id = mintId(base, minted);
+  out.push({
+    id,
+    name: m.name,
+    kind: "method",
+    path: ctx.rel,
+    span: `L${m.hashNode.startPosition.row + 1}-L${m.hashNode.endPosition.row + 1}`,
+    signature: clean(ctx.source.slice(m.hashNode.startIndex, m.headerEnd)),
+    exported: rubyExported(m.name, ctx),
+    origin: "ast",
+    body_hash: contentHash(m.hashNode.text),
+    body_text: searchBody(m.hashNode.text),
+    summary_state: "pending",
+    summary: null,
+    crux: null,
+    owner: ctx.enclosingClass ?? undefined,
+  });
+  edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
+  // define_method's block body can contain further calls/definitions — walk
+  // it under a child scope exactly like an ordinary method body would get.
+  // attr_* synthesized methods have no such body (m.hashNode is the whole
+  // call node, nothing further to descend into beyond what the outer walk
+  // already will).
+  if (m.hashNode.type === "block" || m.hashNode.type === "do_block") {
+    const childCtx: WalkCtx = {
+      ...ctx,
+      scope: [...ctx.scope, m.name],
+      enclosingKind: "method",
+      parentId: id,
+    };
+    for (const child of m.hashNode.namedChildren) walk(child, childCtx, out, edges, minted);
+  }
+}
+
+/**
+ * Does this bare `identifier` look like a paren-less, standalone method
+ * invocation — as opposed to a local-variable/parameter read appearing
+ * anywhere an expression is expected (an assignment's right-hand side, a
+ * call argument, a `return` value, a binary-operator operand, or a string
+ * interpolation)? Restricted to genuine *statement position*: the direct
+ * child of a `body_statement` (a method/block body's own statement list).
+ *
+ * Confirmed directly against the grammar (not assumed): only a bare
+ * identifier standing alone as its own statement — `def caller; helper; end`
+ * — has `body_statement` as its immediate parent. Every other position
+ * (`self.x = helper`, `foo(helper)`, `return helper`, `helper + 1`,
+ * `"#{helper}"`) nests the identifier one level deeper, inside
+ * `assignment`/`argument_list`/`return`/`binary`/`interpolation` instead —
+ * so this one check is narrower AND simpler than enumerating every
+ * exclusion (declaration names, assignment targets, parameters, ...) the
+ * earlier version of this function tried to list by hand, and doesn't miss
+ * a shape that list-based approach didn't think of. The cost is a
+ * false-negative for a call used purely for its return value (`x =
+ * helper()`'s paren-less sibling `x = helper` isn't caught) — accepted per
+ * this file's usual "erring toward false negatives" precedent for Ruby's
+ * genuinely ambiguous bare-word shapes.
+ */
+function isRubyBareCallCandidate(node: Parser.SyntaxNode): boolean {
+  return node.parent?.type === "body_statement";
+}
+
 /** Java definition shapes. Uniform in a way Go's are not: every declaration carries
  * a `name` field and (for types and most members) a `body`, so one mapped lookup
  * covers classes, interfaces, enums, records, methods, and constructors. Methods are
@@ -2242,6 +2642,14 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
     }
     return edges;
   }
+  if (ctx.lang === "ruby") {
+    const superclass = node.childForFieldName("superclass");
+    const constant = superclass?.namedChildren[0];
+    if (constant?.type === "constant") {
+      edges.push({ source: classId, relation: "extends", name: constant.text, file: ctx.rel });
+    }
+    return edges;
+  }
   if (ctx.lang === "php") {
     // `class C extends B implements I, J` → base_clause (extends) +
     // class_interface_clause (implements); names may be namespace-qualified.
@@ -2330,6 +2738,7 @@ function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
 ): { name: string; viaMember: boolean; receiver?: string; recvType?: string; kinds?: Kind[] } | null {
+  if (lang === "ruby") return rubyCallee(node);
   // Java first: `method_invocation` has NO `function` field (it splits the callee
   // into `object` + `name`), so the shared lookup below would return null for every
   // Java call site and the language would extract nodes with no call edges at all.

@@ -71,6 +71,11 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     return null;
   }
   if (lang === "r") return rDefName(node);
+  if (lang === "ruby") {
+    const rubyDefTypes = new Set(["class", "module", "method", "singleton_method"]);
+    if (rubyDefTypes.has(node.type)) return node.childForFieldName("name")?.text ?? null;
+    return null;
+  }
   if (lang === "swift") return swiftDefName(node);
   if (lang === "php") {
     const phpDefTypes = new Set([
@@ -380,6 +385,10 @@ function visit(
   // directly via ctx.enclosingClass/ctx.rSuperClass instead (see extract.ts's
   // calleeName R branch) — so no handleR is needed here.
   else if (lang === "r") void 0;
+  // Ruby has no receiver-type binding table by design (see spec Non-goals) —
+  // self.method resolves directly via ctx.enclosingClass, and every other
+  // member call is a bare-name match. No handleRuby needed.
+  else if (lang === "ruby") void 0;
   else if (lang === "java") handleJava(node, scope, classScope, bindings);
   else if (lang === "swift") handleSwift(node, scope, classScope, bindings);
   else if (lang === "php") handlePhp(node, scope, bindings);
