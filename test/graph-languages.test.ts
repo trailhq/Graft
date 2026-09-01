@@ -27,9 +27,11 @@ const INDEXED = [
   "a.tsx", "a.jsx",
   "a.py", "a.pyi",
   "a.go",
+  "a.h", "a.hpp", "a.hh", "a.hxx", "a.cpp", "a.cc", "a.cxx",
   "a.R", "a.r",
+  "a.rb",
   "a.java",
-"a.kt", "a.kts",
+  "a.kt", "a.kts",
   "a.swift",
   "a.php",
 ];
@@ -59,10 +61,15 @@ test("labels name the language, not the grammar that parses it", () => {
   assert.equal(languageLabelOf("api/main.py"), "python");
   assert.equal(languageLabelOf("api/main.pyi"), "python");
   assert.equal(languageLabelOf("cmd/main.go"), "go");
+  // One "cpp" label for the whole C/C++ family — see extract.ts's EXTENSIONS doc.
+  assert.equal(languageLabelOf("src/thing.cpp"), "cpp");
+  assert.equal(languageLabelOf("src/thing.h"), "cpp");
+  assert.equal(languageLabelOf("src/thing.hpp"), "cpp");
   assert.equal(languageLabelOf("analysis/model.R"), "r");
   assert.equal(languageLabelOf("analysis/model.r"), "r");
+  assert.equal(languageLabelOf("app/models/user.rb"), "ruby");
   assert.equal(languageLabelOf("src/main/java/com/acme/App.java"), "java");
-assert.equal(languageLabelOf("src/main/kotlin/com/acme/App.kt"), "kotlin");
+  assert.equal(languageLabelOf("src/main/kotlin/com/acme/App.kt"), "kotlin");
   assert.equal(languageLabelOf("scripts/main.kts"), "kotlin");
   assert.equal(languageLabelOf("Sources/App/main.swift"), "swift");
   assert.equal(languageLabelOf("app/Models/User.php"), "php");

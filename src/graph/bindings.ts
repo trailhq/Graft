@@ -58,7 +58,24 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     }
     return null;
   }
+  if (lang === "cpp") {
+    if (node.type === "class_specifier" || node.type === "struct_specifier" || node.type === "enum_specifier") {
+      return node.childForFieldName("name")?.text ?? null;
+    }
+    if (node.type === "function_definition") {
+      const declarator = node.childForFieldName("declarator");
+      const resolved = declarator ? cppDeclaratorName(declarator) : null;
+      if (!resolved) return null;
+      return resolved.scope ? `${resolved.scope}.${resolved.name}` : resolved.name;
+    }
+    return null;
+  }
   if (lang === "r") return rDefName(node);
+  if (lang === "ruby") {
+    const rubyDefTypes = new Set(["class", "module", "method", "singleton_method"]);
+    if (rubyDefTypes.has(node.type)) return node.childForFieldName("name")?.text ?? null;
+    return null;
+  }
   if (lang === "swift") return swiftDefName(node);
   if (lang === "php") {
     const phpDefTypes = new Set([
@@ -189,6 +206,67 @@ function goReceiverTypeOf(node: Parser.SyntaxNode): string | null {
   return type?.type === "type_identifier" ? type.text : null;
 }
 
+/** Unwraps a C++ declarator through pointer/reference wrapping (`int* p`, `int& r`)
+ * down to the innermost concrete declarator — a `function_declarator` for a
+ * function/method, or a bare name node (`field_identifier`/`identifier`) for a
+ * plain variable/field. `reference_declarator` carries its inner declarator as an
+ * anonymous first child (no field), unlike `pointer_declarator`'s `declarator`
+ * field, so the two branches unwrap differently. Null if the chain bottoms out. */
+function unwrapCppDeclarator(node: Parser.SyntaxNode | null | undefined): Parser.SyntaxNode | null {
+  let cur: Parser.SyntaxNode | null = node ?? null;
+  while (cur && (cur.type === "pointer_declarator" || cur.type === "reference_declarator")) {
+    cur = cur.type === "pointer_declarator" ? cur.childForFieldName("declarator") : (cur.namedChildren[0] ?? null);
+  }
+  return cur;
+}
+
+/** Recursively resolves a (possibly nested) `qualified_identifier`'s innermost name
+ * node and immediate scope text — e.g. `ns::Foo::bar` -> `{ scope: "Foo", nameNode: bar }`.
+ * Nesting arises from namespace-qualified out-of-class definitions (`void ns::Foo::bar()`);
+ * the innermost scope is the one that matters (the actual owning class), not the outer
+ * namespace, so recursion always keeps the deepest level. */
+export function resolveCppQualified(node: Parser.SyntaxNode): { scope: string | null; nameNode: Parser.SyntaxNode } {
+  const name = node.childForFieldName("name");
+  const scope = node.childForFieldName("scope");
+  if (name?.type === "qualified_identifier") return resolveCppQualified(name);
+  return { scope: scope ? stripCppTemplateArgs(scope.text) : null, nameNode: name ?? node };
+}
+
+/** Strips trailing `<...>` template arguments from a scope/base-class name
+ * (`Foo<T>` -> `Foo`) so it matches the plain name the class node itself carries.
+ * v1 doesn't model template specialization identity — see the plan's known gaps. */
+export function stripCppTemplateArgs(text: string): string {
+  const i = text.indexOf("<");
+  return i === -1 ? text : text.slice(0, i);
+}
+
+/** The bare name + owning-class scope (non-null only for an out-of-class definition,
+ * e.g. `Foo::bar`) for a C++ function-like declarator — the `declarator` field of a
+ * `function_definition`. Shared by extract.ts's `describeCpp` (the node's own name/kind)
+ * and this file's `defName` (the scope-stack segment), so the two can never drift on
+ * how a declarator is unwrapped — unlike the Go receiver helpers, which duplicate
+ * across the two files per this file's own no-value-import-of-extract rule, this one
+ * only flows extract.ts -> bindings.ts, the direction that's already a value import. */
+export function cppDeclaratorName(declarator: Parser.SyntaxNode): { name: string; scope: string | null } | null {
+  const fnDecl = unwrapCppDeclarator(declarator);
+  if (!fnDecl || fnDecl.type !== "function_declarator") return null;
+  const inner = fnDecl.childForFieldName("declarator");
+  if (!inner) return null;
+  if (inner.type === "qualified_identifier") {
+    const { scope, nameNode } = resolveCppQualified(inner);
+    return nameNode.text ? { name: nameNode.text, scope } : null;
+  }
+  if (
+    inner.type === "identifier" ||
+    inner.type === "field_identifier" ||
+    inner.type === "destructor_name" ||
+    inner.type === "operator_name"
+  ) {
+    return inner.text ? { name: inner.text, scope: null } : null;
+  }
+  return null;
+}
+
 /** Resolves a call site's receiver text (from `calleeName`) to a bound type
  * name, given the enclosing walk state. `self`/`cls`/`this`/the Go receiver
  * var resolve directly to the enclosing class; `super` — R6's `super$` and
@@ -227,6 +305,7 @@ export function resolveRecvType(
 
 function isClassNode(node: Parser.SyntaxNode, lang: Language): boolean {
   if (lang === "python") return node.type === "class_definition";
+  if (lang === "cpp") return node.type === "class_specifier" || node.type === "struct_specifier";
   if (lang === "java") return JAVA_TYPE_DECLS.has(node.type);
   if (lang === "typescript" || lang === "tsx") {
     return node.type === "class_declaration" || node.type === "abstract_class_declaration";
@@ -301,9 +380,15 @@ function visit(
 ): void {
   if (lang === "python") handlePy(node, scope, classScope, bindings, aliases);
   else if (lang === "go") handleGo(node, scope, bindings);
-  // R Phase 1 has no classes, so there's no member/receiver-type binding to
-  // collect yet (see extract.ts's calleeName R branch) — no handleR needed.
+  else if (lang === "cpp") handleCpp(node, scope, classScope, bindings, aliases);
+  // R has no member/receiver-type binding table — self/private/super resolve
+  // directly via ctx.enclosingClass/ctx.rSuperClass instead (see extract.ts's
+  // calleeName R branch) — so no handleR is needed here.
   else if (lang === "r") void 0;
+  // Ruby has no receiver-type binding table by design (see spec Non-goals) —
+  // self.method resolves directly via ctx.enclosingClass, and every other
+  // member call is a bare-name match. No handleRuby needed.
+  else if (lang === "ruby") void 0;
   else if (lang === "java") handleJava(node, scope, classScope, bindings);
   else if (lang === "swift") handleSwift(node, scope, classScope, bindings);
   else if (lang === "php") handlePhp(node, scope, bindings);
@@ -724,4 +809,39 @@ function handleGo(node: Parser.SyntaxNode, scope: string[], bindings: FileBindin
     }
     if (typeName) bindings.set(scopePath, nameNode.text, typeName);
   }
+}
+
+/** A `field_declaration`'s bare type name — `type_identifier`/`qualified_identifier`
+ * text directly, or a `template_type`'s own `name` field (`std::vector<Foo>` binds
+ * as `std::vector`, `Box<T>` as `Box`). `primitive_type` and other built-ins return
+ * null (nothing useful to bind a receiver to). */
+function cppFieldTypeName(typeField: Parser.SyntaxNode | null | undefined, aliases: Map<string, string>): string | null {
+  if (!typeField) return null;
+  if (typeField.type === "type_identifier" || typeField.type === "qualified_identifier") {
+    return resolveAlias(typeField.text, aliases);
+  }
+  if (typeField.type === "template_type") {
+    const name = typeField.childForFieldName("name");
+    return name ? resolveAlias(name.text, aliases) : null;
+  }
+  return null;
+}
+
+/** Member-variable type bindings: a `field_declaration` whose declarator unwraps to a
+ * bare `field_identifier` (a data member, not a method prototype — those unwrap to a
+ * `function_declarator` and are skipped) binds `this.<field>` -> its type, the same
+ * purpose C#'s `handleCSharp` field-type collection serves — so `this->member.method()`
+ * / `member.method()` call sites can resolve a receiver type. */
+function handleCpp(
+  node: Parser.SyntaxNode,
+  scope: string[],
+  classScope: string | null,
+  bindings: FileBindings,
+  aliases: Map<string, string>,
+): void {
+  if (node.type !== "field_declaration") return;
+  const declarator = unwrapCppDeclarator(node.childForFieldName("declarator"));
+  if (declarator?.type !== "field_identifier") return;
+  const typeName = cppFieldTypeName(node.childForFieldName("type"), aliases);
+  if (typeName) bindings.set(classScope ?? scope.join("."), `this.${declarator.text}`, typeName);
 }

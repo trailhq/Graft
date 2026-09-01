@@ -221,7 +221,19 @@ export function resolveEdges(
     } else if (e.relation === "extends" || e.relation === "implements") {
       // `implements` also resolves to a `trait` — PHP models trait composition
       // (`use SomeTrait;`) as an implements edge, and a trait is a valid target.
-      const kinds: Kind[] = e.relation === "implements" ? ["interface", "trait"] : ["class", "interface"];
+      // "module" reaches `extends` resolution from two unrelated sources: Ruby's
+      // Phase 4 include/extend/prepend mixin edges (which SHOULD match a
+      // module) and Swift's own extension-body nodes (which must NOT — an
+      // extension is deliberately kept out of type-declaration kinds so it can
+      // never be mistaken for the real class it extends; see SWIFT_TYPE_KINDS's
+      // doc comment in extract.ts). Gate the widening to Ruby files only, so a
+      // same-named Swift extension can't shadow the real class declaration.
+      const kinds: Kind[] =
+        e.relation === "implements"
+          ? ["interface", "trait"]
+          : e.file.endsWith(".rb")
+            ? ["class", "interface", "module"]
+            : ["class", "interface"];
       const hit = resolveName(e.name!, e.file, kinds, perFileName, globalName);
       // an unresolved base is usually an external/imported type — keep the name.
       add(e.source, hit?.id ?? e.name!, e.relation, hit?.confidence ?? "inferred");

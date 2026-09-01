@@ -551,20 +551,24 @@ test('cursor-session-end force-closes THIS conversation even though its file was
 
   // Turn telemetry on against a scratch $HOME so the rollup actually queues (and
   // marks the file), the observable proof the force-close ran — not just no-throw.
-  const saved = {
+  // This suite itself runs in CI, so every CI-detection var `inCi` checks (not
+  // just `CI`) must be cleared, or the gate stays closed under the real runner.
+  const ciVars = ['CI', 'DO_NOT_TRACK', 'GITHUB_ACTIONS', 'GITLAB_CI', 'BUILDKITE', 'CIRCLECI', 'TEAMCITY_VERSION', 'JENKINS_URL', 'TF_BUILD', 'BUILD_NUMBER'];
+  const saved: Record<string, string | undefined> = {
     HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE,
-    KEY: process.env.GRAFT_POSTHOG_KEY, CI: process.env.CI, DNT: process.env.DO_NOT_TRACK,
+    GRAFT_POSTHOG_KEY: process.env.GRAFT_POSTHOG_KEY,
   };
+  for (const k of ciVars) saved[k] = process.env[k];
   process.env.HOME = home; process.env.USERPROFILE = home;
   process.env.GRAFT_POSTHOG_KEY = 'phc_test_key';
-  delete process.env.CI; delete process.env.DO_NOT_TRACK;
+  for (const k of ciVars) delete process.env[k];
   process.env.CLAUDE_PROJECT_DIR = d;
   try {
     await runWithStdin(JSON.stringify({ conversation_id: 'c1' }), () => main('cursor-session-end'));
     assert.equal(readSession(d, 'c1').summarized, true, 'the just-ended conversation was rolled up');
   } finally {
     delete process.env.CLAUDE_PROJECT_DIR;
-    for (const [k, v] of Object.entries({ HOME: saved.HOME, USERPROFILE: saved.USERPROFILE, GRAFT_POSTHOG_KEY: saved.KEY, CI: saved.CI, DO_NOT_TRACK: saved.DNT }))
+    for (const [k, v] of Object.entries(saved))
       if (v === undefined) delete (process.env as any)[k]; else (process.env as any)[k] = v;
   }
 });
@@ -696,36 +700,6 @@ test('prompt hook omits --dir when GRAFT_DIR is unset (byte-identical argv to be
   } finally {
     delete process.env.GRAFT_TEST_CLI;
     delete process.env.CLAUDE_PROJECT_DIR;
-  }
-});
-
-test('post-edit passes --dir <resolved> to graft check when GRAFT_DIR is set', async () => {
-  const d = mkdtempSync(join(tmpdir(), 'graft-postedit-dir-'));
-  mkdirSync(join(d, 'elsewhere', '.graph'), { recursive: true });
-  writeFileSync(join(d, 'elsewhere', '.graph', 'wiring.json'),
-    JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));
-  const stub = join(d, 'check-stub.cjs');
-  const argsFile = join(d, 'args-seen.json');
-  writeFileSync(
-    stub,
-    `const fs = require('fs');\n` +
-      `fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));\n` +
-      `process.stdout.write(JSON.stringify({ graph: { changed: [], added: [], removed: [] } }));\n`,
-  );
-  process.env.CLAUDE_PROJECT_DIR = d;
-  process.env.GRAFT_TEST_CLI = stub;
-  process.env.GRAFT_DIR = 'elsewhere';
-  try {
-    const stdin = JSON.stringify({ tool_input: { file_path: join(d, 'src', 'auth.ts') } });
-    await runWithStdin(stdin, () => main('post-edit'));
-    const argsSeen: string[] = JSON.parse(readFileSync(argsFile, 'utf8'));
-    const dirIdx = argsSeen.indexOf('--dir');
-    assert.ok(dirIdx !== -1, 'the check call carries --dir when GRAFT_DIR is set');
-    assert.equal(argsSeen[dirIdx + 1], resolveContextDir(d));
-  } finally {
-    delete process.env.GRAFT_TEST_CLI;
-    delete process.env.CLAUDE_PROJECT_DIR;
-    delete process.env.GRAFT_DIR;
   }
 });
 

@@ -195,15 +195,21 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
 
 - **Full-fidelity** — hand-written extractors with scope-aware, cross-file call
   and import resolution:
-  **TypeScript / JavaScript** (incl. JSX & TSX), **Python**, **Go**, **Java**,
+  **TypeScript / JavaScript** (incl. JSX & TSX), **Python**, **Go**,
+  **C/C++** (`.c`/`.h`/`.hpp`/`.hh`/`.hxx`/`.cpp`/`.cc`/`.cxx` — classes, structs,
+  enums, template classes/functions; a header-declared prototype and its
+  out-of-line `.cpp` definition resolve to one node), **Java**,
   **Kotlin**, **PHP**, **Swift** (classes, structs, enums, actors, protocols;
   extension members attach to the extended type), **R** (`.R`/`.r` — plain
   functions, S3/S4/R6 classes and methods, roxygen `@export`,
-  `library()`/`source()` imports).
+  `library()`/`source()` imports), **Ruby** (`.rb` — classes, modules,
+  instance/singleton methods, private/protected/public visibility,
+  include/extend/prepend mixin composition, attr_accessor/reader/writer and
+  define_method synthesis).
 
 - **Broad** — symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
-  **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
+  **Rust, C#, Scala, Elixir, Solidity,
   OCaml, Zig, Dart, Clojure, Nix, Lua**.
 
 - **Compiler-grade edges (opt-in)** — `graft build --lsp` adds precise
@@ -212,7 +218,7 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
   **gopls** (Go), **pyright** (Python), **typescript-language-server** (TS/JS).
   It's best-effort — with no server installed the graph is unchanged.
 
-Twenty-three languages in total. A file whose language isn't listed is skipped, not
+Twenty-two languages in total. A file whose language isn't listed is skipped, not
 indexed. Adding a broad-tier language is a small contribution — see
 [CREDITS.md](CREDITS.md) for the folks who added the current set.
 
