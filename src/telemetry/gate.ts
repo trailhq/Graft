@@ -30,16 +30,31 @@ export function doNotTrack(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
+ * Every variable {@link inCi} reads, named once.
+ *
+ * Exported because a test that needs telemetry actually ON has to clear all of
+ * them, and clearing a hand-copied subset is how this list silently drifts: the
+ * `cursor-session-end` test cleared `CI` alone, so it passed on a laptop and failed
+ * on GitHub Actions — where `GITHUB_ACTIONS` is set — for every run until someone
+ * read the log. One list, both callers.
+ */
+export const CI_ENV_VARS = [
+  'CI', 'GITHUB_ACTIONS', 'GITLAB_CI', 'BUILDKITE', 'CIRCLECI',
+  'TEAMCITY_VERSION', 'JENKINS_URL', 'TF_BUILD', 'BUILD_NUMBER',
+] as const;
+
+/**
  * CI detection. `CI` covers essentially every provider; the rest are the ones
  * that historically did not set it. Deliberately generous — a false positive
  * costs one uncounted user, a false negative pollutes the dataset.
+ *
+ * `CI` is the one read with a value test: `CI=false` is a real thing a user sets
+ * to mean "not CI", while the provider-specific vars are presence-only — none of
+ * them is ever deliberately set to a falsy string.
  */
 export function inCi(env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.CI !== undefined && env.CI !== '' && env.CI !== '0' && env.CI !== 'false') return true;
-  return Boolean(
-    env.GITHUB_ACTIONS || env.GITLAB_CI || env.BUILDKITE || env.CIRCLECI ||
-    env.TEAMCITY_VERSION || env.JENKINS_URL || env.TF_BUILD || env.BUILD_NUMBER,
-  );
+  return CI_ENV_VARS.some((name) => name !== 'CI' && Boolean(env[name]));
 }
 
 /** Null when telemetry may run, otherwise the first gate that closed. */

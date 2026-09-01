@@ -35,12 +35,27 @@ test('planInit writes nothing — it only describes', () => {
   assert.deepEqual(readdirSync(repo), []);
 });
 
-test('claude writes are all repo-scoped — the claude layer never touches ~', () => {
+/**
+ * The claude layer used to be entirely repo-scoped. It no longer is, deliberately:
+ * a repo-only install is invisible to a `git worktree add` of a repo whose
+ * `.gitignore` covers `.mcp.json` / `.claude/settings.json`, and the user-level copy
+ * is the only place a `.gitignore` cannot reach. See src/hosts/claude-global.ts.
+ */
+test('claude writes: five in the repo, three in ~ that no .gitignore can eat', () => {
+  const home = fullHome();
   const repo = fresh();
-  const claude = planInit(repo, { home: fullHome(), ids: ['claude'] })[0];
-  assert.equal(claude.writes.length, 5);
-  assert.ok(claude.writes.every((w) => w.scope === 'repo'));
-  assert.ok(claude.writes.every((w) => w.path.startsWith(repo)));
+  const claude = planInit(repo, { home, ids: ['claude'] })[0];
+
+  const repoWrites = claude.writes.filter((w) => w.scope === 'repo');
+  assert.equal(repoWrites.length, 5);
+  assert.ok(repoWrites.every((w) => w.path.startsWith(repo)));
+
+  const globals = claude.writes.filter((w) => w.scope === 'global');
+  assert.deepEqual(
+    globals.map((w) => toPosixPath(w.path.slice(home.length))).sort(),
+    ['/.claude.json', '/.claude/helpers/graft-hooks.cjs', '/.claude/settings.json'],
+  );
+  assert.ok(globals.every((w) => !w.path.startsWith(repo)), 'nothing global lands in the repo');
 });
 
 test('the three ~/.codex writes are scoped global', () => {

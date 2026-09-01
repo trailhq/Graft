@@ -31,6 +31,13 @@ export interface TelemetryState {
   enabled?: boolean;
   /** ISO stamp of the one-time first-run notice, so it prints exactly once. */
   noticeShownAt?: string;
+  /** ISO stamp of the `first_run` event. Its own field rather than "did this
+   *  call mint the install id", because the postinstall hook now mints the id
+   *  before any command runs — see `trackFirstRunIfNew`. */
+  firstRunAt?: string;
+  /** The version the `install` event was last sent for, so an upgrade counts as
+   *  an install and a repeated `npm install` of the same version does not. */
+  installedVersion?: string;
   /** Epoch ms of the last flush ATTEMPT, mirroring `UpdateCache.checkedAt`. */
   flushedAt?: number;
 }

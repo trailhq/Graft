@@ -91,9 +91,17 @@ export interface BuildConfig {
    * no-flag build — and the fingerprint/refresh path, which never sees CLI
    * flags at all — behave identically to the invocation that set it. */
   includeDirs?: string[];
-  /** Whether initialized Git submodules are folded into this repo's graph.
-   * Absent/false keeps the historical boundary at the superproject. */
+  /** Whether initialized Git submodules (gitlinks) are folded into this repo's
+   * graph. Absent/false keeps the historical boundary at the superproject. */
   followSubmodules?: boolean;
+  /** Whether nested Git clones the index does not track — how manifest-driven
+   * multi-repo tools check dependencies out, and how an ad-hoc local clone lands
+   * in the tree — are folded into this repo's graph. Deliberately SEPARATE from
+   * `followSubmodules`: a submodule is a dependency the parent pins, a nested
+   * clone is invisible to the parent's index and may equally be a scratch
+   * checkout someone parked in the tree. Absent/false keeps the historical
+   * boundary. */
+  followNestedRepos?: boolean;
 }
 
 /** Local, Git-ignored repository configuration. Kept outside generated
@@ -144,6 +152,11 @@ export function readIncludeDirs(d: string): Set<string> | undefined {
 /** Missing and explicit false both retain the backwards-compatible default. */
 export function readFollowSubmodules(d: string): boolean {
   return readBuildConfig(d)?.followSubmodules === true;
+}
+
+/** Missing and explicit false both retain the backwards-compatible default. */
+export function readFollowNestedRepos(d: string): boolean {
+  return readBuildConfig(d)?.followNestedRepos === true;
 }
 // Best-effort read-modify-write; not atomic across concurrent processes, but acceptable
 // for episodic hook writes (worst case is a lost update, not corruption).

@@ -43,6 +43,7 @@ export function maybeFlushInBackground(home?: string, now = Date.now()): boolean
     const child = spawn(process.execPath, [graftCliPath(), '_telemetry-flush'], {
       detached: true,
       stdio: 'ignore',
+      windowsHide: true,
     });
     child.unref();
     return true;

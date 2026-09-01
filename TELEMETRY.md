@@ -16,6 +16,12 @@ Nothing is ever sent from a command you run. Events are appended to a local file
 and a detached background process posts them at most once a day, so no `graft
 ask` ever waits on the network.
 
+The one exception is the `install` event below, which the npm postinstall hook
+records and hands to that same detached process immediately — an install that
+never runs a command would otherwise never reach a flush, and "installed and
+never used" is a number we need to see. `npm install` itself still waits on
+nothing: the child is detached and its output discarded.
+
 ## What is sent
 
 Every event carries only these common properties:
@@ -34,12 +40,13 @@ The events:
 
 | Event | Extra properties | When |
 | --- | --- | --- |
-| `first_run` | — | Once, the first time graft runs on a machine |
+| `install` | `global` (`true` for `npm i -g`, `false` for a project dependency) | The npm postinstall hook runs — once per machine per version |
+| `first_run` | — | Once, the first time a graft command runs on a machine |
 | `init_completed` | `agents` (the ids you selected, sorted), `consent` | `graft init` finishes |
 | `build_completed` | `files_bucket`, `langs`, `mode` (`fast`/`deep`), `duration_bucket`, `incremental` | A build succeeds |
 | `build_failed` | `stage`, `code` — both fixed enums | A build throws |
 | `query` | `command`, `surface` (`cli`/`mcp`/`hook`), `hit` (`ask` only) | Any query command |
-| `session_summary` | `graft_reads_bucket`, `source_reads_bucket`, `saved_tokens_bucket` | Once, after an agent session ends |
+| `session_summary` | `graft_reads_bucket`, `source_reads_bucket`, `saved_tokens_bucket`, `graft_turns_bucket`, `reported_turns_bucket` | Once, after an agent session ends |
 
 Two rules govern every value above, and both are enforced in code rather than by
 review:
@@ -72,11 +79,32 @@ An example event, in full:
 Run `graft telemetry debug` to print the exact batch your machine would send. It
 sends nothing.
 
+### One thing graft reads locally
+
+Two of those properties — `graft_turns_bucket` and `reported_turns_bucket` — need
+to know something the others don't: whether the reply you actually read said what
+graft saved. graft computes a saving on every retrieval call, but a turn that
+saves 20,000 tokens in silence and a turn that saves nothing look identical in
+`saved_tokens_bucket`, and that difference is the whole question.
+
+The agent's own prose lives in one place a hook can reach: the transcript file
+your editor writes, named on the Stop hook's stdin. So at the end of a turn that
+used graft, graft reads the tail of that file, checks the reply for a "graft saved
+~N tokens" line, and increments one of two counters. Nothing out of the file is
+stored, and nothing out of it is sent — not the reply, not a fragment of it, not
+its length. Two counts of turns cross the wire, as buckets, once per session.
+
+A turn graft cannot check — an editor whose Stop hook names no transcript, an
+unreadable file — is counted in neither total, so the ratio always means "of the
+turns we could read".
+
 ## What is never sent
 
 No source code. No file paths, repo names, organisation names, git remotes, or
 branch names. No symbol names, node summaries, or anything out of the graph. No
-query strings, prompts, or agent output. No error messages or stack traces — a
+query strings, prompts, or agent output — graft reads the last reply of a
+graft-using turn locally to decide whether it mentioned the saving (see "One
+thing graft reads locally"); only the resulting count is sent, never the text. No error messages or stack traces — a
 failure contributes a code from a fixed list and nothing else. No environment
 variables, API keys, model names, hostnames, usernames, or email addresses.
 
@@ -102,7 +130,7 @@ Any one of these fully disables telemetry:
    immediately and is remembered for this machine.
 2. **`graft telemetry disable`** at any time. `graft telemetry status` shows the
    current state, and `graft telemetry enable` turns it back on.
-3. **Set [`DO_NOT_TRACK`](https://consoledonottrack.com)** to any value other
+3. **Set [`DO_NOT_TRACK`](https://web.archive.org/web/20251005054121/https://consoledonottrack.com/)** to any value other
    than `0`. Respected unconditionally — it outranks graft's own setting.
 4. **Run in CI.** `CI`, `GITHUB_ACTIONS`, `GITLAB_CI` and friends switch it off
    without being asked. A build server is not a user.

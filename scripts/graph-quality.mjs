@@ -48,8 +48,8 @@ for (const n of nodes) {
   else if (Number(m[1]) > Number(m[2])) problems.push(`inverted span ${n.span}: ${n.id}`);
 }
 // an edge target may be a node id OR a deliberately-unresolved external string
-// (import specifier / bare heritage name); only calls/references/contains must
-// point at real nodes.
+// (import specifier / bare heritage name / unresolved Java annotation type);
+// only calls/contains must point at real nodes.
 let dangling = 0, selfLoops = 0, unresolvedExternal = 0;
 for (const e of edges) {
   if (!RELATIONS.has(e.relation)) problems.push(`bad relation '${e.relation}'`);
@@ -57,7 +57,7 @@ for (const e of edges) {
   if (!ids.has(e.source)) { problems.push(`dangling source: ${e.source}`); dangling++; }
   const targetIsNode = ids.has(e.target);
   if (!targetIsNode) {
-    if (e.relation === "imports" || e.relation === "extends" || e.relation === "implements") unresolvedExternal++;
+    if (e.relation === "imports" || e.relation === "extends" || e.relation === "implements" || e.relation === "references") unresolvedExternal++;
     else { problems.push(`dangling ${e.relation} target: ${e.source} → ${e.target}`); dangling++; }
   }
   if (e.relation === "calls" && e.source === e.target) selfLoops++;

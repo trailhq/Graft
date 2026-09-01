@@ -138,3 +138,17 @@ svg.graph:active{cursor:grabbing}
 .ev-l.add .ev-s{color:var(--ok,#2E9E6B)}
 .ev-l.del .ev-s{color:var(--warn,#D9534F)}
 .ev-more{font-size:11px;color:var(--muted);padding:3px 9px 5px}
+
+/* ---- contributors: who has worked on an area (blast --export-viz) ---- */
+.lchip.lchip-people{border-color:var(--con);color:var(--con)}
+.owners{display:flex;flex-direction:column;gap:2px;margin:6px 0 2px}
+.own{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;background:var(--panel2);border:1px solid var(--border2)}
+.av{
+  width:25px;height:25px;border-radius:50%;flex:none;display:grid;place-items:center;
+  font-family:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:10px;font-weight:700;color:var(--con);background:var(--chip);border:1px solid var(--con);
+}
+.own-txt{display:flex;flex-direction:column;min-width:0;gap:1px}
+.own-name{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.own-why{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.own-note{font-size:11px;color:var(--muted);padding:3px 8px 0;line-height:1.45}

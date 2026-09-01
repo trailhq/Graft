@@ -9,7 +9,16 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { warmGenericGrammars, extractGeneric, genericLangOf, isWarm } from "../src/graph/generic.js";
+import {
+  warmGenericGrammars,
+  extractGeneric,
+  genericLangOf,
+  isWarm,
+  loadWasmLanguage,
+  parseWasm,
+  swapGrammarForTest,
+  type TsNode,
+} from "../src/graph/generic.js";
 import { resolveEdges } from "../src/graph/resolve.js";
 import { buildGraph } from "../src/graph/build.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
@@ -375,4 +384,128 @@ test("Dart file-level skeleton lists the API, not function-body locals (#134)", 
     !r.entries.some((e) => e.kind === "class" && e.name === "int"),
     "skeleton has no bogus class int",
   );
+});
+
+// #139: tree-sitter-wasm 1.1.4's PHP grammar throws `memory access out of bounds`
+// on heredoc/nowdoc, and extractGeneric swallows that into a file-only result.
+// PHP is depth-tier now (.php is not claimed by the breadth registry), so this
+// loads the wasm grammar directly — the same parse the breadth path used when
+// the issue landed.
+// v1.1.6 is the first release that parses these without crashing.
+const PHP_HEREDOC = `<?php
+namespace App;
+class WithHeredoc {
+    public function sql(): string {
+        return <<<SQL
+            SELECT 1
+            SQL;
+    }
+    public function other(): int { return 2; }
+}
+`;
+
+const PHP_NOWDOC = `<?php
+namespace App;
+class WithNowdoc {
+    public function sql(): string {
+        return <<<'SQL'
+            SELECT 1
+            SQL;
+    }
+    public function other(): int { return 2; }
+}
+`;
+
+function namedOfType(root: TsNode, type: string): string[] {
+  const names: string[] = [];
+  const visit = (n: TsNode): void => {
+    if (n.type === type) {
+      const name = n.childForFieldName?.("name")?.text;
+      if (name) names.push(name);
+    }
+    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
+      const c = n.namedChild?.(i);
+      if (c) visit(c);
+    }
+  };
+  visit(root);
+  return names;
+}
+
+async function assertPhpWasmExtractsClassAndMethods(source: string, className: string, label: string): Promise<void> {
+  const language = await loadWasmLanguage("php");
+  assert.ok(language, "tree-sitter-wasm must ship a php grammar");
+  const root = parseWasm(language, source);
+  assert.ok(root, `${label}: PHP wasm parse must not crash (1.1.4 threw on heredoc/nowdoc)`);
+  const classes = namedOfType(root, "class_declaration");
+  const methods = namedOfType(root, "method_declaration");
+  assert.ok(classes.includes(className), `${label}: expected class ${className}, got: ${classes.join(", ") || "(none)"}`);
+  assert.ok(methods.includes("sql"), `${label}: expected method sql, got: ${methods.join(", ") || "(none)"}`);
+  assert.ok(methods.includes("other"), `${label}: expected method other, got: ${methods.join(", ") || "(none)"}`);
+}
+
+test("PHP wasm grammar extracts class + methods from a heredoc file (#139)", async () => {
+  await assertPhpWasmExtractsClassAndMethods(PHP_HEREDOC, "WithHeredoc", "heredoc");
+});
+
+test("PHP wasm grammar extracts class + methods from a nowdoc file (#139)", async () => {
+  await assertPhpWasmExtractsClassAndMethods(PHP_NOWDOC, "WithNowdoc", "nowdoc");
+});
+
+/**
+ * A grammar whose parse throws (the tree-sitter-wasm PHP grammar did, on
+ * heredocs — #139) must surface as a per-file build error, not be swallowed
+ * into a silently symbol-less file that the extract cache then replays as a
+ * clean parse. The real crash is heap-state dependent, so a deterministically
+ * throwing fake grammar is swapped in via the test seam instead.
+ */
+const THROWING_GRAMMAR = {
+  // web-tree-sitter's setLanguage() inspects the language object, so any
+  // property access blowing up makes extractGeneric's try block throw exactly
+  // like a crashing wasm scanner does.
+  language: new Proxy({}, { get(): never { throw new Error("memory access out of bounds (fake)"); } }),
+  query: null,
+};
+
+test("extractGeneric rethrows a throwing grammar with the language named (#139)", async () => {
+  await warmGenericGrammars(["rust"]); // initialises web-tree-sitter
+  const prev = swapGrammarForTest("rust", THROWING_GRAMMAR);
+  try {
+    assert.throws(
+      () => extractGeneric("src/lib.rs", "pub fn f() {}\n", "rust"),
+      (err: unknown): boolean => {
+        assert.ok(err instanceof Error, "throws an Error");
+        assert.match(err.message, /^rust grammar threw: /, "names the language");
+        assert.match(err.message, /memory access out of bounds/, "keeps the original message");
+        return true;
+      },
+    );
+  } finally {
+    swapGrammarForTest("rust", prev);
+  }
+});
+
+test("a throwing grammar is a per-file build error, cached as a failure (#139)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-throwing-grammar-"));
+  writeFileSync(join(dir, "lib.rs"), "pub fn f() {}\n");
+  await warmGenericGrammars(["rust"]); // so buildGraph's own warm call is a no-op
+  const prev = swapGrammarForTest("rust", THROWING_GRAMMAR);
+  try {
+    const first = await buildGraph(dir, { reuse: false });
+    assert.equal(first.errors.length, 1, `one build error (got: ${first.errors.join("; ")})`);
+    assert.match(first.errors[0], /lib\.rs: parse failed/);
+    assert.match(first.errors[0], /rust grammar threw: memory access out of bounds/);
+    const g = readGraph(wiringPath(contextDirFor(dir)));
+    assert.ok(g, "graph built");
+    assert.ok(!g!.nodes.some((n) => n.path === "lib.rs"), "failed file has no file node");
+
+    // The extract cache must remember the failure, not an empty success: an
+    // incremental rebuild of the unchanged file replays the error.
+    const second = await buildGraph(dir, { reuse: true });
+    assert.equal(second.parsed, 0, "unchanged file is not re-parsed");
+    assert.equal(second.errors.length, 1, `error replayed (got: ${second.errors.join("; ")})`);
+    assert.match(second.errors[0], /rust grammar threw/);
+  } finally {
+    swapGrammarForTest("rust", prev);
+  }
 });

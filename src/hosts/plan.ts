@@ -13,8 +13,10 @@ import { statSync } from 'node:fs';
 import { HOSTS, detectHosts, type DetectProbe, type HostTarget } from './registry.js';
 import { mcpTargets } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
+import { cursorHookTargets } from './cursor-hooks.js';
 import { antigravitySkillTargets } from './antigravity.js';
 import { claudeTargets } from '../claude/init.js';
+import { claudeGlobalTargets } from './claude-global.js';
 
 /** Where a write lands. 'global' = outside the repo, affects every project. */
 export type WriteScope = 'repo' | 'global';
@@ -69,7 +71,10 @@ export function planInit(repo: string, opts: { home?: string; ids?: string[] } =
   const detected = new Set(detectHosts(probe).map((h) => h.id));
 
   const plans: HostPlan[] = [
-    { id: 'claude', name: 'Claude Code', detected: true, writes: claudeTargets(repo) },
+    // Repo writes plus the user-level copy under `~/.claude` — the picker and
+    // `--dry-run` render 'global' writes in their own section, so a user sees
+    // what lands outside the repo before agreeing to it.
+    { id: 'claude', name: 'Claude Code', detected: true, writes: [...claudeTargets(repo), ...claudeGlobalTargets(home)] },
     ...HOSTS.map((host) => ({
       id: host.id,
       name: host.name,
@@ -78,6 +83,7 @@ export function planInit(repo: string, opts: { home?: string; ids?: string[] } =
         instructionTarget(repo, host),
         ...mcpTargets(repo, [host.id], { home }),
         ...(host.id === 'agents' ? hookTargets(home) : []),
+        ...(host.id === 'cursor' ? cursorHookTargets(repo) : []),
         ...(host.id === 'antigravity' ? antigravitySkillTargets(home) : []),
       ],
     })),

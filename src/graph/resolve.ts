@@ -15,7 +15,8 @@
 import { posix } from "node:path";
 import { toPosixPath } from "../util/paths.js";
 import type { EdgeV1, Kind, NodeV1, Relation } from "./types.js";
-import type { RawEdge } from "./extract.js";
+import { languageOf, type RawEdge } from "./extract.js";
+import { genericLangOf } from "./generic.js";
 
 const IMPORT_EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py"];
 /** C/C++ source + header extensions, for resolving `#include` targets. */
@@ -26,6 +27,61 @@ const PY_EXT = /\.pyi?$/i;
  * construction. Only `class` — Python enums, dataclasses and NamedTuples are all
  * classes, so no other kind is reachable this way. */
 const PY_CTOR_KINDS: Kind[] = ["class"];
+/** Swift is Python's case with more nominal kinds: `Animal(legs: 4)` is an ordinary
+ * call node with no `new` to mark construction, and struct/enum initializers are as
+ * routine as class ones (a struct gets a memberwise init for free). Same fallback
+ * shape — types are tried only once functions (and methods, see extract.ts's
+ * implicit-self widening) have found nothing. */
+const SWIFT_EXT = /\.swift$/i;
+const SWIFT_CTOR_KINDS: Kind[] = ["class", "struct", "enum"];
+
+/**
+ * Languages whose symbols can genuinely reach each other. A call edge may not
+ * cross a family boundary.
+ *
+ * This exists because name resolution is repo-wide and used to be language-blind.
+ * A Go file calling the builtin `make(...)` has nothing in the repo to resolve
+ * against, so the unique-global fallback below matched a TypeScript helper named
+ * `make` in a frontend test file — and then every `make(map[...])` in the backend
+ * became an edge into that file. One symbol collected 1040 in-edges across 476
+ * files, and any pull request touching that test dragged the entire Go backend
+ * into its blast radius. Uniqueness is what made it fire: the rarer the collision,
+ * the more confident the old code was that it had found the right target.
+ *
+ * Only real interop is grouped here. TS/TSX/JS import each other freely; Kotlin,
+ * Scala and Clojure compile against Java on one classpath; C and C++ share
+ * headers. Everything else stands alone.
+ */
+const FAMILIES: ReadonlyArray<readonly string[]> = [
+  ["typescript", "tsx"],
+  ["java", "kotlin", "scala", "clojure"],
+  ["c", "cpp"],
+];
+const FAMILY_OF = new Map<string, string>();
+for (const group of FAMILIES) for (const lang of group) FAMILY_OF.set(lang, group[0]);
+
+/**
+ * The language family a path belongs to, or null when no tier claims the file.
+ * A language of its own is its own family, so the common case needs no entry above.
+ */
+function familyOf(path: string): string | null {
+  const lang = languageOf(path) ?? genericLangOf(path)?.name ?? null;
+  if (!lang) return null;
+  return FAMILY_OF.get(lang) ?? lang;
+}
+
+/**
+ * Could a reference in `file` reach a definition in `candidatePath`?
+ *
+ * An unknown family never filters: absence of data is not evidence of a mismatch,
+ * and refusing edges for every extension graft cannot name would lose real ones.
+ */
+function reachable(file: string, candidatePath: string): boolean {
+  const from = familyOf(file);
+  if (from === null) return true;
+  const to = familyOf(candidatePath);
+  return to === null || from === to;
+}
 
 /** A Go module discovered in the repo: its `module` path from `go.mod` and the repo
  * directory that `go.mod` lives in (posix, `.` for the repo root). A monorepo may hold
@@ -185,6 +241,22 @@ export function resolveEdges(
         const refKinds: Kind[] = ["class", "interface", "trait", "enum"];
         const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
         if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
+      } else if (e.file.endsWith(".java") && byId.get(e.source)?.origin === "ast") {
+        // Java annotation without a specifier (same-file or globally unique
+        // `@interface`). Annotation types are `interface` kind — a class of the
+        // same name is not a match, so `@Entity` cannot collapse onto an in-repo
+        // `class Entity` (#103). Kind alone still cannot tell `@interface Service`
+        // from `interface Service`, so only accept a candidate whose header
+        // contains the literal `@interface` (`includes`, not `startsWith`: a
+        // meta-annotated type is `@Documented @Retention(...) public @interface
+        // JsonAdapter`). Unresolved targets keep the bare name, matching
+        // heritage, rather than dropping the way PHP attributes do.
+        const refKinds: Kind[] = ["interface"];
+        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
+        const anno = hit ? byId.get(hit.id) : undefined;
+        if (hit && hit.id !== e.source && anno?.signature?.includes("@interface"))
+          add(e.source, hit.id, "references", hit.confidence);
+        else add(e.source, e.name, "references", "inferred");
       } else if (byId.get(e.source)?.origin === "generic") {
         // Breadth tier: a bare-name structural reference (extends / implements /
         // object-creation / module alias) the grammar marked but cannot type. Resolve
@@ -200,12 +272,24 @@ export function resolveEdges(
         if (!e.recvType) continue;
         const hit = resolveTypedMember(e.recvType, e.name!, e.file, ownerMethod, classParents, classTraits, e.argCount);
         if (hit === "ambiguous") continue; // drop — never guess past an ambiguous owner
-        if (hit) add(e.source, hit.id, "calls", hit.confidence);
+        if (hit) {
+          add(e.source, hit.id, "calls", hit.confidence);
+          continue;
+        }
         // No owner-qualified match means the call is unresolved. A unique bare
         // method name is not evidence that this receiver has that method — a
         // name-fallback here was measured to HALVE call-edge precision (73%→37%
         // vs a compiler-grade oracle) for a 3x count inflation, i.e. noise. See #35.
-        continue;
+        //
+        // One carve-out, which is NOT that fallback: a Swift `implicitSelf` edge
+        // carries two readings of one bare call — member (tried above, in
+        // Swift's own inner-scope-first order) and free function. Zero members
+        // on the whole owner chain means the call was a free-function call after
+        // all, so it falls through to bare-name resolution; an ambiguous member
+        // set has already dropped it above, and a resolved member never reaches
+        // here — a name defined as both member and free function yields the
+        // member edge alone, exactly as Swift dispatches it.
+        if (!e.implicitSelf) continue;
       }
       // Every language's bare-name call is a free function, except R (Phase 4):
       // an untyped `obj$method()` there sets e.kinds to also allow a "method"
@@ -242,6 +326,9 @@ export function resolveEdges(
       // resolveName's same-file-then-unique-global rule still drops the ambiguous.
       if (!hit && PY_EXT.test(e.file)) {
         hit = resolveName(e.name!, e.file, PY_CTOR_KINDS, perFileName, globalName);
+      }
+      if (!hit && SWIFT_EXT.test(e.file)) {
+        hit = resolveName(e.name!, e.file, SWIFT_CTOR_KINDS, perFileName, globalName);
       }
       if (hit) add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
     }
@@ -281,7 +368,12 @@ function resolveName(
   // first in document order — and labelled it `extracted`, i.e. certain. That is the
   // guess this module's header says it does not make.
   if (local.length === 1) return { id: local[0].id, confidence: "extracted" };
-  const global = (globalName.get(name) ?? []).filter((n) => kinds.includes(n.kind));
+  // Cross-file: also require a language that could actually reach this one.
+  // Without it a unique name match ANYWHERE in the repo wins, which is how a Go
+  // builtin ended up resolving into a TypeScript test — see FAMILIES above.
+  const global = (globalName.get(name) ?? []).filter(
+    (n) => kinds.includes(n.kind) && reachable(file, n.path),
+  );
   if (global.length === 1) return { id: global[0].id, confidence: "inferred" };
   return null;
 }
@@ -336,13 +428,19 @@ function resolveTypedMember(
   let frontier = [recvType];
   for (let depth = 0; depth <= MAX_DEPTH && frontier.length; depth++) {
     for (const type of frontier) {
-      const all = ownerMethod.get(`${type}.${name}`);
+      const all = ownerMethod.get(`${type}.${name}`)?.filter((c) => reachable(file, c.path));
       if (all && all.length > 0) {
         const candidates = narrowByArity(all, argCount);
         if (candidates.length === 1) {
           const c = candidates[0];
           return { id: c.id, confidence: c.path === file ? "extracted" : "inferred" };
         }
+        // Swift: several candidates surviving arity narrowing are a genuine
+        // overload set distinguished only by parameter TYPES (`save(Int)` vs
+        // `save(String)`), which this pass cannot read — the same-file tiebreak
+        // below would pick whichever overload appears first in the file and
+        // stamp it `extracted`, a confidently wrong edge. Drop instead.
+        if (SWIFT_EXT.test(file)) return "ambiguous";
         const sameFile = candidates.find((c) => c.path === file);
         if (sameFile) return { id: sameFile.id, confidence: "extracted" };
         return "ambiguous"; // several, none same-file — drop and stop
@@ -377,7 +475,7 @@ function resolveTraitMember(
   if (!traits?.length) return null;
   const matches: NodeV1[] = [];
   for (const trait of traits) {
-    const all = ownerMethod.get(`${trait}.${name}`);
+    const all = ownerMethod.get(`${trait}.${name}`)?.filter((c) => reachable(file, c.path));
     if (!all?.length) continue;
     matches.push(...narrowByArity(all, argCount));
   }

@@ -127,7 +127,11 @@ test("workspace ask applies file-first selection after cross-repo fusion", async
   });
   try {
     await buildWorkspace(p);
-    const r = federateAsk(p, undefined, "quartz", { limit: 8, graphRank: false });
+    const r = federateAsk(p, undefined, "quartz", {
+      limit: 8,
+      graphRank: false,
+      fileTopLock: false,
+    });
     const files = r.hits.map((hit) => hit.pointer.replace(/:L\d+-L\d+$/, ""));
     const firstPass = [...new Set(files)];
 
@@ -139,6 +143,154 @@ test("workspace ask applies file-first selection after cross-repo fusion", async
     ], "selection runs after raw child results have established the fused file order");
     assert.ok(files.slice(firstPass.length).includes("repoA/a.ts"), "later rounds retain sibling spans");
     assert.ok(files.slice(firstPass.length).includes("repoB/a.ts"), "same-path files in different children stay distinct");
+  } finally {
+    rmSync(p, { recursive: true, force: true });
+  }
+});
+
+test("default file-aware fusion locks the exact workspace top before projecting span queues", async () => {
+  const p = workspaceFx({
+    repoA: {
+      "a.ts":
+        `export function quartzAlphaA() { return "quartz"; }\n` +
+        `export function quartzBetaA() { return "quartz"; }\n` +
+        `export function quartzGammaA() { return "quartz"; }\n`,
+      "b.ts": `export function quartzOmegaB() { return "quartz"; }\n`,
+    },
+    repoB: {
+      "a.ts":
+        `export function quartzAlphaC() { return "quartz"; }\n` +
+        `export function quartzBetaC() { return "quartz"; }\n`,
+      "d.ts": `export function quartzOmegaD() { return "quartz"; }\n`,
+    },
+  });
+  try {
+    await buildWorkspace(p);
+    const baseline = federateAsk(p, undefined, "quartz", {
+      limit: 8,
+      graphRank: false,
+      fileTopLock: false,
+    });
+    const a5 = federateAsk(p, undefined, "quartz", {
+      limit: 8,
+      graphRank: false,
+      source: true,
+    });
+    const explicitA5 = federateAsk(p, undefined, "quartz", {
+      limit: 8,
+      graphRank: false,
+      source: true,
+      fileTopLock: true,
+    });
+
+    assert.deepEqual(
+      a5,
+      explicitA5,
+      "the workspace default route is exactly the explicit file-aware configuration",
+    );
+
+    assert.deepEqual(
+      {
+        kind: a5.hits[0].kind,
+        title: a5.hits[0].title,
+        pointer: a5.hits[0].pointer,
+        score: a5.hits[0].score,
+        scope: a5.hits[0].scope,
+      },
+      {
+        kind: baseline.hits[0].kind,
+        title: baseline.hits[0].title,
+        pointer: baseline.hits[0].pointer,
+        score: baseline.hits[0].score,
+        scope: baseline.hits[0].scope,
+      },
+      "the parent lock reproduces the exact pre-file-RRF workspace top",
+    );
+
+    const files = a5.hits.map((hit) => hit.pointer.replace(/:L\d+-L\d+$/, ""));
+    const firstDuplicate = files.findIndex(
+      (file, index) => files.indexOf(file) !== index,
+    );
+    assert.equal(firstDuplicate, 4, "all four child/file documents emit before a tail span");
+    assert.equal(new Set(files.slice(0, firstDuplicate)).size, 4);
+    assert.ok(files.includes("repoA/a.ts"));
+    assert.ok(files.includes("repoB/a.ts"), "same relative paths in different children remain distinct");
+    assert.ok(files.slice(firstDuplicate).includes("repoA/a.ts"));
+    assert.ok(files.slice(firstDuplicate).includes("repoB/a.ts"));
+    const repoBTailScores = a5.hits
+      .filter((hit) => hit.pointer.replace(/:L\d+-L\d+$/, "") === "repoB/a.ts")
+      .map((hit) => hit.score);
+    assert.ok(repoBTailScores.length > 1, "fixture reaches a non-locked queue tail");
+    assert.equal(
+      new Set(repoBTailScores).size,
+      1,
+      "every projected span in a non-locked file keeps the same cross-child RRF score",
+    );
+    const federated = new Set(a5.scopes?.federated ?? []);
+    assert.ok(
+      a5.scopes?.alsoMatched.every((match) => !federated.has(match.scope)),
+      "a locked or otherwise federated scope is never also reported as gated out",
+    );
+    assert.ok(
+      a5.hits.filter((hit) => hit.kind === "symbol").every((hit) => hit.code?.includes("function")),
+      "source mode inlines both file leaders and queue tails",
+    );
+  } finally {
+    rmSync(p, { recursive: true, force: true });
+  }
+});
+
+test("file-union admission preserves the workspace baseline top-lock survivor set", async () => {
+  const p = workspaceFx({
+    repoStrong: {
+      "strong.ts": `export function alphaBetaGamma() { return "alpha beta gamma"; }\n`,
+    },
+    repoDistributed: {
+      "distributed.ts":
+        `export function neutralOne() { return "alpha"; }\n` +
+        `export function neutralTwo() { return "beta"; }\n` +
+        `export function neutralThree() { return "gamma"; }\n`,
+    },
+  });
+  try {
+    await buildWorkspace(p);
+    const baseline = federateAsk(p, undefined, "alpha beta gamma", {
+      limit: 8,
+      graphRank: false,
+      fileTopLock: false,
+    });
+    assert.ok(baseline.hits.every((hit) => hit.scope?.startsWith("repoStrong")));
+    assert.ok(baseline.scopes?.alsoMatched.some((match) => match.scope === "repoDistributed"));
+
+    const a5 = federateAsk(p, undefined, "alpha beta gamma", {
+      limit: 8,
+      graphRank: false,
+    });
+    assert.deepEqual(
+      {
+        title: a5.hits[0].title,
+        pointer: a5.hits[0].pointer,
+        score: a5.hits[0].score,
+        scope: a5.hits[0].scope,
+      },
+      {
+        title: baseline.hits[0].title,
+        pointer: baseline.hits[0].pointer,
+        score: baseline.hits[0].score,
+        scope: baseline.hits[0].scope,
+      },
+      "the lock is computed from the original baseline participation gate",
+    );
+    assert.ok(
+      a5.hits.some((hit) => hit.scope?.startsWith("repoDistributed")),
+      "file union may admit a newly coherent child into ranks below the lock",
+    );
+    assert.ok(!a5.scopes?.alsoMatched.some((match) => match.scope === "repoDistributed"));
+    const excluded = new Set(a5.scopes?.alsoMatched.map((match) => match.scope) ?? []);
+    assert.ok(
+      a5.hits.every((hit) => !excluded.has(hit.scope?.split("/")[0] ?? "")),
+      "the baseline top lock never resurrects a child reported as gated out",
+    );
   } finally {
     rmSync(p, { recursive: true, force: true });
   }
@@ -250,6 +402,17 @@ test("federated ask: a junk-body-token child is gated out of the ranking, into a
   assert.ok(!titles.some((t) => t.startsWith("renderPanel")), `junk hit must NOT federate:\n${titles.join("\n")}`);
   assert.ok(r.hits.every((h) => h.scope!.startsWith("repoA")), "only repoA federates");
   assert.deepEqual(r.scopes?.alsoMatched.map((m) => m.scope), ["repoB"], "junk child reported in alsoMatched");
+  const a5 = federateAsk(p, undefined, "invoice total tax breakdown", {
+    limit: 8,
+    fileTopLock: true,
+  });
+  assert.ok(a5.hits.some((hit) => hit.title.startsWith("invoiceTotalTaxBreakdown")));
+  assert.ok(!a5.hits.some((hit) => hit.title.startsWith("renderPanel")));
+  assert.deepEqual(
+    a5.scopes?.alsoMatched.map((match) => match.scope),
+    ["repoB"],
+    "file-aware ranking gates on fresh top-file coverage instead of stale metadata",
+  );
   rmSync(p, { recursive: true, force: true });
 });
 

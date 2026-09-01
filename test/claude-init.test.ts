@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { buildGraphIfMissing, runInit } from '../src/claude/init.js';
 import { formatInitEpilogue } from '../src/cli-epilogue.js';
+import { readStamp } from '../src/upkeep.js';
 
 function fresh(): string { return mkdtempSync(join(tmpdir(), 'graft-init-')); }
 
@@ -22,7 +23,7 @@ function runPostinstall(env: Record<string, string>): string {
 
 test('runInit scaffolds settings + both shims + the skill (build skipped)', () => {
   const d = fresh();
-  const r = runInit(d, { build: false });
+  const r = runInit(d, { build: false, home: fresh() });
   assert.ok(existsSync(join(d, '.claude', 'settings.json')));
   assert.ok(existsSync(join(d, '.claude', 'helpers', 'graft-statusline.cjs')));
   assert.ok(existsSync(join(d, '.claude', 'helpers', 'graft-hooks.cjs')));
@@ -42,7 +43,7 @@ test('runInit overwrites a stale skill file', () => {
   const skillPath = join(d, '.claude', 'skills', 'graft', 'SKILL.md');
   mkdirSync(join(d, '.claude', 'skills', 'graft'), { recursive: true });
   writeFileSync(skillPath, 'stale junk');
-  runInit(d, { build: false });
+  runInit(d, { build: false, home: fresh() });
   assert.match(readFileSync(skillPath, 'utf8'), /name: graft/);
 });
 
@@ -50,17 +51,54 @@ test('runInit preserves foreign settings and warns on foreign statusLine', () =>
   const d = fresh();
   mkdirSync(join(d, '.claude'), { recursive: true });
   writeFileSync(join(d, '.claude', 'settings.json'), JSON.stringify({ model: 'x', statusLine: { command: 'mine' } }));
-  const r = runInit(d, { build: false });
+  const r = runInit(d, { build: false, home: fresh() });
   const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
   assert.equal(s.model, 'x');
   assert.equal(s.statusLine.command, 'mine');
   assert.equal(r.warnings.length, 1);
 });
 
+test('runInit updates a prior Graft statusLine whose command still names the helper', () => {
+  const d = fresh();
+  mkdirSync(join(d, '.claude'), { recursive: true });
+  writeFileSync(join(d, '.claude', 'settings.json'), JSON.stringify({
+    statusLine: { type: 'command', command: 'node .claude/helpers/graft-statusline.cjs' },
+  }));
+  runInit(d, { build: false });
+  const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
+  assert.ok(s.statusLine.command.includes('graft-statusline.cjs'));
+  assert.match(s.statusLine.command, /CLAUDE_PROJECT_DIR/);
+});
+
+test('runInit with statusline: false does not write a statusLine', () => {
+  const d = fresh();
+  runInit(d, { build: false, statusline: false });
+  const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
+  assert.equal(s.statusLine, undefined);
+  assert.equal(s.subagentStatusLine, undefined);
+  assert.ok(existsSync(join(d, '.claude', 'helpers', 'graft-statusline.cjs')), 'shim still installed');
+  assert.ok(s.hooks.Stop[0].hooks[0].command.includes('graft-hooks.cjs'));
+});
+
+test('CLI: --no-statusline leaves statusLine unset', () => {
+  const d = fresh();
+  const res = spawnSync(
+    process.execPath,
+    ['--import', 'tsx', 'src/cli.ts', 'init', d, '--no-build', '--no-agents', '--no-statusline'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stderr, /skipped Claude Code statusLine/);
+  const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
+  assert.equal(s.statusLine, undefined);
+  assert.equal(s.subagentStatusLine, undefined);
+  assert.equal(readStamp(d)?.opts?.statusline, false);
+});
+
 test('runInit is idempotent', () => {
   const d = fresh();
-  runInit(d, { build: false });
-  runInit(d, { build: false });
+  runInit(d, { build: false, home: fresh() });
+  runInit(d, { build: false, home: fresh() });
   const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
   assert.equal(s.hooks.PostToolUse.length, 2); // post-edit + tool-savings, not duplicated on re-init
   assert.deepEqual(s.permissions.allow, ['Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
@@ -70,7 +108,7 @@ test('runInit appends the allowlist to a pre-existing permissions block, preserv
   const d = fresh();
   mkdirSync(join(d, '.claude'), { recursive: true });
   writeFileSync(join(d, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: ['Bash(ls)'] } }));
-  runInit(d, { build: false });
+  runInit(d, { build: false, home: fresh() });
   const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
   assert.deepEqual(s.permissions.allow, ['Bash(ls)', 'Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
 });
@@ -83,7 +121,7 @@ test('postinstall prints the nudge in a fresh dir', () => {
 
 test('postinstall is silent when already initialized', () => {
   const d = fresh();
-  runInit(d, { build: false });
+  runInit(d, { build: false, home: fresh() });
   const out = runPostinstall({ INIT_CWD: d, CI: '' });
   assert.equal(out.trim(), '');
 });

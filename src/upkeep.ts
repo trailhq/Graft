@@ -134,6 +134,7 @@ export function maybeRefreshInBackground(home?: string, now = Date.now()): boole
     const child = spawn(process.execPath, [graftCliPath(), '_update-check'], {
       detached: true,
       stdio: 'ignore',
+      windowsHide: true,
     });
     child.unref();
     return true;
@@ -157,10 +158,11 @@ export function formatUpdateNudge(current: string, latest: string | null | undef
  * The subset of `graft init`'s flags a refresh has to replay.
  *
  * Without these, an auto-refresh would install things the user explicitly
- * declined: someone who ran `graft init --no-global` (or `--no-hooks`) said "keep
- * out of `~/.codex`", and a later session silently writing there would be graft
- * overriding a decision rather than maintaining one. Absent from an older stamp →
- * all true, which is what plain `graft init` does.
+ * declined: someone who ran `graft init --no-global` (or `--no-hooks`, or
+ * `--no-statusline`) said "keep out of `~/.codex`" / "leave my statusline
+ * alone", and a later session silently writing there would be graft overriding a
+ * decision rather than maintaining one. Absent from an older stamp → all true,
+ * which is what plain `graft init` does.
  */
 export interface WiringOpts {
   /** false → never write outside the repo (`--no-global`). */
@@ -169,9 +171,11 @@ export interface WiringOpts {
   mcp: boolean;
   /** false → skip hook installation (`--no-hooks`). */
   hooks: boolean;
+  /** false → skip Claude Code statusLine (`--no-statusline` / GRAFT_NO_STATUSLINE). */
+  statusline: boolean;
 }
 
-export const DEFAULT_WIRING_OPTS: WiringOpts = { global: true, mcp: true, hooks: true };
+export const DEFAULT_WIRING_OPTS: WiringOpts = { global: true, mcp: true, hooks: true, statusline: true };
 
 /** An older stamp has no `opts`; a plain `graft init` wired everything. */
 export function wiringOpts(stamp: WiringStamp | null): WiringOpts {

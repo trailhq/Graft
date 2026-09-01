@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { skillTemplate } from '../claude/skill-template.js';
 import type { PlannedWrite } from './plan.js';
-import type { HookWrite } from './codex-hooks.js';
+import type { ConfigWrite } from './config-write.js';
 
 /** The skill file path, under the user's global Antigravity skills dir. */
 function skillPath(home: string): string {
@@ -33,7 +33,7 @@ export function antigravitySkillTargets(home: string): PlannedWrite[] {
 }
 
 /** Write graft's skill into `~/.gemini/skills/graft/SKILL.md`, idempotently. */
-export function installAntigravitySkill(home: string): HookWrite[] {
+export function installAntigravitySkill(home: string): ConfigWrite[] {
   const path = skillPath(home);
   const content = skillTemplate();
   const existed = existsSync(path);

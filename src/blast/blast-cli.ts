@@ -30,6 +30,11 @@ export interface BlastCliOptions {
    * meaning as `graft viz --title`. Without it a reader of a published page has no
    * way to tell which pull request they are looking at. */
   title?: string;
+  /** Suggest who to tag, from git history over each area. On by default; `--no-owners`
+   * turns the whole layer off for a repo that would rather not name people. */
+  owners?: boolean;
+  /** The PR author: logins, names or emails to keep out of their own suggestions. */
+  prAuthor?: string[];
   /** The top-level `--dir` override. */
   globalDir?: string;
 }
@@ -87,6 +92,21 @@ export async function runBlastCommand(dir: string, opts: BlastCliOptions): Promi
 
   const report = blastRadiusIn(graph, contextDir, diff.files, diff.basis, depth);
   if (opts.name) await nameClusters(graph, report, contextDir);
+  // After naming, never before: a reviewer's reason cites area LABELS, and the
+  // naming pass is what gives an area its final one.
+  if (opts.owners !== false) {
+    const { attachOwners, diffAuthors, localIdentity } = await import("./owners.js");
+    // Everyone who wrote a commit in this range, plus whatever the caller named.
+    // The range is the reliable half: CI knows the author's login but almost never
+    // their commit email, and the email is what git history is keyed on.
+    //
+    // With no --base there is no range — this is the local "what am I about to
+    // push" case — so the local git identity stands in for it. Without that, the
+    // one person certain to have written the change is the top name in its own
+    // list of who to ask about it.
+    const authors = opts.base === undefined ? localIdentity(root) : diffAuthors(root, opts.base);
+    attachOwners(root, report, { exclude: [...authors, ...(opts.prAuthor ?? [])] });
+  }
   if (opts.exportViz) await exportRadius(report, contextDir, root, opts.exportViz, opts.title);
 
   if (format === "json") {
@@ -106,37 +126,13 @@ export async function runBlastCommand(dir: string, opts: BlastCliOptions): Promi
 /**
  * Name the clusters left on their symbol backstop, then report what it cost.
  *
- * Everything here is best-effort by construction: no key, a spent quota or a
- * refused call leaves the backstop labels in place and the command still exits 0,
- * because a PR check must not fail over a cosmetic layer.
+ * The work lives in `name.ts` so the GitHub App runs the identical pass; all
+ * this adds is the `--name:` prefix a CLI note wants.
  */
 async function nameClusters(graph: GraphV1, report: BlastReport, contextDir: string): Promise<void> {
-  const { applyNames, ChatNamer } = await import("./name.js");
-  const { resolveConfig } = await import("../ai/providers.js");
-  const cfg = resolveConfig({ contextDir });
-
-  let namer;
-  if (cfg.chatModel) {
-    namer = new ChatNamer(cfg.chatModel);
-  } else if (cfg.apiKey) {
-    const { createChatModel } = await import("../ai/llm/factory.js");
-    namer = new ChatNamer(createChatModel({
-      provider: cfg.provider, apiKey: cfg.apiKey, model: cfg.model,
-      baseUrl: cfg.baseUrl, headers: cfg.headers,
-    }));
-  }
-
-  const stats = await applyNames(graph, report, { namer, contextDir });
-  if (!namer) {
-    console.error("• --name: no API key (GRAFT_API_KEY), so areas keep their symbol names");
-    return;
-  }
-  if (stats.error) console.error(`• --name: naming failed (${stats.error}) — areas keep their symbol names`);
-  else if (stats.named + stats.cached + stats.declined > 0) {
-    const bits = [`${stats.named} named`, `${stats.cached} cached`];
-    if (stats.declined > 0) bits.push(`${stats.declined} left as symbols (mixed)`);
-    console.error(`• --name: ${bits.join(", ")}`);
-  }
+  const { nameReport } = await import("./name.js");
+  const { note } = await nameReport(graph, report, contextDir);
+  if (note) console.error(`• --name: ${note}`);
 }
 
 /**

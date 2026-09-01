@@ -1,0 +1,24 @@
+# Canonical identities.
+#
+# Left of the angle brackets is the identity git should REPORT; on the right is
+# the identity a commit actually carries. Nothing is rewritten — git applies this
+# as a lookup when it reads history (`%aN`/`%aE`, `git shortlog`, `git blame`).
+#
+# Every canonical address here is the person's GitHub noreply address, which is
+# what makes them mentionable: `graft blast` reads a handle out of that form and
+# refuses to guess one from anything else, so without a line here a contributor
+# who commits under a personal or work address is printed as plain text a PR
+# author has to tag by hand.
+#
+# Each mapping below was resolved by GitHub itself (the commits API reports the
+# account it links an authoring email to) rather than matched on name.
+
+Shrish Dwivedi <72087189+shhdwi@users.noreply.github.com> <dwi.shrish@gmail.com>
+# Not linked to any account on GitHub's side; mapped on the strength of the
+# identical display name and its three commits sitting among the others.
+Shrish Dwivedi <72087189+shhdwi@users.noreply.github.com> <shrish@nanonets.com>
+anirudhkumar-nanonets <254937188+anirudhkumar-nanonets@users.noreply.github.com> <anirudhkumar@nanonets.com>
+yescine <63535911+yescine@users.noreply.github.com> <bouchoucha.yassine@gmail.com>
+Daniel Oliva <8550085+dbianco@users.noreply.github.com> <spamolivab@gmail.com>
+Daniel Oliva <8550085+dbianco@users.noreply.github.com> <dbianco@users.noreply.github.com>
+Andrew Moore <225985535+InfiniLakeSoftware@users.noreply.github.com> <andrew.moore@infinilakesoftware.com>

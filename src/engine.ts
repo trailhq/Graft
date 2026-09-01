@@ -28,6 +28,8 @@ export type { BuildResult, BuildProgress, CheckResult, GraphBuildResult, GraphCh
 export interface InitOptions {
   /** Code extensions to include. Default: {@link CODE_EXTENSIONS}. */
   extensions?: string[];
+  /** Repo-relative directory prefixes to limit the concept pass (`--only-dir`). */
+  onlyDirs?: string[];
   /** Progress callback for long builds. */
   onProgress?: (info: BuildProgress) => void;
 }
@@ -45,6 +47,8 @@ export interface GraphRunOptions {
   reuse?: boolean;
   /** Opt-in compiler-grade LSP edge enrichment (`graft build --lsp`). */
   lsp?: boolean;
+  /** Repo-relative directory prefixes to limit the build to (`--only-dir`). */
+  onlyDirs?: string[];
   onProgress?: GraphBuildOptions["onProgress"];
 }
 
@@ -60,6 +64,7 @@ export class Graft {
     return buildContext(dir, {
       contextDir: this.cfg.contextDir,
       extensions: opts.extensions,
+      onlyDirs: opts.onlyDirs,
       model: this.modelLabel(),
       summarizer: this.summarizer(),
       synthesizer: this.synthesizer(),
@@ -90,6 +95,7 @@ export class Graft {
       concurrency: opts.concurrency,
       reuse: opts.reuse,
       lsp: opts.lsp,
+      onlyDirs: opts.onlyDirs,
       onProgress: opts.onProgress,
     });
   }

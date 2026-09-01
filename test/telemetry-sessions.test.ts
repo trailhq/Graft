@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SESSION_IDLE_MS, flushClosedSessions } from '../src/telemetry/sessions.js';
+import { SESSION_IDLE_MS, flushClosedSessions, summarizeSession } from '../src/telemetry/sessions.js';
 import { peek } from '../src/telemetry/queue.js';
 import { readSession } from '../src/claude/state.js';
 import { tmpRepo } from './helpers.js';
@@ -46,6 +46,61 @@ test('a closed session is rolled up into one bucketed event', () => {
   for (const raw of ['56', '12', '7400']) {
     assert.equal(values.includes(raw), false, `the raw counter ${raw} was sent as a property value`);
   }
+});
+
+test('the rollup is attributed to the host that flushed it (Cursor, not the hardcoded default)', () => {
+  const { repo, home } = fixture('sess-host');
+  writeSessionFile(repo, 's1', { graftReads: 4, sourceReads: 1 }, SESSION_IDLE_MS + 1000);
+  assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN, 'cursor'), 1);
+  const [ev] = peek(home) as { properties: Record<string, string> }[];
+  assert.equal(ev.properties.agent_host, 'cursor');
+});
+
+test('the default host stays claude-code when none is passed', () => {
+  const { repo, home } = fixture('sess-host-default');
+  writeSessionFile(repo, 's1', { graftReads: 1 }, SESSION_IDLE_MS + 1000);
+  assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
+  const [ev] = peek(home) as { properties: Record<string, string> }[];
+  assert.equal(ev.properties.agent_host, 'claude-code');
+});
+
+test('a session stamped with a host is attributed to it, even when the idle sweep (claude-code default) flushes it', () => {
+  const { repo, home } = fixture('sess-host-stamp');
+  writeSessionFile(repo, 's1', { graftReads: 4, host: 'cursor' }, SESSION_IDLE_MS + 1000);
+  // the flusher passes no host → default claude-code; the file's stamp must win.
+  assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
+  const [ev] = peek(home) as { properties: Record<string, string> }[];
+  assert.equal(ev.properties.agent_host, 'cursor');
+});
+
+test('summarizeSession force-closes a just-touched session — the idle gate is skipped', () => {
+  const { repo, home } = fixture('sess-force');
+  // mtime = now: flushClosedSessions would skip this, but the end-of-session hook must not.
+  writeSessionFile(repo, 's1', { graftReads: 8, sourceReads: 2, savedTokens: 7400 }, 0);
+  assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 0, 'the idle sweep skips a fresh file');
+  assert.equal(summarizeSession(repo, 's1', { host: 'cursor', home, env: OPEN }), 1);
+  const [ev] = peek(home) as { event: string; properties: Record<string, string> }[];
+  assert.equal(ev.event, 'session_summary');
+  assert.equal(ev.properties.agent_host, 'cursor');
+  assert.equal(ev.properties.graft_reads_bucket, '5-19');
+  // and it is marked, so a later idle sweep can't double-count it
+  assert.equal(readSession(repo, 's1').summarized, true);
+});
+
+test('summarizeSession counts a session exactly once', () => {
+  const { repo, home } = fixture('sess-force-once');
+  writeSessionFile(repo, 's1', { graftReads: 1 }, 0);
+  assert.equal(summarizeSession(repo, 's1', { host: 'cursor', home, env: OPEN }), 1);
+  assert.equal(summarizeSession(repo, 's1', { host: 'cursor', home, env: OPEN }), 0, 'already summarized');
+  assert.equal(peek(home).length, 1);
+});
+
+test('summarizeSession prefers the file stamp over the passed host', () => {
+  const { repo, home } = fixture('sess-force-stamp');
+  writeSessionFile(repo, 's1', { graftReads: 1, host: 'cursor' }, 0);
+  assert.equal(summarizeSession(repo, 's1', { host: 'claude-code', home, env: OPEN }), 1);
+  const [ev] = peek(home) as { properties: Record<string, string> }[];
+  assert.equal(ev.properties.agent_host, 'cursor');
 });
 
 test('a live session is left alone', () => {
@@ -93,4 +148,28 @@ test('an empty session still counts — installed but unused is the signal we wa
   assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
   const [ev] = peek(home) as { properties: Record<string, string> }[];
   assert.equal(ev.properties.graft_reads_bucket, '0');
+});
+
+test('the saved-vs-said turn counts ride along, bucketed', () => {
+  const { repo, home } = fixture('sess-tally');
+  writeSessionFile(repo, 's1',
+    { graftReads: 6, sourceReads: 1, savedTokens: 7400, graftTurns: 9, reportedTurns: 3 },
+    SESSION_IDLE_MS + 1000);
+  assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
+  const [ev] = peek(home) as { properties: Record<string, string> }[];
+  assert.equal(ev.properties.graft_turns_bucket, '5-19');
+  assert.equal(ev.properties.reported_turns_bucket, '1-4');
+  const values = Object.values(ev.properties);
+  for (const raw of ['9', '3']) {
+    assert.equal(values.includes(raw), false, `the raw turn count ${raw} was sent as a property value`);
+  }
+});
+
+test('a session file written before the turn counters exist reports zero, not undefined', () => {
+  const { repo, home } = fixture('sess-tally-old');
+  writeSessionFile(repo, 's1', { graftReads: 4, sourceReads: 0, savedTokens: 500 }, SESSION_IDLE_MS + 1000);
+  assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
+  const [ev] = peek(home) as { properties: Record<string, string> }[];
+  assert.equal(ev.properties.graft_turns_bucket, '0');
+  assert.equal(ev.properties.reported_turns_bucket, '0');
 });

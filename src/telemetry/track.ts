@@ -21,7 +21,7 @@ import { EVENTS } from './contract.js';
 import type { AgentHost } from './contract.js';
 import { enqueue } from './queue.js';
 import { telemetryOn } from './gate.js';
-import { installId, repoId } from './identity.js';
+import { installId, patchState, readState, repoId } from './identity.js';
 import { runningVersion } from '../upkeep.js';
 
 /** One queued event, exactly as it will be sent. */
@@ -115,14 +115,41 @@ export function track(
 }
 
 /**
- * The `first_run` event, fired the once. Separate from `track` because it is the
- * only event whose trigger is "the id did not exist a moment ago", which only
- * `installId()` can know.
+ * The `first_run` event, fired the once. Separate from `track` because its
+ * trigger is a comparison against persisted state rather than anything a call
+ * site knows.
+ *
+ * Gated on `firstRunAt` and NOT on `installId().firstRun`, which is the whole
+ * reason this field exists: the npm postinstall hook mints the install id before
+ * any command runs, so "did this call mint the id" is false on the genuine first
+ * command and would have silenced this event permanently.
  */
 export function trackFirstRunIfNew(ctx: TrackContext = {}): void {
   try {
     if (!telemetryOn(ctx.home, ctx.env)) return;
-    if (!installId(ctx.home).firstRun) return;
+    if (readState(ctx.home)?.firstRunAt) return;
     track('first_run', {}, ctx);
+    patchState({ firstRunAt: new Date().toISOString() }, ctx.home);
+  } catch { /* never */ }
+}
+
+/**
+ * The `install` event, fired from the npm postinstall hook.
+ *
+ * Once per machine per version: an upgrade is a real install and worth counting,
+ * a second `npm install` of a version already recorded is not. Unique machines
+ * are then distinct install ids, exactly as for every other event.
+ *
+ * Nothing here is an exception to the gates — a fork with no key, CI,
+ * `DO_NOT_TRACK` and `graft telemetry disable` all still close it. It is only a
+ * call site that happens to run outside a command.
+ */
+export function trackInstallIfNew(ctx: TrackContext & { global?: boolean } = {}): void {
+  try {
+    if (!telemetryOn(ctx.home, ctx.env)) return;
+    const version = runningVersion();
+    if (readState(ctx.home)?.installedVersion === version) return;
+    track('install', { global: String(ctx.global ?? false) }, ctx);
+    patchState({ installedVersion: version }, ctx.home);
   } catch { /* never */ }
 }

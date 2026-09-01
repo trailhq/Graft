@@ -85,6 +85,51 @@ function isRejectedObjectToolChoice(err: unknown): boolean {
   );
 }
 
+/**
+ * Newer reasoning-family models (o1/o3/o4, the gpt-5.x line, …) reject the
+ * classic `max_tokens` param outright and require `max_completion_tokens`
+ * instead, even though both are still in wide use across OpenAI-compatible
+ * servers. Detect the specific 400 rather than guessing from the model name,
+ * so older endpoints that still expect `max_tokens` are untouched.
+ */
+function isRejectedMaxTokens(err: unknown): boolean {
+  return (
+    err instanceof OpenAI.APIError &&
+    err.status === 400 &&
+    /max_tokens.*not supported.*max_completion_tokens/i.test(String((err as { message?: string }).message ?? ""))
+  );
+}
+
+/** Same reasoning-family models: temperature is fixed at 1, not caller-settable. */
+function isRejectedTemperature(err: unknown): boolean {
+  return (
+    err instanceof OpenAI.APIError &&
+    err.status === 400 &&
+    /temperature.*does not support/i.test(String((err as { message?: string }).message ?? ""))
+  );
+}
+
+/**
+ * Same models again: function tools are rejected on /v1/chat/completions while
+ * the model's default reasoning effort is active. The API's own error message
+ * names the fix — `reasoning_effort: "none"` — so apply exactly that.
+ *
+ * DeepSeek's v4 line refuses the same combination ("Thinking mode does not
+ * support this tool_choice") for every tool_choice except "auto", and accepts
+ * the identical `reasoning_effort: "none"` remedy. Matching both phrasings here
+ * keeps a forced tool_choice working rather than degrading it to "auto", which
+ * would leave the model free not to call the tool the caller asked for.
+ */
+function isRejectedToolsWithReasoning(err: unknown): boolean {
+  const message = String((err as { message?: string }).message ?? "");
+  return (
+    err instanceof OpenAI.APIError &&
+    err.status === 400 &&
+    (/function tools with reasoning_effort/i.test(message) ||
+      /thinking mode does not support this tool_choice/i.test(message))
+  );
+}
+
 export class OpenAIChatModel implements ChatModel {
   readonly label: string;
   private client: OpenAI;
@@ -141,14 +186,37 @@ export class OpenAIChatModel implements ChatModel {
    * automatically.
    */
   private async createChatCompletion(params: ChatParams): Promise<OpenAI.Chat.Completions.ChatCompletion> {
-    try {
-      return await this.client.chat.completions.create(params);
-    } catch (err) {
-      if (isRejectedObjectToolChoice(err) && typeof params.tool_choice === "object" && params.tools?.length === 1) {
-        return this.client.chat.completions.create({ ...params, tool_choice: "required" });
+    let attempt = params;
+    // Bounded: one retry per known incompatibility below, never an open loop.
+    for (let i = 0; i < 4; i++) {
+      try {
+        return await this.client.chat.completions.create(attempt);
+      } catch (err) {
+        // Checked before the tool_choice fallback below: a reasoning refusal
+        // also names tool_choice, and turning reasoning off keeps the caller's
+        // chosen tool instead of loosening the choice to work around it.
+        if (isRejectedToolsWithReasoning(err) && attempt.reasoning_effort === undefined) {
+          attempt = { ...attempt, reasoning_effort: "none" } as ChatParams;
+          continue;
+        }
+        if (isRejectedObjectToolChoice(err) && typeof attempt.tool_choice === "object" && attempt.tools?.length === 1) {
+          attempt = { ...attempt, tool_choice: "required" };
+          continue;
+        }
+        if (isRejectedMaxTokens(err) && attempt.max_tokens !== undefined) {
+          const { max_tokens, ...rest } = attempt;
+          attempt = { ...rest, max_completion_tokens: max_tokens } as ChatParams;
+          continue;
+        }
+        if (isRejectedTemperature(err) && attempt.temperature !== undefined) {
+          const { temperature, ...rest } = attempt;
+          attempt = rest as ChatParams;
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
+    return this.client.chat.completions.create(attempt);
   }
 
   private fromResponse(

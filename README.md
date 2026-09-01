@@ -4,6 +4,8 @@
 
 ### Turbocharge Claude Code, Cursor, Codex, Gemini & every coding agent: faster, cheaper, with contextual understanding specific to your codebase.
 
+<a href="https://trendshift.io/repositories/92209?utm_source=trendshift-badge&utm_medium=badge&utm_campaign=badge-trendshift-92209" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/92209/daily?language=TypeScript" alt="trailhq/Graft | Trendshift" width="250" height="55"/></a>
+
 <p>
   <a href="https://github.com/NanoNets/Graft"><img src="https://img.shields.io/github/stars/NanoNets/Graft?style=for-the-badge&logo=github&logoColor=white&label=Star%20on%20GitHub&color=FFC83D" /></a>
   <a href="https://graft.nanonets.ai"><img src="https://img.shields.io/badge/website-graft.nanonets.ai-546FFF?style=for-the-badge" /></a>
@@ -15,6 +17,7 @@
   <img src="https://img.shields.io/badge/License-MIT-20C997?style=for-the-badge" />
   <a href="TELEMETRY.md"><img src="https://img.shields.io/badge/telemetry-anonymous%2C%20opt--out-546FFF?style=for-the-badge" /></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/NanoNets/Graft"><img src="https://img.shields.io/ossf-scorecard/github.com/NanoNets/Graft?style=for-the-badge&label=openssf%20scorecard" /></a>
+  <a href="https://github.com/apps/trailhq-graft"><img src="https://img.shields.io/badge/PR%20reviews-install%20GitHub%20App-546FFF?style=for-the-badge&logo=github&logoColor=white" /></a>
 </p>
 
 ### Up to **4× cheaper** and **3× faster**, with better or no loss of correctness.
@@ -26,9 +29,9 @@
 | Time savings | Baseline | **+60%** |
 | Correctness | 54% | **66% (+12 pts)** |
 
-<sub>Efficiency is a 162-run controlled benchmark (same agent, same file tools, only the context differs). Correctness is **SWE-bench Verified**, graded by the official harness — graft resolved 66% of instances tested against Cold Claude Code's 54%. [Efficiency method ↓](#benchmark) · [SWE-bench ↓](#swe-bench-verified) · [Per-repo numbers ↓](#tested-on-your-popular-repos)</sub>
-
 </div>
+
+<p align="center"><b>Reviewing pull requests?</b> <a href="https://github.com/apps/trailhq-graft">Add the graft GitHub App</a> to get an automatic blast-radius review on every PR.</p>
 
 <p align="center">
   <img src="assets/graft-comparison-demo.gif" alt="Side-by-side comparison of a coding agent working with and without graft" width="820"/>
@@ -107,7 +110,7 @@ Graft builds that understanding **once** and writes it into your repo as a folde
 - **A real graph you can read.** No embeddings, no similarity search, no index to keep warm. The graph is a set of linked files your agent opens, greps, and follows, exactly the way it reads any other file in the repo.
 - **A local cache, not a committed artifact.** `graft build` writes `graft/` and adds it to `.gitignore` — it's a regenerable local cache, like `node_modules`. What you commit is the small wiring `graft init` drops in (`.claude/`, `AGENTS.md`, the MCP config); each teammate runs `graft build` to generate their own graph. No database, no server, no setup.
 - **Always fresh, automatically.** Every query rebuilds the graph against the working tree first — structural, `$0`, ~3ms when nothing moved — so `ask`/`grep`/`callers`/`skeleton`/`map` describe the code as it is right now, including uncommitted edits. `graft check` is a local freshness signal; there's no stale index to babysit.
-- **Your provider, your key, your model.** Summaries are written by any provider you choose — OpenAI, Anthropic (native), OpenRouter, Fireworks, Groq, a LiteLLM proxy, or a local model — under your own key. The structural code graph (`graft build`, `graft check`) is deterministic tree-sitter and never calls a model at all.
+- **Your provider, your key, your model.** Summaries are written by any provider you choose — OpenAI, Anthropic (native), OpenRouter, Fireworks, Groq, OrcaRouter, a LiteLLM proxy, or a local model — under your own key. The structural code graph (`graft build`, `graft check`) is deterministic tree-sitter and never calls a model at all.
 
 <p align="center">
   <picture>
@@ -193,13 +196,15 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
 - **Full-fidelity** — hand-written extractors with scope-aware, cross-file call
   and import resolution:
   **TypeScript / JavaScript** (incl. JSX & TSX), **Python**, **Go**, **Java**,
-  **R** (`.R`/`.r` — plain functions, S3/S4/R6 classes and methods, roxygen
-  `@export`, `library()`/`source()` imports).
+  **Kotlin**, **PHP**, **Swift** (classes, structs, enums, actors, protocols;
+  extension members attach to the extended type), **R** (`.R`/`.r` — plain
+  functions, S3/S4/R6 classes and methods, roxygen `@export`,
+  `library()`/`source()` imports).
 
 - **Broad** — symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
-  **Rust, C, C++, C#, Ruby, PHP, Kotlin, Scala, Swift, Elixir, Solidity,
-  OCaml, Zig, Dart, Clojure, Lua**.
+  **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
+  OCaml, Zig, Dart, Clojure, Nix, Lua**.
 
 - **Compiler-grade edges (opt-in)** — `graft build --lsp` adds precise
   `lsp_resolved` call edges (member calls the static pass can't type) when a
@@ -207,7 +212,7 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
   **gopls** (Go), **pyright** (Python), **typescript-language-server** (TS/JS).
   It's best-effort — with no server installed the graph is unchanged.
 
-Twenty-two languages in total. A file whose language isn't listed is skipped, not
+Twenty-three languages in total. A file whose language isn't listed is skipped, not
 indexed. Adding a broad-tier language is a small contribution — see
 [CREDITS.md](CREDITS.md) for the folks who added the current set.
 
@@ -238,7 +243,7 @@ _Summary, sources, links, and notes ship today in markdown nodes. The crux ships
 ## What runs where
 
 - **On your machine, no key, no network:** the structural code graph. `graft build` (wiring graph + per-file cards), `graft check`, and `graft ask` are deterministic tree-sitter — they never call a model.
-- **Through your provider key:** the LLM-written parts — `graft build --deep` adds the concept nodes (file summaries + node synthesis) and the per-symbol summaries and cruxes. graft is vendor-neutral: set `GRAFT_PROVIDER` (`openai` for any OpenAI-compatible endpoint, or `anthropic` for the native API), your `GRAFT_API_KEY`, `GRAFT_MODEL`, and — for the `openai` wire format — `GRAFT_BASE_URL` to point at OpenRouter, Fireworks, Groq, a LiteLLM proxy, a local server, or OpenAI itself. Or pass `--provider/--model/--api-key/--base-url` on the command line. (`OPENROUTER_API_KEY` still works as a deprecated fallback.)
+- **Through your provider key:** the LLM-written parts — `graft build --deep` adds the concept nodes (file summaries + node synthesis) and the per-symbol summaries and cruxes. graft is vendor-neutral: set `GRAFT_PROVIDER` (`openai` for any OpenAI-compatible endpoint, `anthropic` for the native API, or `litellm` / `orcarouter` for a gateway that speaks the OpenAI-compatible format), your `GRAFT_API_KEY`, `GRAFT_MODEL`, and — for the `openai` wire format — `GRAFT_BASE_URL` to point at OpenRouter, Fireworks, Groq, a LiteLLM proxy, a local server, or OpenAI itself. Or pass `--provider/--model/--api-key/--base-url` on the command line. (`OPENROUTER_API_KEY` still works as a deprecated fallback, and `ORCAROUTER_API_KEY` as a second one.)
 - **Anonymous usage stats** — the only network calls are the LLM requests you configured, a daily npm version check, and one batched usage ping. The ping carries buckets and fixed labels only: never your code, file paths, repo name, symbols, queries, or error messages. [`TELEMETRY.md`](TELEMETRY.md) is the complete list and `graft telemetry debug` prints exactly what your machine would send. Turn it off with `graft telemetry disable`, `DO_NOT_TRACK=1`, or by unchecking the box in `graft init`; it is off in CI and in any build from source.
 
 See [`.env.example`](.env.example) for the full list of settings (model, base URL, graph directory).
@@ -269,6 +274,7 @@ With no TTY to prompt on — CI, a Dockerfile, a piped shell — `init` writes *
 | `--list-agents` | print the known agent ids and exit |
 | `--no-mcp` | skip MCP server registration |
 | `--no-hooks` | skip hook installation |
+| `--no-statusline` | skip writing Claude Code `statusLine` (same as `GRAFT_NO_STATUSLINE=1`) |
 | `--no-global` | skip writes outside this repo (the `~/.codex/` entries below) |
 
 #### Writes outside the repo
@@ -322,7 +328,7 @@ Where a CLI agent supports user-level `hooks.json`, `init` also installs Graft's
   <br/><sub>edit a file → blast radius appears inline → graph auto-resyncs → confirmed in <code>graft viz</code></sub>
 </p>
 
-`graft init` is idempotent and never clobbers your existing `.claude/settings.json` — it merges its blocks and leaves the rest alone. Want the LLM summaries too? Run `graft build --deep` (with a key) whenever you like; auto-sync will never do it for you.
+`graft init` is idempotent and never clobbers your existing `.claude/settings.json` — it merges its blocks and leaves the rest alone. A `statusLine` that is not Graft's (anything whose command does not name `graft-statusline.cjs`) is left untouched; re-running `init` will refresh Graft's own helper command if it is already installed. Pass `--no-statusline` (or `GRAFT_NO_STATUSLINE=1`) to skip installing one at all — a project-level `statusLine` would otherwise hide a custom one in `~/.claude/settings.json`. Want the LLM summaries too? Run `graft build --deep` (with a key) whenever you like; auto-sync will never do it for you.
 
 ---
 
@@ -335,6 +341,8 @@ graft build --extensions .ts .py     # only include these code extensions
 graft build --no-reuse               # re-parse every file instead of replaying unchanged ones from cache
 graft build --follow-submodules      # include initialized submodules; persist the choice for builds + MCP refresh
 graft build --no-follow-submodules   # exclude submodules again and persist that choice (the default)
+graft build --follow-nested-repos    # include nested git clones the index doesn't track; persist the choice
+graft build --no-follow-nested-repos # exclude nested clones again and persist that choice (the default)
 
 graft ask "<task>" [dir]             # query the graph — ranked nodes + exact file:line (no LLM, no key)
 graft ask "<task>" --json            # machine-readable result
@@ -358,6 +366,7 @@ graft blast --base origin/main       # diff against the merge base with HEAD —
 graft blast --format markdown        # a PR comment: the areas a change can reach, per-symbol detail collapsed under it
 graft blast --base origin/main --name  # name those areas with one cached LLM call, instead of a full --deep build
 graft blast --export-viz site/       # also write the interactive page for this radius (what a PR comment links to)
+graft blast --no-owners              # skip "who to tag" — by default git history names the people behind each area
 graft blast --depth all --format json  # the full transitive closure, machine-readable
 
 graft check [dir]                    # fail (exit 1) if graft/ has drifted from the code (never auto-refreshes — it's the drift report)
@@ -377,9 +386,15 @@ graft init --dry-run                 # list every file it would touch, then exit
 graft init --agents cursor kiro      # wire only these agents, no prompt (ids: agents, cursor, gemini, grok, copilot, kiro, windsurf, adal, claude)
 graft init --yes                     # no prompt; wire every detected agent
 graft init --no-global               # skip writes outside this repo (~/.codex/ config + hooks)
+graft init --no-statusline           # skip Claude Code statusLine (same as GRAFT_NO_STATUSLINE=1)
 graft init --no-build                # wire the files only; don't build the graph
 graft init --all-agents              # wire every known agent, detected or not
 graft init --list-agents             # list known agent ids and exit
+
+graft uninstall [dir]                # remove every file and config entry graft wrote here (the inverse of init)
+graft uninstall -y                   # actually remove (without -y it prints what it would remove and exits)
+graft uninstall --keep-cache         # wiring only; leave graft/ and the .gitignore entry
+graft uninstall --no-global          # leave out-of-repo files alone (~/.codex, ~/.gemini)
 
 graft version                        # print the installed + latest published npm version
 graft upgrade                        # npm install -g the latest published version
@@ -447,6 +462,7 @@ Graft supports these layouts:
   is saved in `.graft/config.json`, so later no-flag builds and MCP automatic
   refreshes behave the same way. Run `graft build --no-follow-submodules` to
   restore and persist the default boundary.
+- **A git repo with other repos cloned inside it** (no gitlink, no index entry) — the shape multi-repo manifest tools like `west`, `repo`, `gclient` and `tsrc` check dependencies out into, and the shape you get by cloning an upstream into the tree to patch it locally. `--follow-submodules` cannot reach these: they have no `160000` index entry to follow. Run `graft build --follow-nested-repos` to fold them into one graph, prefixing child paths (for example, `external/parser/src/index.ts`) while honoring each clone's own Git ignore rules. A clone at a git-ignored path stays absent, since Git never reports it. The choice is saved in `.graft/config.json` and is independent of `--follow-submodules` — neither flag implies the other. Run `graft build --no-follow-nested-repos` to restore and persist the default boundary. Prefer this over the multi-repo split below when the nested repos import from each other and you want those edges in one graph; prefer the split when you want each repo scored and refreshed on its own.
 - **A folder of separate git repos** (no `.git` at the top) — `graft build`
   auto-splits: each child gets its own (git-ignored) `graft/`, and the parent
   gets a `graft/workspace.json` index. Queries from the parent federate across

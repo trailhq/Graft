@@ -24,6 +24,7 @@ import {
   readWorkspace,
 } from '../graph/workspace.js';
 import type { NodeV1 } from '../graph/types.js';
+import { canonicalToolName } from './tool-names.js';
 
 export interface ToolDef {
   name: string;
@@ -201,29 +202,15 @@ async function callWorkspaceTool(
 const NO_REFRESH_TOOLS = new Set(['graft_check_freshness']);
 
 /**
- * The pre-0.8.1 tool names, still accepted.
- *
- * The names were the reason for renaming: when a host defers graft's schemas it
- * shows the model the *names alone* — no descriptions — so `graft_ask` had to
- * compete with `Grep` on 9 characters of self-description. The new names say what
- * they do. But a name is an API: skills, saved prompts, scripts and other people's
- * notes reference the old ones, and silently 404-ing on them would be a worse
- * outcome than an ugly name. Not advertised in {@link TOOLS} — the roster stays six
- * — so this costs nothing in the payload and only ever rescues an old caller.
+ * The pre-0.8.1 tool names, still accepted, live in the dependency-free
+ * `tool-names.ts` (shared with the engine-free session hooks). The names were the
+ * reason for renaming: when a host defers graft's schemas it shows the model the
+ * *names alone* — no descriptions — so `graft_ask` had to compete with `Grep` on
+ * 9 characters. The new names say what they do; the aliases keep old callers
+ * (skills, saved prompts, notes) from 404-ing. Re-exported here so existing
+ * importers of `canonicalToolName` from this module keep working.
  */
-const TOOL_ALIASES: Record<string, string> = {
-  graft_ask: 'graft_find_code',
-  graft_grep: 'graft_find_all',
-  graft_callers: 'graft_trace_calls',
-  graft_skeleton: 'graft_file_api',
-  graft_map: 'graft_repo_map',
-  graft_check: 'graft_check_freshness',
-};
-
-/** Canonical name for a requested tool: itself, or what it was renamed to. */
-export function canonicalToolName(name: string): string {
-  return TOOL_ALIASES[name] ?? name;
-}
+export { canonicalToolName };
 
 export async function callTool(
   root: string,

@@ -81,6 +81,21 @@ export function savingsLine(body: string, saved: Savings | undefined): string {
   );
 }
 
+/**
+ * Sum every `[graft] tokens saved ≈ N` footer in a blob of text — the reader
+ * half of {@link savingsLine}, kept next to the writer so the two never drift.
+ * A single blob can carry several (an agent that made two graft calls in one
+ * turn); the `SAVINGS_TURN_NUDGE` deliberately omits the pattern, so its example
+ * text is not miscounted here.
+ */
+export function sumSavingsFooters(text: string): number {
+  let total = 0;
+  for (const m of text.matchAll(/\[graft\] tokens saved ≈ ([\d,]+)/g)) {
+    total += Number(m[1].replace(/,/g, '')) || 0;
+  }
+  return total;
+}
+
 /** Render `body` with the savings line on TOP.
  *
  * Deliberately a header, not a footer: agents routinely pipe graft through

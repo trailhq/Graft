@@ -50,7 +50,6 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   // These ship a tags.scm (calls + symbols); ocaml/zig have none and use the
   // node-kind walker fallback (symbols only) — still one row, zero query.
   { name: "scala", exts: [".scala", ".sc"], wasm: "scala" },
-  { name: "swift", exts: [".swift"], wasm: "swift" },
   { name: "elixir", exts: [".ex", ".exs"], wasm: "elixir" },
   { name: "solidity", exts: [".sol"], wasm: "solidity" },
   { name: "ocaml", exts: [".ml", ".mli"], wasm: "ocaml" },
@@ -87,7 +86,7 @@ const KIND: Record<string, Kind> = {
 
 // Loaded grammars + compiled tags queries, keyed by graft lang name. Populated by
 // warmGenericGrammars; read synchronously by extractGeneric.
-interface Loaded { language: unknown; query: unknown | null }
+export interface Loaded { language: unknown; query: unknown | null }
 const loaded = new Map<string, Loaded>();
 let tsMod: typeof import("web-tree-sitter") | null = null;
 let initPromise: Promise<void> | null = null;
@@ -155,6 +154,18 @@ export function isWarm(langName: string): boolean {
   return loaded.has(langName);
 }
 
+/** Test seam: swap in (or, with null, remove) a grammar entry, returning the
+ * previous one so the caller can restore it. The parse-failure path in
+ * extractGeneric needs a grammar that throws deterministically; the real crash
+ * that motivated it (tree-sitter-wasm PHP on heredocs, #139) is heap-state
+ * dependent, so tests inject a fake here instead of depending on it. */
+export function swapGrammarForTest(name: string, entry: Loaded | null): Loaded | null {
+  const prev = loaded.get(name) ?? null;
+  if (entry) loaded.set(name, entry);
+  else loaded.delete(name);
+  return prev;
+}
+
 /** Load one grammar from the tree-sitter-wasms bundle, initialising
  * web-tree-sitter on first call. Null when the wasm is missing or won't
  * instantiate — never throws, so a caller degrades instead of failing the build.
@@ -220,8 +231,13 @@ export function extractGeneric(rel: string, source: string, langName: string): E
     const parser = new tsMod.Parser();
     parser.setLanguage(entry.language as never);
     tree = parser.parse((i: number) => source.slice(i, i + PARSE_CHUNK));
-  } catch {
-    return { nodes, rawEdges };
+  } catch (err) {
+    // A grammar that throws (e.g. a WASM "memory access out of bounds" from an
+    // external scanner) is not a per-file syntax problem: swallowing it here left
+    // the file with only its file node and the build reporting success. Rethrow so
+    // build.ts records it in `errors`, the CLI prints it, and the extract cache
+    // remembers the failure instead of caching an empty result as clean.
+    throw new Error(`${langName} grammar threw: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (!tree) return { nodes, rawEdges };
 

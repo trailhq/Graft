@@ -17,6 +17,7 @@ import { impactOfMany, type EdgeHit } from "../graph/traverse.js";
 import type { GraphV1, NodeV1 } from "../graph/types.js";
 import { dirLabel, moduleIndex, parentDir, shortLabel, type ModuleIndex } from "./modules.js";
 import type { ChangedFile } from "./diff.js";
+import type { Owner, Reviewer } from "./owners.js";
 
 const SPAN_RE = /^L(\d+)-L(\d+)$/;
 
@@ -74,6 +75,9 @@ export interface ImpactedModule {
   symbols: Impacted[];
   /** Changed files whose edges reached this module — the diagram's arrows. */
   from: string[];
+  /** Who has worked on these files, best first. Filled in by `attachOwners`;
+   * absent when the radius was taken outside a git repository. */
+  owners?: Owner[];
 }
 
 /**
@@ -109,6 +113,8 @@ export interface ChangedArea {
   /** Changed symbol names, behaviour first — the backstop label and the naming
    * prompt both read from this. */
   seedNames: string[];
+  /** Who has worked on these files, best first — see {@link ImpactedModule.owners}. */
+  owners?: Owner[];
 }
 
 export interface BlastReport {
@@ -127,6 +133,9 @@ export interface BlastReport {
   areas: ChangedArea[];
   /** Test-only dependents, kept out of `modules` so they cannot crowd it out. */
   testModules: ImpactedModule[];
+  /** Who to tag, ranked across every area. Absent outside a git repository, and
+   * empty when the author is the only person in the history. */
+  reviewers?: Reviewer[];
 }
 
 function spanBounds(span: string): { start: number; end: number } | null {
