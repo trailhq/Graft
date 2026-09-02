@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **tree-sitter runtime bumped to 0.25**, with `tree-sitter-python` and
+  `tree-sitter-go` moved to `0.25.x` to match its peer range. The grammars that
+  declare an older peer range — `tree-sitter-java`, `tree-sitter-kotlin`,
+  `tree-sitter-php`, `tree-sitter-r` and `tree-sitter-typescript` — join
+  `tree-sitter-swift` in the `overrides` block, so the tree resolves to exactly
+  one copy of `tree-sitter`. All eight grammars were verified to load and parse
+  under 0.25.1; the stale peer metadata does not reflect an ABI break. The
+  `overrides` key for R must be the alias `tree-sitter-r`, not
+  `@davisvaughan/tree-sitter-r` (unlike `allowScripts`, which keys by the
+  resolved package). `allowScripts` keys were updated for the three moved
+  versions. Dependabot is told not to bump `tree-sitter-typescript` on its own.
+
 ## 0.16.0
 
 ### Added
