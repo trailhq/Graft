@@ -178,6 +178,29 @@ test('--no-global writes nothing outside the repo', () => {
   assert.ok(existsSync(join(repo, '.mcp.json')));
 });
 
+test('--no-mcp skips user-scope MCP but still installs user-level hooks', () => {
+  const home = tmpRepo('cgnomcp');
+  const repo = tmpRepo('cgnomcprepo');
+
+  const r = runInit(repo, { build: false, mcp: false, home });
+
+  assert.ok(!existsSync(userMcpOf(home)));
+  assert.ok(existsSync(shimOf(home)));
+  assert.ok(readJson(settingsOf(home)).hooks?.SessionStart);
+  assert.ok(r.global.every((w) => w.id !== 'claude-global-mcp'));
+});
+
+test('--no-hooks skips user-level hook files but still registers user-scope MCP', () => {
+  const home = tmpRepo('cgnohooks');
+  const repo = tmpRepo('cgnohooksrepo');
+
+  runInit(repo, { build: false, hooks: false, home });
+
+  assert.equal(existsSync(shimOf(home)), false);
+  assert.equal(existsSync(settingsOf(home)), false);
+  assert.ok(readJson(userMcpOf(home)).mcpServers?.graft);
+});
+
 /* ------------------------------------------------------------------ *
  * the plan, and putting it back
  * ------------------------------------------------------------------ */

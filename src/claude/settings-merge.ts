@@ -113,7 +113,7 @@ function applyStatusline(
 
 export function mergeGraftSettings(
   existing: Json,
-  opts: { statusline?: boolean } = {},
+  opts: { statusline?: boolean; hooks?: boolean } = {},
 ): { merged: Json; warnings: string[] } {
   const merged: Json = { ...(existing ?? {}) };
   const warnings: string[] = [];
@@ -129,10 +129,21 @@ export function mergeGraftSettings(
   );
 
   merged.hooks = { ...(merged.hooks ?? {}) };
-  for (const [event, blocks] of Object.entries(graftBlocks())) {
-    const prior = Array.isArray(merged.hooks[event]) ? merged.hooks[event] : [];
-    const foreign = prior.filter((e: Json) => !isGraftEntry(e)); // drop old Graft entries → idempotent
-    merged.hooks[event] = [...foreign, ...blocks];
+  if (opts.hooks === false) {
+    // `--no-hooks`: drop graft hook entries, keep anyone else's.
+    for (const event of Object.keys(merged.hooks)) {
+      const prior = Array.isArray(merged.hooks[event]) ? merged.hooks[event] : [];
+      const foreign = prior.filter((e: Json) => !isGraftEntry(e));
+      if (foreign.length) merged.hooks[event] = foreign;
+      else delete merged.hooks[event];
+    }
+    if (Object.keys(merged.hooks).length === 0) delete merged.hooks;
+  } else {
+    for (const [event, blocks] of Object.entries(graftBlocks())) {
+      const prior = Array.isArray(merged.hooks[event]) ? merged.hooks[event] : [];
+      const foreign = prior.filter((e: Json) => !isGraftEntry(e)); // drop old Graft entries → idempotent
+      merged.hooks[event] = [...foreign, ...blocks];
+    }
   }
 
   // Drop graft's own prior regex before re-adding, so a change to FOOTER replaces

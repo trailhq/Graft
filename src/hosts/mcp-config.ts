@@ -14,8 +14,9 @@ import { homedir } from 'node:os';
 import type { PlannedWrite } from './plan.js';
 import { readJsonObject, type ConfigWrite } from './config-write.js';
 
-/** MCP registration reports the same write-result record every installer does. */
-export type McpWrite = ConfigWrite;
+/** MCP registration reports the same write-result record every installer does,
+ *  plus `skipped` when `--no-mcp` declines the write. */
+export type McpWrite = ConfigWrite | { id: string; path: string; action: 'skipped' };
 
 /** A planned MCP write, plus the detail needed to actually perform it. */
 export interface McpTarget extends PlannedWrite {

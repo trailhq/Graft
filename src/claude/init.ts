@@ -16,17 +16,18 @@ import type { PlannedWrite } from '../hosts/plan.js';
  * can report them up front. All repo-local: the Claude Code layer never writes
  * outside the project.
  */
-export function claudeTargets(dir: string): PlannedWrite[] {
+export function claudeTargets(dir: string, opts: { mcp?: boolean; hooks?: boolean } = {}): PlannedWrite[] {
   const t = (path: string, what: string, kind: PlannedWrite['kind'] = 'claude'): PlannedWrite =>
     ({ hostId: 'claude', id: 'claude', path, scope: 'repo', kind, what });
-  return [
-    t(join(dir, '.claude', 'settings.json'), 'graft statusline + hook blocks'),
+  const writes: PlannedWrite[] = [
+    t(join(dir, '.claude', 'settings.json'), opts.hooks === false ? 'graft statusline' : 'graft statusline + hook blocks'),
     t(join(dir, '.claude', 'helpers', 'graft-statusline.cjs'), 'statusline shim'),
-    t(join(dir, '.claude', 'helpers', 'graft-hooks.cjs'), 'hooks shim'),
-    t(join(dir, '.claude', 'skills', 'graft', 'SKILL.md'), 'graft skill'),
-    // Tagged 'mcp' so the picker doesn't label Claude Code as having no MCP.
-    t(join(dir, '.mcp.json'), 'mcpServers.graft', 'mcp'),
   ];
+  if (opts.hooks !== false) writes.push(t(join(dir, '.claude', 'helpers', 'graft-hooks.cjs'), 'hooks shim'));
+  writes.push(t(join(dir, '.claude', 'skills', 'graft', 'SKILL.md'), 'graft skill'));
+  // Tagged 'mcp' so the picker doesn't label Claude Code as having no MCP.
+  if (opts.mcp !== false) writes.push(t(join(dir, '.mcp.json'), 'mcpServers.graft', 'mcp'));
+  return writes;
 }
 
 /**
@@ -62,9 +63,10 @@ export interface InitResult {
 
 export function runInit(
   dir: string,
-  opts: { build?: boolean; cliPath?: string; statusline?: boolean; global?: boolean; home?: string } = {},
+  opts: { build?: boolean; cliPath?: string; mcp?: boolean; hooks?: boolean; statusline?: boolean; global?: boolean; home?: string } = {},
 ): InitResult {
-  // Same list `--dry-run` and the picker report, so the two can't drift apart.
+  // Unfiltered path list so names stay stable when `--no-mcp` / `--no-hooks`
+  // omit a write. The filtered list is what `--dry-run` reports.
   const [settings, statusline, hooks, skill, mcpTarget] = claudeTargets(dir).map((t) => t.path);
 
   mkdirSync(dirname(statusline), { recursive: true });
@@ -72,14 +74,17 @@ export function runInit(
   const settingsPath = settings;
   let existing: Record<string, any> = {};
   try { existing = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch { /* none/invalid → start fresh */ }
-  const { merged, warnings } = mergeGraftSettings(existing, { statusline: opts.statusline });
+  const { merged, warnings } = mergeGraftSettings(existing, { hooks: opts.hooks, statusline: opts.statusline });
   writeFileSync(settingsPath, `${JSON.stringify(merged, null, 2)}\n`);
 
   const sl = statusline;
-  const hk = hooks;
   const bakedDir = claudeDistDir(); // absolute <pkg>/dist/claude — the shims' primary resolution path
   writeFileSync(sl, statuslineShim(bakedDir)); chmodSync(sl, 0o755);
-  writeFileSync(hk, hooksShim(bakedDir)); chmodSync(hk, 0o755);
+  const shims = [sl];
+  if (opts.hooks !== false) {
+    writeFileSync(hooks, hooksShim(bakedDir)); chmodSync(hooks, 0o755);
+    shims.push(hooks);
+  }
 
   // Install the graft skill — the piece that redirects the agent to graft/ before it
   // greps source. Overwritten each run (graft owns this file), like the shims above.
@@ -90,15 +95,20 @@ export function runInit(
   // Register the graft MCP server in the project's .mcp.json so Claude Code
   // exposes graft_find_code/graft_trace_calls/etc. as tools — the same keyed merge the
   // other hosts use (existing servers preserved; unparseable files skipped).
-  const mcp = mergeJsonKey('claude', mcpTarget, 'mcpServers', serverEntry());
+  // `--no-mcp` skips this write: Claude Code can still call the CLI via the skill.
+  const mcp = opts.mcp === false
+    ? { id: 'claude', path: mcpTarget, action: 'skipped' as const }
+    : mergeJsonKey('claude', mcpTarget, 'mcpServers', serverEntry());
 
   // The same wiring again, one level up in `~/.claude`, because everything above
   // this line can be erased by a `.gitignore` and lost to `git worktree add`. See
   // hosts/claude-global.ts for the failure that motivates it. Gated on the same
   // flag `registerMcpConfigs` uses, so `--no-global` still means "nothing outside
   // this repo".
-  const global = opts.global === false ? [] : installClaudeGlobal(opts.home ?? homedir());
+  const global = opts.global === false
+    ? []
+    : installClaudeGlobal(opts.home ?? homedir(), { mcp: opts.mcp, hooks: opts.hooks });
 
   const built = buildGraphIfMissing(dir, opts);
-  return { settingsPath, shims: [sl, hk], skill: skillPath, mcp, global, warnings, built };
+  return { settingsPath, shims, skill: skillPath, mcp, global, warnings, built };
 }

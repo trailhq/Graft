@@ -137,3 +137,15 @@ test('permissions object with no allow key gets one added; other keys preserved'
   assert.deepEqual(merged.permissions.deny, ['Bash(rm:*)']);
   assert.deepEqual(merged.permissions.allow, ['Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
 });
+
+test('hooks:false drops graft hook blocks and leaves foreign hooks', () => {
+  const existing = {
+    hooks: {
+      Stop: [{ hooks: [{ type: 'command', command: 'mine.sh' }] }],
+    },
+  };
+  const { merged } = mergeGraftSettings(existing, { hooks: false });
+  assert.equal(merged.hooks.Stop.length, 1);
+  assert.equal(merged.hooks.Stop[0].hooks[0].command, 'mine.sh');
+  assert.equal(merged.hooks.PostToolUse, undefined);
+});

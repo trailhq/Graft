@@ -54,14 +54,20 @@ export function globalHelpersDir(home: string): string {
  * a worktree is its own project entry there, so a local registration would miss it
  * for precisely the same reason the repo file does.
  */
-export function claudeGlobalTargets(home: string): PlannedWrite[] {
+export function claudeGlobalTargets(home: string, opts: { mcp?: boolean; hooks?: boolean } = {}): PlannedWrite[] {
   const g = (id: string, path: string, kind: PlannedWrite['kind'], what: string): PlannedWrite =>
     ({ hostId: 'claude', id, path, scope: 'global', kind, what });
-  return [
-    g('claude-global-shim', join(globalHelpersDir(home), 'graft-hooks.cjs'), 'hook', 'hooks shim (user level)'),
-    g('claude-global-hooks', join(home, '.claude', 'settings.json'), 'hook', 'SessionStart / UserPromptSubmit / PostToolUse / Stop'),
-    g('claude-global-mcp', join(home, '.claude.json'), 'mcp', 'mcpServers.graft'),
-  ];
+  const writes: PlannedWrite[] = [];
+  // `--no-hooks` / `--no-mcp` must skip the user-level copies too — otherwise
+  // `~/.claude` would silently undo the repo-level skip in every worktree.
+  if (opts.hooks !== false) {
+    writes.push(g('claude-global-shim', join(globalHelpersDir(home), 'graft-hooks.cjs'), 'hook', 'hooks shim (user level)'));
+    writes.push(g('claude-global-hooks', join(home, '.claude', 'settings.json'), 'hook', 'SessionStart / UserPromptSubmit / PostToolUse / Stop'));
+  }
+  if (opts.mcp !== false) {
+    writes.push(g('claude-global-mcp', join(home, '.claude.json'), 'mcp', 'mcpServers.graft'));
+  }
+  return writes;
 }
 
 /** Merge graft's hook blocks into a settings file, preserving everything else. */
@@ -90,35 +96,46 @@ function upsertGlobalHooks(id: string, path: string, helpers: string): GlobalWri
  * Best-effort by contract, like every other writer here: a failure is reported as an
  * action, never raised, so a bad `~/.claude.json` can't fail a `graft init`.
  */
-export function installClaudeGlobal(home: string): GlobalWrite[] {
-  const [shim, settings, mcp] = claudeGlobalTargets(home);
+export function installClaudeGlobal(home: string, opts: { mcp?: boolean; hooks?: boolean } = {}): GlobalWrite[] {
+  const targets = claudeGlobalTargets(home, opts);
+  const byId = new Map(targets.map((t) => [t.id, t]));
   const out: GlobalWrite[] = [];
 
-  try {
-    out.push(writeOwned(shim.id, shim.path, hooksShim(claudeDistDir()), 0o755));
-  } catch {
-    out.push({ id: shim.id, path: shim.path, action: 'skipped-unparseable' });
-  }
-
-  // Only wire the hooks once the shim they call is actually on disk — a hook
-  // entry pointing at a missing file is an error in every session, which is a
-  // worse failure than not installing.
-  if (out[0].action !== 'skipped-unparseable') {
+  const shim = byId.get('claude-global-shim');
+  if (shim) {
     try {
-      // Posix form in the command string: `join` gives backslashes on Windows and
-      // the template appends `/graft-hooks.cjs`, so the raw path produces a mixed
-      // `C:\Users\…\helpers/graft-hooks.cjs`. Node accepts forward slashes on
-      // Windows, so one separator throughout is both correct and readable.
-      out.push(upsertGlobalHooks(settings.id, settings.path, toPosixPath(globalHelpersDir(home))));
+      out.push(writeOwned(shim.id, shim.path, hooksShim(claudeDistDir()), 0o755));
     } catch {
-      out.push({ id: settings.id, path: settings.path, action: 'skipped-unparseable' });
+      out.push({ id: shim.id, path: shim.path, action: 'skipped-unparseable' });
     }
   }
 
-  try {
-    out.push(mergeJsonKey(mcp.id, mcp.path, 'mcpServers', serverEntry()));
-  } catch {
-    out.push({ id: mcp.id, path: mcp.path, action: 'skipped-unparseable' });
+  const settings = byId.get('claude-global-hooks');
+  if (settings) {
+    // Only wire the hooks once the shim they call is actually on disk — a hook
+    // entry pointing at a missing file is an error in every session, which is a
+    // worse failure than not installing.
+    const shimWrite = out.find((w) => w.id === 'claude-global-shim');
+    if (!shimWrite || shimWrite.action !== 'skipped-unparseable') {
+      try {
+        // Posix form in the command string: `join` gives backslashes on Windows and
+        // the template appends `/graft-hooks.cjs`, so the raw path produces a mixed
+        // `C:\Users\…\helpers/graft-hooks.cjs`. Node accepts forward slashes on
+        // Windows, so one separator throughout is both correct and readable.
+        out.push(upsertGlobalHooks(settings.id, settings.path, toPosixPath(globalHelpersDir(home))));
+      } catch {
+        out.push({ id: settings.id, path: settings.path, action: 'skipped-unparseable' });
+      }
+    }
+  }
+
+  const mcp = byId.get('claude-global-mcp');
+  if (mcp) {
+    try {
+      out.push(mergeJsonKey(mcp.id, mcp.path, 'mcpServers', serverEntry()));
+    } catch {
+      out.push({ id: mcp.id, path: mcp.path, action: 'skipped-unparseable' });
+    }
   }
 
   return out;

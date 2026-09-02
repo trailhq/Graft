@@ -36,6 +36,61 @@ test('runInit scaffolds settings + both shims + the skill (build skipped)', () =
   assert.ok(s.statusLine.command.includes('graft-statusline.cjs'));
   assert.ok(s.hooks.Stop[0].hooks[0].command.includes('graft-hooks.cjs'));
   assert.deepEqual(s.permissions.allow, ['Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
+  assert.ok(existsSync(join(d, '.mcp.json')), 'default init still registers Claude Code MCP');
+});
+
+test('runInit mcp:false skips .mcp.json', () => {
+  const d = fresh();
+  const home = fresh();
+  const r = runInit(d, { build: false, mcp: false, home });
+  assert.ok(existsSync(join(d, '.claude', 'settings.json')));
+  assert.ok(existsSync(join(d, '.claude', 'helpers', 'graft-hooks.cjs')));
+  assert.ok(!existsSync(join(d, '.mcp.json')));
+  assert.equal(r.mcp.action, 'skipped');
+  assert.ok(!existsSync(join(home, '.claude.json')), 'user-scope MCP is skipped too');
+  assert.ok(existsSync(join(home, '.claude', 'helpers', 'graft-hooks.cjs')), 'hooks still land in ~');
+});
+
+test('runInit hooks:false skips the hooks shim and graft hook blocks', () => {
+  const d = fresh();
+  const home = fresh();
+  const r = runInit(d, { build: false, hooks: false, home });
+  assert.ok(existsSync(join(d, '.claude', 'helpers', 'graft-statusline.cjs')));
+  assert.ok(!existsSync(join(d, '.claude', 'helpers', 'graft-hooks.cjs')));
+  assert.equal(r.shims.length, 1);
+  const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
+  assert.equal(s.hooks, undefined);
+  assert.ok(s.statusLine.command.includes('graft-statusline.cjs'));
+  assert.ok(!existsSync(join(home, '.claude', 'helpers', 'graft-hooks.cjs')), 'user-level hook shim skipped');
+  assert.ok(existsSync(join(home, '.claude.json')), 'user-scope MCP still lands');
+});
+
+test('CLI: --no-mcp --agents claude writes skill/hooks but no .mcp.json', () => {
+  const d = fresh();
+  const res = spawnSync(
+    process.execPath,
+    ['--import', 'tsx', 'src/cli.ts', 'init', d, '--no-build', '--agents', 'claude', '--no-mcp'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(existsSync(join(d, '.claude', 'settings.json')));
+  assert.ok(existsSync(join(d, '.claude', 'helpers', 'graft-hooks.cjs')));
+  assert.ok(!existsSync(join(d, '.mcp.json')));
+  assert.match(res.stderr, /skipped Claude Code MCP registration/);
+});
+
+test('CLI: --no-hooks --agents claude writes statusline + skill but no hook shim', () => {
+  const d = fresh();
+  const res = spawnSync(
+    process.execPath,
+    ['--import', 'tsx', 'src/cli.ts', 'init', d, '--no-build', '--agents', 'claude', '--no-hooks'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(existsSync(join(d, '.claude', 'helpers', 'graft-statusline.cjs')));
+  assert.ok(!existsSync(join(d, '.claude', 'helpers', 'graft-hooks.cjs')));
+  const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
+  assert.equal(s.hooks, undefined);
 });
 
 test('runInit overwrites a stale skill file', () => {

@@ -65,7 +65,7 @@ function instructionTarget(repo: string, host: HostTarget): PlannedWrite {
  * touch. Claude Code comes first — it's the deep integration and the picker's
  * default. `ids`, when given, restricts the plan to those hosts.
  */
-export function planInit(repo: string, opts: { home?: string; ids?: string[] } = {}): HostPlan[] {
+export function planInit(repo: string, opts: { home?: string; ids?: string[]; mcp?: boolean; hooks?: boolean } = {}): HostPlan[] {
   const home = opts.home ?? homedir();
   const probe = probeFor(home, repo);
   const detected = new Set(detectHosts(probe).map((h) => h.id));
@@ -74,7 +74,7 @@ export function planInit(repo: string, opts: { home?: string; ids?: string[] } =
     // Repo writes plus the user-level copy under `~/.claude` — the picker and
     // `--dry-run` render 'global' writes in their own section, so a user sees
     // what lands outside the repo before agreeing to it.
-    { id: 'claude', name: 'Claude Code', detected: true, writes: [...claudeTargets(repo), ...claudeGlobalTargets(home)] },
+    { id: 'claude', name: 'Claude Code', detected: true, writes: [...claudeTargets(repo, { mcp: opts.mcp, hooks: opts.hooks }), ...claudeGlobalTargets(home, { mcp: opts.mcp, hooks: opts.hooks })] },
     ...HOSTS.map((host) => ({
       id: host.id,
       name: host.name,

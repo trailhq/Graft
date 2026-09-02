@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`graft init --no-mcp` / `--no-hooks` were ignored for Claude Code.** Those
+  flags only reached `runHostsInit` (Cursor/Codex/…). `runInit` always wrote
+  `.mcp.json` and the Claude hook shim/settings — including the user-level
+  copies under `~/.claude`. They now skip the matching Claude Code writes too,
+  `--dry-run` / the picker drop those paths, and a later wiring refresh
+  replays the stamp so an upgrade does not put them back.
+
 ## 0.16.0
 
 ### Added

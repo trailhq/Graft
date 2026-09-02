@@ -58,6 +58,19 @@ test('claude writes: five in the repo, three in ~ that no .gitignore can eat', (
   assert.ok(globals.every((w) => !w.path.startsWith(repo)), 'nothing global lands in the repo');
 });
 
+test('claude plan omits .mcp.json and the hooks shim when those flags are off', () => {
+  const repo = fresh();
+  const home = fullHome();
+  const claude = planInit(repo, { home, ids: ['claude'], mcp: false, hooks: false })[0];
+  // Repo: settings + statusline + skill. Global copies of hooks/MCP are skipped too.
+  assert.equal(claude.writes.length, 3);
+  assert.ok(!claude.writes.some((w) => w.path.endsWith('.mcp.json')));
+  assert.ok(!claude.writes.some((w) => w.path.includes('graft-hooks.cjs')));
+  assert.ok(!claude.writes.some((w) => w.path.endsWith('.claude.json')));
+  assert.equal(claude.writes.filter((w) => w.scope === 'global').length, 0);
+  assert.ok(claude.writes.some((w) => w.path.endsWith('settings.json')));
+});
+
 test('the three ~/.codex writes are scoped global', () => {
   const home = fullHome();
   const agents = planInit(fresh(), { home, ids: ['agents'] })[0];
