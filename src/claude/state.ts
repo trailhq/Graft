@@ -51,6 +51,20 @@ export interface SessionState {
   /** `uuid` of the last assistant reply already examined, so a Stop that fires
    * without new prose (or fires twice) can't count one reply as two turns. */
   lastTallyUuid?: string;
+  /** Running micro-dollar cost of the input tokens this session has been billed
+   * for, and the tokens that bought. Their ratio is the blended price of one
+   * input token here — model and cache-hit ratio already folded in — which is
+   * what turns `savedTokens` into a dollar figure. Stored as the pair rather
+   * than the ratio so the rate re-blends as the session's cache warms rather
+   * than freezing at whatever turn one happened to pay. Optional: absent on a
+   * host that exposes no transcript, and on turn one of every session. */
+  inputCostMicros?: number;
+  inputTokensBilled?: number;
+  /** `uuid` of the last assistant entry already billed, so a duplicate Stop
+   * can't charge one turn twice. Separate from `lastTallyUuid` because the two
+   * are sampled on different turns: the tally only on graft turns, the cost on
+   * every one. */
+  lastBillingUuid?: string;
   /** Set once this session has been rolled up into a `session_summary`
    * telemetry event, so a resumed or long-lived session is counted once.
    * A flag rather than deleting the file: the file still holds `lastQuery` and

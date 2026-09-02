@@ -5,6 +5,7 @@ import type { GraphV1, EdgeV1 } from '../graph/types.js';
 // "did we hit a real name, or match broadly enough to trust anyway" is the same
 // question in both places, and one set of calibrated numbers beats two.
 import { HIGH_FLOOR, STRONG_FLOOR } from '../ask/fuse.js';
+import { dollarsSaved, formatDollars } from '../context/price.js';
 
 const C = {
   indigo: (s: string) => `\x1b[38;2;84;111;255m${s}\x1b[0m`,
@@ -32,7 +33,14 @@ export function renderStatusline(
   const top = [C.muted('◤ ') + C.indigo('graft'), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];
   top.push(freshnessSegment(stats));
   const saved = session?.savedTokens ?? 0;
-  if (saved > 0) top.push(C.indigo(`~${saved.toLocaleString()} tok saved`));
+  if (saved > 0) {
+    // Dollars only once a turn has actually been billed — see context/price.ts.
+    // Until then (turn one, or a host with no transcript) the token count
+    // stands alone rather than carrying a rate nobody measured.
+    const usd = dollarsSaved(saved, session?.inputCostMicros, session?.inputTokensBilled);
+    const money = usd === null ? '' : ` · ~${formatDollars(usd)}`;
+    top.push(C.indigo(`~${saved.toLocaleString()} tok saved${money}`));
+  }
 
   const bottom: string[] = [];
   if (typeof ctx.ctxPct === 'number') bottom.push(C.text(`ctx ${ctx.ctxPct}%`));
@@ -217,7 +225,7 @@ export function formatOrientation(indexMd: string, budgetBytes = 1500, staleNote
     `  In a monorepo, add --in <path>/ to ask/grep/callers to scope to one sub-project; hits are labeled [scope/].\n` +
     `  Already know the file or symbol to change? Go straight to it: graft grep "<symbol>", read the span, edit. Save ask for when you don't yet know where the code lives.\n` +
     `  Refactor, rename, or multi-file change? Run graft callers <sym> --depth all FIRST to map every connected file; editing the primary file and stopping is the classic miss (platform siblings, a new file to extract).\n` +
-    `Each tool opens its output with a "[graft] tokens saved ≈ N" line; when you used graft this turn, close your reply with a one-line tally of the total saved (e.g. 🌱 graft saved ~12k tokens this turn, 3 calls). Never pipe a graft command through head/tail — it is already capped, and clipping drops that line.\n`;
+    `Each tool opens its output with a "[graft] tokens saved ≈ N" line, sometimes with its dollar value; when you used graft this turn, close your reply with a one-line tally of the total saved, dollars included when given (e.g. 🌱 graft saved ~12k tokens (~$0.04) this turn, 3 calls). Never price tokens yourself; never pipe graft through head/tail — it is already capped, and clipping drops that line.\n`;
   const banner = staleNote ? `${staleNote}\n\n` : "";
   return `${banner}${directive}\nrepo map (graft/INDEX.md):\n${indexMd.slice(0, budgetBytes)}`;
 }

@@ -4,7 +4,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { savingsFor, savingsLine, withSavings, toTokens } from '../src/context/savings.js';
+import { savingsFor, savingsLine, withSavings, toTokens, setInputRate } from '../src/context/savings.js';
+import { hasSavingsTally } from '../src/claude/tally.js';
 import type { GraphV1, NodeV1 } from '../src/graph/types.js';
 
 function fileNode(path: string, chars?: number): NodeV1 {
@@ -77,4 +78,46 @@ test('withSavings: puts the line on top so `head -N` and host truncation keep it
 
 test('withSavings: returns the body untouched when there is nothing to claim', () => {
   assert.equal(withSavings('body', undefined), 'body');
+});
+
+test('the turn nudge carries no dollar figure until a rate is set', () => {
+  setInputRate(null);
+  const footer = savingsLine('body', { files: 2, baselineChars: 8000 });
+  assert.match(footer, /graft saved ~N tokens this turn/);
+  assert.doesNotMatch(footer, /\$/, 'no rate measured, so nothing is priced');
+});
+
+test('the turn nudge prices this call once a rate is set', () => {
+  // $5/Mtok: a 1,000-token saving is worth half a cent, which must read as
+  // "<$0.01" rather than "$0.00" — see formatDollars.
+  setInputRate(5);
+  const footer = savingsLine('x'.repeat(400), { files: 2, baselineChars: 8000 });
+  assert.match(footer, /worth <\$0\.01/);
+  assert.match(footer, /~\$X.*this turn/, 'the example shows the dollar-bearing form');
+  setInputRate(null);
+});
+
+test('a priced nudge still leaves exactly one number for the accumulator', () => {
+  // The nudge must never grow a second `[graft] tokens saved ≈ <n>` — the
+  // PostToolUse accumulator sums every match, so an example carrying the
+  // pattern would double-count the call.
+  setInputRate(5);
+  const footer = savingsLine('x'.repeat(400), { files: 2, baselineChars: 8000 });
+  assert.equal((footer.match(/\[graft\] tokens saved ≈ [\d,]+/g) ?? []).length, 1);
+  setInputRate(null);
+});
+
+test('a priced nudge still matches the reported-turns tally regex', () => {
+  // Adding money to the example must not quietly zero `reportedTurns`, which
+  // measures whether the agent told the user anything at all.
+  assert.equal(hasSavingsTally('🌱 graft saved ~12,400 tokens (~$0.04) this turn'), true);
+});
+
+test('setInputRate refuses a rate that would render as $NaN', () => {
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+    setInputRate(bad);
+    const footer = savingsLine('x'.repeat(400), { files: 2, baselineChars: 8000 });
+    assert.doesNotMatch(footer, /\$/, `rate ${bad} must price nothing`);
+  }
+  setInputRate(null);
 });

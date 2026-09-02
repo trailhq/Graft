@@ -10,7 +10,7 @@ import { graftCliPath, claudeScriptPath } from './paths.js';
 import { runUpkeep } from '../upkeep-run.js';
 import { runningVersion } from '../upkeep.js';
 import { flushClosedSessions, summarizeSession } from '../telemetry/sessions.js';
-import { hasSavingsTally, lastAssistantTurn } from './tally.js';
+import { hasSavingsTally, lastAssistantTurn, lastTurnBilling } from './tally.js';
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
 import { classifyToolUse, isMcpToolName, isGraftMcpTool, parseSavings, recordToolUse, type ToolKind } from './session-metrics.js';
 
@@ -314,6 +314,34 @@ function cursorSessionId(input: any): string {
 }
 
 /**
+ * At turn end: what did this turn's input tokens actually cost?
+ *
+ * Deliberately ungated, unlike {@link countTallyTurn}: the blended rate has to
+ * describe the session, and graft turns are not a fair sample of it — they are
+ * the long, tool-heavy, cache-warm ones. Sampling only those would report a
+ * cheaper token than the session really pays.
+ *
+ * Accumulates the pair, never the ratio, so the rate re-blends every turn. A
+ * turn already billed (a duplicate Stop, or a Stop racing the transcript write)
+ * is skipped on its uuid.
+ */
+function sampleTurnCost(input: any, dir: string): void {
+  try {
+    const id = input?.session_id || 'default';
+    const billing = lastTurnBilling(input?.transcript_path);
+    if (!billing) return;
+    const s = readSession(dir, id);
+    if (billing.uuid === s.lastBillingUuid) return;
+    s.inputCostMicros = (s.inputCostMicros ?? 0) + billing.costMicros;
+    s.inputTokensBilled = (s.inputTokensBilled ?? 0) + billing.tokens;
+    s.lastBillingUuid = billing.uuid;
+    writeSession(dir, id, s);
+  } catch {
+    // A billing estimate is never worth failing the graph sync over.
+  }
+}
+
+/**
  * At turn end: did the reply the user just read say what graft saved?
  *
  * Runs only on turns the tool-savings hook flagged, so a conversational turn
@@ -346,6 +374,7 @@ function countTallyTurn(input: any, dir: string): void {
 }
 
 function handleStop(input: any, dir: string): void {
+  sampleTurnCost(input, dir);
   countTallyTurn(input, dir);
   // sync-run.js ships next to this module inside the package, so it resolves in
   // any repo that installs graft (not just graft's own). Defensive existsSync:

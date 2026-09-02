@@ -40,7 +40,8 @@ import { homedir } from "node:os";
 import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurrentVersion, runUpgrade } from "./cli-meta.js";
 import { patchBuildConfig, type BuildConfig } from "./util/state.js";
 import { normalizePathPrefix } from "./util/paths.js";
-import { latestSession, formatSessionStats } from "./claude/session-metrics.js";
+import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
+import { setInputRate } from "./context/savings.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readUpdateCache, refreshUpdateCache, writeStamp } from "./upkeep.js";
 import {
   errorCode,
@@ -77,6 +78,9 @@ let queryNote: { repo?: string; hit?: "yes" | "no" } = {};
  *  sites stay one line. */
 function noteQuery(dir: string): string {
   queryNote.repo = dir;
+  // Every retrieval command funnels through here, which makes it the one place
+  // that can price this session's tokens before a formatter needs the number.
+  setInputRate(sessionInputRate(dir));
   return dir;
 }
 
