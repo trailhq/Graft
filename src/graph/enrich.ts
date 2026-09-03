@@ -19,7 +19,14 @@
  * once, to cut `crux.code` verbatim from the source. `crux.span` is a pointer
  * only and is never used to re-slice.
  */
-import { formatCruxMiss, type CruxMissKind, type CruxSummarizer, type NodeCrux, type NodeRef } from "../ai/crux.js";
+import {
+  formatCruxMiss,
+  looksLikeEchoedTargetLine,
+  type CruxMissKind,
+  type CruxSummarizer,
+  type NodeCrux,
+  type NodeRef,
+} from "../ai/crux.js";
 import { LlmFailureGate } from "../ai/failure.js";
 import type { Crux, NodeV1 } from "./types.js";
 
@@ -196,8 +203,11 @@ export async function enrichGraph(
 
     if (!fileError && refs.length > 0 && applied === 0) {
       // collectFileCrux already labels a total miss; this catches "got entries
-      // but every summary was blank" so the CLI's #127 degraded-exit path fires.
-      fileError = cruxMissMessage(summarizer, "empty-parsed");
+      // but none applied" so the CLI's #127 degraded-exit path fires. Name the
+      // miss (echoed TARGET line vs blank summaries vs unmatched ids) so a
+      // deepseek-chat echo (#259) is not the same string as a truncated payload.
+      // Blank summaries still go through #254's miss class + finish_reason.
+      fileError = unusableSymbolsReason(results, summarizer);
       stats.errors.push(`${path}: ${fileError}`);
       gate.record(fileError, { quality: true });
     } else if (!fileError) {
@@ -277,6 +287,21 @@ async function collectFileCrux(
     return { results, error: cruxMissMessage(summarizer, "empty-toolCalls"), quality: true };
   }
   return { results, error };
+}
+
+/**
+ * Why a non-empty reply still applied to zero nodes. Echoed TARGET-line ids
+ * (#259) must not share the blank-summary string; truncated JSON is the empty
+ * path above (the OpenAI adapter turns unparseable arguments into `{}`).
+ */
+function unusableSymbolsReason(results: Map<string, NodeCrux>, summarizer: CruxSummarizer): string {
+  if ([...results.keys()].some((id) => looksLikeEchoedTargetLine(id))) {
+    return "model echoed the target line into each symbol id";
+  }
+  if ([...results.values()].every((r) => !r.summary.trim())) {
+    return cruxMissMessage(summarizer, "empty-parsed");
+  }
+  return "model returned symbol ids that did not match any target";
 }
 
 /**

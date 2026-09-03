@@ -134,15 +134,95 @@ function userContent(input: FileCruxInput): string {
   return `FILE: ${input.path}\n\n${numberLines(input.source)}\n\nTARGETS (${n} — return all ${n}, one entry per id):\n${targets}`;
 }
 
+/**
+ * Strip a TARGET-line echo from a crux `id` (#259).
+ *
+ * {@link userContent} renders each target as
+ * `id=${id} | ${kind} | lines L${start}-L${end} | ${signature}`. Some models
+ * (deepseek-chat) copy that whole line into the tool's `id`. Real node ids are
+ * `path#Name` and do not contain ` | `.
+ *
+ * Only rewrite when the suffix is that TARGET shape AND the peeled token is one
+ * of the ids this call asked for (or no expected list was given). A lone ` | `,
+ * a truncated line, or an id that peels to something we did not ask for is left
+ * unchanged so the caller can fail it with a specific reason instead of caching
+ * a guess (#177).
+ */
+export function peelEchoedCruxId(raw: string, expectedIds: readonly string[] = []): string {
+  const trimmed = stripIdWrapper(raw);
+  if (expectedIds.includes(trimmed)) return trimmed;
+
+  const peeled = peelTargetLineSuffix(trimmed);
+  if (peeled !== null && (expectedIds.length === 0 || expectedIds.includes(peeled))) {
+    return peeled;
+  }
+
+  if (expectedIds.length > 0) {
+    const hit = longestPrefixId(trimmed, expectedIds);
+    if (hit) return hit;
+  }
+  return trimmed;
+}
+
+/** True when `id` still looks like the TARGET line, not a node id. */
+export function looksLikeEchoedTargetLine(id: string): boolean {
+  return peelTargetLineSuffix(stripIdWrapper(id)) !== null;
+}
+
+function stripIdWrapper(raw: string): string {
+  let s = raw.trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"') && s.length >= 2) ||
+    (s.startsWith("'") && s.endsWith("'") && s.length >= 2)
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  return s.startsWith("id=") ? s.slice(3) : s;
+}
+
+/**
+ * If `id` is `realId | kind | lines Lstart-Lend [| signature]`, return `realId`.
+ * Linear scan — the distinctive marker is ` | lines L`, which we emit and no
+ * node id contains. Kind must be a single token (the {@link Kind} vocabulary).
+ */
+function peelTargetLineSuffix(id: string): string | null {
+  const marker = " | lines L";
+  const linesAt = id.indexOf(marker);
+  if (linesAt < 0) return null;
+  const before = id.slice(0, linesAt);
+  const sep = before.lastIndexOf(" | ");
+  if (sep < 0) return null;
+  const kind = before.slice(sep + 3).trim();
+  if (!kind || /\s/.test(kind)) return null;
+  const after = id.slice(linesAt + marker.length);
+  if (!/^\d+-L\d+(?:\s+\|.*)?$/.test(after)) return null;
+  const peeled = before.slice(0, sep).trim();
+  return peeled || null;
+}
+
+/** Longest requested id that `raw` equals or continues as `id | …` (echoed rest). */
+function longestPrefixId(raw: string, expectedIds: readonly string[]): string | undefined {
+  let best: string | undefined;
+  for (const id of expectedIds) {
+    if (raw === id || raw.startsWith(`${id} | `)) {
+      if (!best || id.length > best.length) best = id;
+    }
+  }
+  return best;
+}
+
 /** Normalize the tool's parsed argument object into a {@link NodeCrux} list. */
-function parseResults(obj: { symbols?: unknown } | undefined): NodeCrux[] {
+function parseResults(
+  obj: { symbols?: unknown } | undefined,
+  expectedIds: readonly string[] = [],
+): NodeCrux[] {
   if (!obj || !Array.isArray(obj.symbols)) return [];
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : 0);
   return obj.symbols
     .map((s) => s as Record<string, unknown>)
     .filter((s) => typeof s.id === "string")
     .map((s) => ({
-      id: s.id as string,
+      id: peelEchoedCruxId(s.id as string, expectedIds),
       summary: typeof s.summary === "string" ? s.summary.trim() : "",
       crux_start: num(s.crux_start),
       crux_end: num(s.crux_end),
@@ -196,7 +276,10 @@ export class ChatCruxSummarizer implements CruxSummarizer {
         { role: "user", content: userContent(input) },
       ],
     });
-    const parsed = parseResults(argsFromResponse(res));
+    const parsed = parseResults(
+      argsFromResponse(res),
+      input.nodes.map((n) => n.id),
+    );
     this.lastMiss = classifyCruxMiss(res, parsed);
     return parsed;
   }
