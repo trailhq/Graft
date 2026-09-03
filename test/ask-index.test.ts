@@ -18,6 +18,7 @@ import { ask } from "../src/ask/ask.js";
 import { contextDirFor } from "../src/context/node-file.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import { askIndexPath, readAskIndex, tokenize, counts, writeAskIndex } from "../src/ask/index-file.js";
+import { rankFileBm25 } from "../src/ask/file-bm25.js";
 import { extractFile, languageOf } from "../src/graph/extract.js";
 import type { GraphV1, NodeV1 } from "../src/graph/types.js";
 
@@ -154,6 +155,22 @@ test("ask results are IDENTICAL with and without the sidecar (same hits, same sc
     } finally {
       writeFileSync(idxPath, backup);
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("default file-first ask follows the cached whole-file BM25 order", async () => {
+  const dir = makeFixture();
+  try {
+    await buildGraph(dir);
+    const index = readAskIndex(contextDirFor(dir));
+    assert.ok(index?.files, "build writes the whole-file BM25 sidecar");
+    const expected = rankFileBm25(index!.files!, QUERY).map((item) => item.path);
+    const actual = ask(dir, QUERY, { limit: expected.length }).hits.map(
+      (hit) => hit.pointer.split(":")[0],
+    );
+    assert.deepEqual(actual, expected, "ask projects spans without changing BM25 file order");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

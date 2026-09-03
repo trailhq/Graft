@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { GraphV1 } from "../graph/types.js";
 import { CACHE_DIR } from "../context/node-file.js";
+import { buildFileBm25Index, type FileBm25Index } from "./file-bm25.js";
 
 /** Words too common/short to carry query intent — dropped before scoring. */
 const STOP = new Set([
@@ -66,6 +67,9 @@ export interface AskIndex {
   df: [string, number][];
   docCount: number;
   docs: AskIndexDoc[];
+  /** Whole-file BM25 cache. Optional so pre-upgrade sidecars remain readable;
+   * `ask` rebuilds this part live until the next ordinary `graft build`. */
+  files?: FileBm25Index;
 }
 
 export const ASK_INDEX_FILE = "ask-index.json";
@@ -95,7 +99,12 @@ function bagLen(p: [string, number][]): number {
  * nodes are indexed in id order, so an unchanged graph produces a
  * byte-identical sidecar.
  */
-export function writeAskIndex(outDir: string, graph: GraphV1): string {
+export function writeAskIndex(
+  outDir: string,
+  graph: GraphV1,
+  sources?: ReadonlyMap<string, string>,
+): string {
+  const priorFiles = sources ? undefined : readAskIndex(outDir)?.files;
   const nodes = [...graph.nodes].sort((a, b) => a.id.localeCompare(b.id));
   const docs: AskIndexDoc[] = [];
   const df = new Map<string, number>();
@@ -122,6 +131,11 @@ export function writeAskIndex(outDir: string, graph: GraphV1): string {
     df: pairs(df),
     docCount: nodes.length,
     docs,
+    ...(sources
+      ? { files: buildFileBm25Index(sources) }
+      : priorFiles
+        ? { files: priorFiles }
+        : {}),
   };
 
   const outPath = askIndexPath(outDir);
@@ -148,7 +162,14 @@ export function readAskIndex(outDir: string): AskIndex | null {
       typeof raw.avgBodyLen !== "number" ||
       !Array.isArray(raw.df) ||
       !Array.isArray(raw.docs) ||
-      raw.docCount !== raw.docs.length
+      raw.docCount !== raw.docs.length ||
+      (raw.files !== undefined && (
+        !raw.files ||
+        typeof raw.files !== "object" ||
+        typeof raw.files.avgLength !== "number" ||
+        !Array.isArray(raw.files.df) ||
+        !Array.isArray(raw.files.docs)
+      ))
     ) {
       return null;
     }

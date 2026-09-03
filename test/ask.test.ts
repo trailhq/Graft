@@ -56,13 +56,13 @@ test("test files rank below the source they exercise for a non-test query, but n
     await buildGraph(dir);
     // Non-test query: the real source must outrank its mirror test file, even
     // though the test contains the same literals ("download", "stall", "detection").
-    const r = ask(dir, "download chunk stall detection first byte");
+    const r = ask(dir, "download chunk stall detection first byte", { fileFirst: false });
     const src = r.hits.findIndex((h) => /(^|\/)download\.ts(:|$)/.test(h.pointer));
     const tst = r.hits.findIndex((h) => /download\.test\.ts/.test(h.pointer));
     assert.ok(src >= 0, "source hit present");
     assert.ok(tst === -1 || src < tst, "source ranks above its test for a non-test query");
     // Test-seeking query: the penalty lifts, so the test file surfaces.
-    const rt = ask(dir, "tests for downloadChunk stall");
+    const rt = ask(dir, "tests for downloadChunk stall", { fileFirst: false });
     assert.ok(rt.hits.some((h) => /download\.test\.ts/.test(h.pointer)), "test file surfaces for a test-seeking query");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -88,7 +88,7 @@ test("test de-ranking survives normalization when a test is the strongest lexica
     );
     await buildGraph(dir);
 
-    const r = ask(dir, "where engine selected for request fallback chain");
+    const r = ask(dir, "where engine selected for request fallback chain", { fileFirst: false });
     const source = r.hits.findIndex((h) => /(^|\/)selector\.ts(:|$)/.test(h.pointer));
     const testHit = r.hits.findIndex((h) => /selector\.test\.ts/.test(h.pointer));
     assert.ok(source >= 0, "implementation hit present");
@@ -203,7 +203,7 @@ test("ask reports coverage: 1.0 when every query term hits, low on mostly-off-co
   }
 });
 
-test("ask file-first selection preserves baseline file order and delays sibling spans", async () => {
+test("legacy symbol file-first selection preserves baseline file order and delays sibling spans", async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft-ask-file-first-"));
   try {
     writeFileSync(
@@ -223,7 +223,7 @@ test("ask file-first selection preserves baseline file order and delays sibling 
     assert.ok(baselineFileOrder.length >= 3, "fixture produces at least three ranked files");
     assert.ok(new Set(baselineFiles.slice(0, 3)).size < 3, "baseline prefix contains sibling spans");
 
-    const selected = ask(dir, "quartz", { graphRank: false, limit: 20 });
+    const selected = ask(dir, "quartz", { graphRank: false, limit: 20, fileBm25: false });
     const selectedFiles = selected.hits.map((hit) => pathOf(hit.pointer));
     assert.deepEqual(
       selectedFiles.slice(0, baselineFileOrder.length),
@@ -304,7 +304,7 @@ test("ask bounded file scoring rewards one anchor without moving singleton score
   }
 });
 
-test("default file-aware ranking locks the exact baseline top hit and delays secondary spans", async () => {
+test("legacy bounded file-aware ranking locks the exact baseline top hit and delays secondary spans", async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft-ask-a5-lock-"));
   try {
     writeFileSync(
@@ -337,6 +337,7 @@ test("default file-aware ranking locks the exact baseline top hit and delays sec
     const a5 = ask(dir, "amber cobalt", {
       graphRank: false,
       limit: 20,
+      fileBm25: false,
     });
     const explicitA5 = ask(dir, "amber cobalt", {
       graphRank: false,
@@ -344,6 +345,7 @@ test("default file-aware ranking locks the exact baseline top hit and delays sec
       fileFirst: true,
       fileComplement: true,
       fileTopLock: true,
+      fileBm25: false,
     });
 
     assert.deepEqual(
@@ -676,13 +678,13 @@ test("ask on a multi-scope repo: top hits federate both scopes, labeled, with a 
   }
 });
 
-test("file-first selection preserves a multi-scope result's top relevance and file order", async () => {
+test("legacy multi-scope file selection preserves top relevance and file order", async () => {
   const dir = multiScopeFixture();
   try {
     await buildGraph(dir);
     const baseline = ask(dir, "how are errors handled", { limit: 30, fileFirst: false });
 
-    const selected = ask(dir, "how are errors handled", { limit: 30 });
+    const selected = ask(dir, "how are errors handled", { limit: 30, fileBm25: false });
     const pathOf = (pointer: string) => pointer.split(":")[0];
     const baselineFileOrder = [...new Set(baseline.hits.map((hit) => pathOf(hit.pointer)))];
     const selectedFiles = selected.hits.map((hit) => pathOf(hit.pointer));
@@ -738,7 +740,7 @@ test("bounded scoring applies at most one anchor boost per file before comparabl
   }
 });
 
-test("file-aware ranking keeps the exact multi-scope baseline top before queue projection", async () => {
+test("legacy file-aware ranking keeps the exact multi-scope baseline top before queue projection", async () => {
   const dir = multiScopeFixture();
   try {
     await buildGraph(dir);
@@ -753,6 +755,7 @@ test("file-aware ranking keeps the exact multi-scope baseline top before queue p
       limit: 100,
       fileComplement: true,
       fileTopLock: true,
+      fileBm25: false,
     });
 
     assert.deepEqual(
@@ -932,13 +935,13 @@ test("ask --in: per-scope idf differs from global — a term's rank flips relati
     const query = "zzzraretoken zzzcommonword";
     const rankOf = (r: ReturnType<typeof ask>["hits"], title: string) => r.findIndex((h) => h.title.startsWith(title));
 
-    const global = ask(dir, query, { limit: 40 });
+    const global = ask(dir, query, { limit: 40, fileFirst: false });
     const rareGlobal = rankOf(global.hits, "zzzraretoken ");
     const commonBGlobal = rankOf(global.hits, "zzzcommonword_b");
     assert.ok(rareGlobal >= 0 && commonBGlobal >= 0, "both candidates present globally");
     assert.ok(rareGlobal < commonBGlobal, "globally, the rare term (high idf) outranks the diluted common term");
 
-    const filtered = ask(dir, query, { limit: 40, in: "proj" });
+    const filtered = ask(dir, query, { limit: 40, in: "proj", fileFirst: false });
     const rareFiltered = rankOf(filtered.hits, "zzzraretoken ");
     const commonBFiltered = rankOf(filtered.hits, "zzzcommonword_b");
     assert.ok(rareFiltered >= 0 && commonBFiltered >= 0, "both candidates present filtered");
