@@ -17,10 +17,10 @@ export type Kind =
   | "class"
   | "function"
   | "method"
-  | "interface" // TS + Go
+  | "interface" // TS + Go + C#
   | "type" // TS + Go (type alias / named type)
-  | "enum" // TS + PHP + Java
-  | "struct" // Go only
+  | "enum" // TS + PHP + Java + C#
+  | "struct" // Go + C#
   | "trait" // PHP only
   // The generic (tags.scm) breadth tier also emits these — every tree-sitter
   // grammar's tags.scm uses the tree-sitter tags @definition.<X> vocabulary, and
@@ -66,7 +66,7 @@ export interface NodeV1 {
   signature: string | null; // "get(k: string): number" — null for kind:"file"
   exported: boolean;
   // How the node was extracted. "ast" = a first-class hand-written extractor
-  // (TS/JS/Python/Go, full-fidelity). "generic" = the tags.scm breadth tier
+  // (TS/JS/Python/Go/Java/Kotlin/PHP/R/Swift/C#, full-fidelity). "generic" = the tags.scm breadth tier
   // (signature-only; symbols + bare edges, no scope-aware binding).
   origin: "ast" | "generic";
   body_hash: string; // sha256 of the definition text; the Tier-2 re-run trigger

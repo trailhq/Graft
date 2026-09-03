@@ -34,6 +34,17 @@ export class FileBindings {
 
 const FN_VALUE_TYPES = new Set(["arrow_function", "function", "function_expression", "generator_function"]);
 
+const CS_DEF_TYPES: ReadonlySet<string> = new Set([
+  "class_declaration",
+  "struct_declaration",
+  "interface_declaration",
+  "record_declaration",
+  "enum_declaration",
+  "method_declaration",
+  "constructor_declaration",
+  "property_declaration",
+]);
+
 /** Definition-node types that push a new scope segment, mirroring extract.ts's
  * `describe()` closely enough to keep the two scope stacks in lockstep — but
  * duplicated here (not imported) to keep bindings.ts free of a value import on
@@ -60,6 +71,9 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
   }
   if (lang === "r") return rDefName(node);
   if (lang === "swift") return swiftDefName(node);
+  if (lang === "csharp") {
+    return CS_DEF_TYPES.has(node.type) ? (node.childForFieldName("name")?.text ?? null) : null;
+  }
   if (lang === "php") {
     const phpDefTypes = new Set([
       "class_declaration",
@@ -236,6 +250,14 @@ function isClassNode(node: Parser.SyntaxNode, lang: Language): boolean {
   if (lang === "swift") {
     return node.type === "class_declaration" || node.type === "protocol_declaration";
   }
+  if (lang === "csharp") {
+    return (
+      node.type === "class_declaration" ||
+      node.type === "struct_declaration" ||
+      node.type === "interface_declaration" ||
+      node.type === "record_declaration"
+    );
+  }
   return false;
 }
 
@@ -306,6 +328,7 @@ function visit(
   else if (lang === "r") void 0;
   else if (lang === "java") handleJava(node, scope, classScope, bindings);
   else if (lang === "swift") handleSwift(node, scope, classScope, bindings);
+  else if (lang === "csharp") handleCSharp(node, scope, classScope, bindings);
   else if (lang === "php") handlePhp(node, scope, bindings);
   else handleTs(node, scope, classScope, bindings, aliases);
 
@@ -724,4 +747,84 @@ function handleGo(node: Parser.SyntaxNode, scope: string[], bindings: FileBindin
     }
     if (typeName) bindings.set(scopePath, nameNode.text, typeName);
   }
+}
+
+/** C# bindings: fields, locals, and typed parameters. Fields are stored under
+ * both names because C# permits `field` and `this.field` interchangeably. A
+ * `var` declaration has no useful declared type, so its `new` initializer is
+ * the only syntax-local type clue this pass can use. */
+function handleCSharp(
+  node: Parser.SyntaxNode,
+  scope: string[],
+  classScope: string | null,
+  bindings: FileBindings,
+): void {
+  const scopePath = scope.join(".");
+
+  if (node.type === "field_declaration") {
+    const declaration = node.namedChildren.find((child) => child.type === "variable_declaration");
+    if (!declaration) return;
+    const declaredType = csTypeName(declaration.childForFieldName("type"));
+    const target = classScope ?? scopePath;
+    for (const declarator of declaration.namedChildren) {
+      if (declarator.type !== "variable_declarator") continue;
+      const name = declarator.childForFieldName("name")?.text;
+      if (!name) continue;
+      const type = declaredType ?? csNewTypeName(declarator);
+      if (!type) continue;
+      bindings.set(target, name, type);
+      bindings.set(target, `this.${name}`, type);
+    }
+    return;
+  }
+
+  if (node.type === "variable_declaration") {
+    const declaredType = csTypeName(node.childForFieldName("type"));
+    for (const declarator of node.namedChildren) {
+      if (declarator.type !== "variable_declarator") continue;
+      const name = declarator.childForFieldName("name")?.text;
+      if (!name) continue;
+      const type = declaredType ?? csNewTypeName(declarator);
+      if (type) bindings.set(scopePath, name, type);
+    }
+    return;
+  }
+
+  if (node.type === "parameter") {
+    const name = node.childForFieldName("name")?.text;
+    const type = csTypeName(node.childForFieldName("type"));
+    if (name && type) bindings.set(scopePath, name, type);
+  }
+}
+
+/** Extract a C# type's owner name, erasing generic arguments and wrappers. */
+function csTypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node || node.type === "implicit_type") return null;
+  if (node.type === "identifier" || node.type === "predefined_type") return node.text;
+  if (node.type === "generic_name") return node.namedChildren[0]?.text ?? null;
+  if (node.type === "qualified_name" || node.type === "alias_qualified_name") {
+    return csTypeName(node.namedChildren.at(-1));
+  }
+  if (
+    node.type === "nullable_type" ||
+    node.type === "pointer_type" ||
+    node.type === "ref_type" ||
+    node.type === "scoped_type"
+  ) {
+    return csTypeName(node.childForFieldName("type"));
+  }
+  if (node.type === "array_type") return csTypeName(node.childForFieldName("type"));
+  return null;
+}
+
+/** The concrete type created by `new T(...)`, used for `var` locals/fields. The
+ * grammar does not name a variable declarator's initializer field, so inspect
+ * its named children when the caller passes the whole declarator. */
+function csNewTypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+  const value =
+    node?.type === "object_creation_expression"
+      ? node
+      : node?.childForFieldName("value") ?? node?.namedChildren.find((child) => child.type === "object_creation_expression");
+  if (value?.type !== "object_creation_expression") return null;
+  return csTypeName(value.childForFieldName("type"));
 }
