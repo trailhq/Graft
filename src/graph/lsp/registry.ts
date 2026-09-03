@@ -23,6 +23,17 @@ export const LSP_SERVERS: readonly LspServer[] = [
   { languages: ["typescript", "javascript", "tsx"], command: "typescript-language-server", args: ["--stdio"], languageId: "typescript" },
 ];
 
+// Servers a language pack declared (packs.ts). Considered after the built-in rows, so
+// a pack cannot steal a language a built-in server already covers.
+const packServers: LspServer[] = [];
+export function registerLspServer(row: LspServer): void {
+  packServers.push(row);
+}
+/** Test seam: forget every pack-declared server. */
+export function resetLspServersForTest(): void {
+  packServers.length = 0;
+}
+
 const resolved = new Map<string, string | null>();
 /** Resolve a command to its ABSOLUTE path via the login shell's PATH. `spawn`
  * resolves against `process.env.PATH`, which often omits `~/.cargo/bin`,
@@ -40,7 +51,7 @@ function resolveCommand(cmd: string): string | null {
  * languages present in the repo, with `command` resolved to an absolute path.
  * Returns null if none is installed. */
 export function pickServer(languagesPresent: Set<string>): LspServer | null {
-  for (const s of LSP_SERVERS) {
+  for (const s of [...LSP_SERVERS, ...packServers]) {
     if (!s.languages.some((l) => languagesPresent.has(l))) continue;
     const abs = resolveCommand(s.command);
     if (abs) return { ...s, command: abs };

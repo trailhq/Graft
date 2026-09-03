@@ -14,10 +14,14 @@ import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "..
 import { languageOf, depthExtensions } from "./extract.js";
 import { genericLangOf, genericExtensions } from "./generic.js";
 import { containerLangOf, containerExtensions } from "./container.js";
+import { loadLanguagePacks } from "./packs.js";
 
 /** Every extension graft has a parser for (depth + breadth + container), sorted
  * and de-duped — the authoritative answer to "what does `-e` actually support". */
-export function supportedExtensions(): string[] {
+export function supportedExtensions(root?: string): string[] {
+  // A repo's language packs count as supported the moment `-e` is validated, which
+  // is before any walk has loaded them — so load here too (idempotent per root).
+  if (root) loadLanguagePacks(root);
   return [...new Set([...depthExtensions(), ...genericExtensions(), ...containerExtensions()])].sort();
 }
 
@@ -32,8 +36,8 @@ function normExt(e: string): string {
  * `graft build -e ".vue"` used to accept these silently and index nothing; the CLI warns
  * on whatever this returns so an unsupported extension is never a quiet no-op.
  */
-export function unsupportedExtensions(exts: string[]): string[] {
-  const supported = new Set(supportedExtensions());
+export function unsupportedExtensions(exts: string[], root?: string): string[] {
+  const supported = new Set(supportedExtensions(root));
   return exts.filter((e) => !supported.has(normExt(e)));
 }
 
@@ -70,6 +74,9 @@ export function listSourceFiles(
   }),
   onlyDirs?: ReadonlySet<string>,
 ): string[] {
+  // Language packs (`<root>/.graft/langs`, `~/.graft/langs`) add breadth-tier rows;
+  // they must be registered before the extension filter below decides what is source.
+  loadLanguagePacks(root);
   // A file is a source file if a depth-tier grammar (languageOf), a breadth-tier
   // grammar (genericLangOf) or a container (containerLangOf) claims its extension.
   // All three must agree here or `build` and `check` would enumerate different sets.

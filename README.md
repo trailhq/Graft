@@ -216,6 +216,20 @@ Twenty-three languages in total. A file whose language isn't listed is skipped, 
 indexed. Adding a broad-tier language is a small contribution — see
 [CREDITS.md](CREDITS.md) for the folks who added the current set.
 
+- **Bring your own (language packs)** — a language graft doesn't ship, or one only
+  your team uses, goes in `.graft/langs/<name>/` in the repo (or `~/.graft/langs/`
+  for every repo on the machine): a `pack.json` naming the extensions, the grammar
+  built with `tree-sitter build --wasm`, a tags query (`@definition.<kind>` +
+  `@name`, `@reference.call`) and optionally an `lsp` server row. The next
+  `graft build` indexes those files exactly like a broad-tier language. A pack that
+  would take a language away — a name or extension another tier already owns, a
+  missing file — is skipped with one warning, never a failed build.
+
+  ```json
+  { "name": "moon", "extensions": [".moon"], "grammar": "tree-sitter-moon.wasm",
+    "tags": "tags.scm", "lsp": { "command": "moon-lsp", "args": ["--stdio"] } }
+  ```
+
 ---
 
 ## What's in a node

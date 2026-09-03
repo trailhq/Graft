@@ -4,8 +4,9 @@
  * graft covers the long tail of languages for ~one registry row each, instead of
  * a hand-written extractor per language (the depth tier in extract.ts).
  *
- * Grammars are WASM (`tree-sitter-wasm` bundle) loaded via `web-tree-sitter`, so
- * a new language needs no native node-gyp build. Loading is async (WASM init), so
+ * Grammars are WASM loaded via `web-tree-sitter` — the `tree-sitter-wasm` bundle for
+ * the built-in rows, or a file a language pack points at (packs.ts) — so a new
+ * language needs no native node-gyp build. Loading is async (WASM init), so
  * callers MUST `await warmGenericGrammars([...])` once before the synchronous
  * `extractGeneric()` is used in a build/check loop. If a grammar isn't warmed,
  * `extractGeneric` degrades to a file node only (never throws).
@@ -31,11 +32,15 @@ const require = createRequire(import.meta.url);
 const QUERY_DIRS = [join(HERE, "queries"), join(HERE, "..", "..", "src", "graph", "queries")];
 
 /** A breadth-tier language: graft name, file extensions, and the wasm basename
- * in tree-sitter-wasm/<wasm>/tree-sitter-<wasm>.wasm. One row per language. */
+ * in tree-sitter-wasm/<wasm>/tree-sitter-<wasm>.wasm. One row per language. A
+ * language pack (packs.ts) instead names its own files: `wasmPath` for the grammar
+ * and `queryPath` for the tags query, both absolute. */
 export interface GenericLang {
   name: string;
   exts: string[];
   wasm: string;
+  wasmPath?: string;
+  queryPath?: string;
 }
 
 /** The breadth registry. Add a row + a queries/<name>.scm to support a language.
@@ -60,8 +65,26 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "lua", exts: [".lua"], wasm: "lua" },
 ];
 
+// Rows a language pack registered at runtime (packs.ts) — after the built-ins, so
+// they can never shadow one, and a pack's extension collision is refused there.
+const packLangs: GenericLang[] = [];
+const allLangs = (): GenericLang[] => [...GENERIC_LANGS, ...packLangs];
+
 const byExt = new Map<string, GenericLang>();
 for (const l of GENERIC_LANGS) for (const e of l.exts) byExt.set(e, l);
+
+/** Add a language pack's row. The caller (packs.ts) has already refused a name or an
+ * extension another tier owns, so this only wires the row into the lookups. */
+export function registerGenericLang(row: GenericLang): void {
+  packLangs.push(row);
+  for (const e of row.exts) byExt.set(e.toLowerCase(), row);
+}
+
+/** Test seam: forget every pack row, so one test's pack cannot leak into the next. */
+export function resetGenericLangsForTest(): void {
+  for (const l of packLangs) for (const e of l.exts) byExt.delete(e.toLowerCase());
+  packLangs.length = 0;
+}
 
 /** The generic language for a path, or null if no breadth grammar claims it. */
 export function genericLangOf(path: string): GenericLang | null {
@@ -72,7 +95,7 @@ export function genericLangOf(path: string): GenericLang | null {
 
 /** Every file extension a breadth-tier (generic tree-sitter) grammar claims. */
 export function genericExtensions(): string[] {
-  return GENERIC_LANGS.flatMap((l) => l.exts);
+  return allLangs().flatMap((l) => l.exts);
 }
 
 // tags.scm @definition.<X>  →  graft Kind (types.ts). Unmapped → "function".
@@ -90,28 +113,29 @@ const loaded = new Map<string, Loaded>();
 let tsMod: typeof import("web-tree-sitter") | null = null;
 let initPromise: Promise<void> | null = null;
 
-function requireWasm(wasm: string): Buffer | null {
-  // Resolve the grammar wasm from the tree-sitter-wasm bundle (its package.json
-  // `exports` maps the bare "<lang>/…" subpath to the actual "out/<lang>/…" file).
+function requireWasm(wasm: string, wasmPath?: string): Buffer | null {
   try {
-    const p = require.resolve(`tree-sitter-wasm/${wasm}/tree-sitter-${wasm}.wasm`);
+    // A language pack names its grammar file outright. Otherwise resolve it from the
+    // tree-sitter-wasm bundle (its package.json `exports` maps the bare "<lang>/…"
+    // subpath to the actual "out/<lang>/…" file).
+    const p = wasmPath ?? require.resolve(`tree-sitter-wasm/${wasm}/tree-sitter-${wasm}.wasm`);
     return readFileSync(p);
   } catch {
     return null;
   }
 }
 
-function loadQuery(name: string): string | null {
-  for (const dir of QUERY_DIRS) {
+// Sanitize editor-specific query predicates the tree-sitter Query compiler rejects.
+const sanitizeQuery = (raw: string): string =>
+  raw.replace(/\(#(?:strip!|set!|set-adjacent!|select-adjacent!|make-range!|offset!|gsub!)[^()]*\)/g, "");
+
+function loadQuery(name: string, queryPath?: string): string | null {
+  const candidates = queryPath ? [queryPath] : QUERY_DIRS.map((dir) => join(dir, `${name}.scm`));
+  for (const file of candidates) {
     try {
-      const raw = readFileSync(join(dir, `${name}.scm`), "utf8");
-      // Sanitize editor-specific query predicates the tree-sitter Query compiler rejects.
-      return raw.replace(
-        /\(#(?:strip!|set!|set-adjacent!|select-adjacent!|make-range!|offset!|gsub!)[^()]*\)/g,
-        "",
-      );
+      return sanitizeQuery(readFileSync(file, "utf8"));
     } catch {
-      /* try next dir */
+      /* try next */
     }
   }
   return null;
@@ -122,7 +146,7 @@ function loadQuery(name: string): string | null {
  * grammars are silently skipped (their files then extract as file-only). */
 export async function warmGenericGrammars(langNames: Iterable<string>): Promise<void> {
   const want = new Set(langNames);
-  const need = [...want].filter((n) => !loaded.has(n) && GENERIC_LANGS.some((l) => l.name === n));
+  const need = [...want].filter((n) => !loaded.has(n) && allLangs().some((l) => l.name === n));
   if (need.length === 0) return;
   if (!tsMod) {
     tsMod = await import("web-tree-sitter");
@@ -131,12 +155,12 @@ export async function warmGenericGrammars(langNames: Iterable<string>): Promise<
   await initPromise;
   const { Language, Query } = tsMod;
   for (const name of need) {
-    const row = GENERIC_LANGS.find((l) => l.name === name)!;
-    const bytes = requireWasm(row.wasm);
+    const row = allLangs().find((l) => l.name === name)!;
+    const bytes = requireWasm(row.wasm, row.wasmPath);
     if (!bytes) continue;
     try {
       const language = await Language.load(bytes);
-      const scm = loadQuery(name);
+      const scm = loadQuery(name, row.queryPath);
       let query: unknown | null = null;
       if (scm) {
         try { query = new Query(language, scm); } catch { query = null; }

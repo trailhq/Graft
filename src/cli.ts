@@ -127,15 +127,18 @@ const engineFrom = (): Graft => new Graft(cliConfig());
  * no-op — `graft build -e ".vue"` used to accept it, index nothing, and exit 0. The
  * supported set is listed so `-e` also answers "what is actually supported".
  */
-function warnUnsupportedExtensions(exts?: string[]): void {
+function warnUnsupportedExtensions(exts?: string[], dirArg?: string): void {
   if (!exts?.length) return;
-  const bad = unsupportedExtensions(exts);
+  // The repo's language packs (`.graft/langs`) count as parsers, so judge against the
+  // root the command was given — the walk that would load them has not run yet.
+  const root = resolve(dirArg ?? ".");
+  const bad = unsupportedExtensions(exts, root);
   if (bad.length === 0) return;
   for (const e of bad) {
     const shown = e.trim().startsWith(".") ? e.trim() : `.${e.trim()}`;
     console.error(`⚠ -e "${shown}": no parser registered for this extension — ignoring it.`);
   }
-  console.error(`  supported: ${supportedExtensions().join(" ")}`);
+  console.error(`  supported: ${supportedExtensions(root).join(" ")}`);
 }
 
 /** Text for the omitted-`[dir]` case, shared by every query command's help. */
@@ -371,7 +374,7 @@ program
       console.error(`✗ --concurrency must be a number, got "${opts.concurrency}"`);
       process.exit(1);
     }
-    warnUnsupportedExtensions(opts.extensions);
+    warnUnsupportedExtensions(opts.extensions, dirArg);
     // Persisted BEFORE the build itself runs, so this invocation's walks (and
     // every later no-flag build / hooks refresh) see it identically — the
     // walkDir call sites read it from state, not from a threaded option.
@@ -631,7 +634,7 @@ program
   .option("-e, --extensions <exts...>", "code extensions to include")
   .option("--json", "output the drift as JSON")
   .action(async (dirArg: string | undefined, opts: { extensions?: string[]; json?: boolean }) => {
-    warnUnsupportedExtensions(opts.extensions);
+    warnUnsupportedExtensions(opts.extensions, dirArg);
     const dir = noteQuery(queryRoot(dirArg));
     const checkGlobalDir = program.opts<GlobalOpts>().dir;
     if (readWorkspace(dir, checkGlobalDir)) {
