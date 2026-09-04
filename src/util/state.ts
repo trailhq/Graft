@@ -149,6 +149,32 @@ export function readIncludeDirs(d: string): Set<string> | undefined {
   return dirs && dirs.length ? new Set(dirs) : undefined;
 }
 
+/**
+ * The sticky `--only-dir` whitelist, kept with the GRAPH (`graft/.cache/`), never
+ * in the source repo — the same boundary the fingerprint respects, so a
+ * `--only-dir` build still leaves no trace under the tree being indexed.
+ *
+ * The fingerprint alone was not enough. It is keyed by extractor identity and
+ * rewritten by every build, and the hooks shell a bare `graft build .` that sees
+ * no CLI flags — so the first post-edit rebuild dropped the whitelist and silently
+ * re-indexed the whole repo. This file is what a no-flag rebuild reads back.
+ */
+function onlyDirsPath(d: string): string { return join(cacheDir(d), 'only-dirs.json'); }
+
+export function readOnlyDirs(d: string): Set<string> | undefined {
+  const dirs = readJson<string[]>(onlyDirsPath(d));
+  return Array.isArray(dirs) && dirs.length ? new Set(dirs) : undefined;
+}
+
+/** Persist (or, with an empty list, clear) the whitelist. Best-effort: losing it
+ * costs the next no-flag build its scope, never correctness. */
+export function writeOnlyDirs(d: string, dirs: string[]): void {
+  try {
+    if (dirs.length === 0) { rmSync(onlyDirsPath(d), { force: true }); return; }
+    writeJsonAtomic(onlyDirsPath(d), dirs);
+  } catch { /* best-effort */ }
+}
+
 /** Missing and explicit false both retain the backwards-compatible default. */
 export function readFollowSubmodules(d: string): boolean {
   return readBuildConfig(d)?.followSubmodules === true;
