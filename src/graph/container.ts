@@ -7,6 +7,9 @@
  * shell (`<template>` / `<script>` / `<style>`) and hands back the script body as
  * one opaque `raw_text` node, so the cards would come out empty.
  *
+ * Astro's `---` frontmatter is the same shape with a different fence: the
+ * grammar hands back one `frontmatter_js_block` holding TypeScript.
+ *
  * So the container grammar is used only to answer "where does the embedded
  * language start and end", and the block itself goes to the DEPTH-tier extractor
  * (extract.ts). A `.vue` file therefore gets the same quality of extraction as a
@@ -33,20 +36,38 @@ export interface ContainerLang {
   exts: string[];
   /** wasm basename in tree-sitter-wasms/out/tree-sitter-<wasm>.wasm */
   wasm: string;
-  /** Wrapper node that represents one embedded block (e.g. Vue's script_element). */
+  /** Wrapper node that represents one embedded block, as a NAMED CHILD OF THE
+   * ROOT (Vue's `script_element`, Astro's `frontmatter`). Blocks nested deeper
+   * in the markup are not reached — see the Astro row below. */
   block: string;
-  /** Child of `block` holding the raw embedded source (e.g. Vue's raw_text). */
+  /** Child of `block` holding the raw embedded source (Vue's `raw_text`,
+   * Astro's `frontmatter_js_block`). */
   body: string;
   /** Depth-tier grammar for the embedded language. TypeScript is a superset of
    * JavaScript, so it parses both `<script>` and `<script lang="ts">`. */
   inner: Language;
 }
 
-/** The container registry. Svelte and Astro are the same shape and would be a
- * row each, but they are left out until someone has a repo to verify them
- * against — a wrong `body` node type would produce silently misplaced spans. */
+/** The container registry. Svelte is the same shape and would be a row too, but
+ * it is left out until someone has a repo to verify it against — a wrong `body`
+ * node type would produce silently misplaced spans.
+ *
+ * **Astro indexes its frontmatter, not its `<script>` tags**, and that is the
+ * whole file as far as the graph is concerned: the `---` fence holds the
+ * imports and the server-side code, so a page becomes a real graph root ("who
+ * renders this component"). Client `<script>` blocks are deliberately out of
+ * reach — `blocks()` walks the root's named children only, and an Astro
+ * `<script>` is usually nested inside the markup (depth 3 in a layout), so
+ * reaching them needs a recursive walk and a `block` that can name two node
+ * types. Indexing half a file beats indexing none of it, and nothing here
+ * reports a wrong line. */
 export const CONTAINER_LANGS: readonly ContainerLang[] = [
   { name: "vue", exts: [".vue"], wasm: "vue", block: "script_element", body: "raw_text", inner: "typescript" },
+  // `frontmatter_js_block` starts on the opening `---` row, exactly as Vue's
+  // `raw_text` starts on its tag row, so the existing shift arithmetic applies
+  // unchanged: slice line 1 is the tail of the fence line, and slice line N
+  // lands on file line N + startPosition.row. Pinned by the tests below.
+  { name: "astro", exts: [".astro"], wasm: "astro", block: "frontmatter", body: "frontmatter_js_block", inner: "typescript" },
 ];
 
 const byExt = new Map<string, ContainerLang>();

@@ -26,6 +26,30 @@
 
 ### Added
 
+- **Astro (`.astro`) joins the container tier**, the second row after Vue and the
+  one its registry comment was holding open. The `---` frontmatter is the same
+  shape as a Vue SFC's `<script>` with a different fence: `tree-sitter-astro`
+  (already in the bundled `tree-sitter-wasms`) parses the file to a top-level
+  `frontmatter` node whose only named child, `frontmatter_js_block`, holds
+  TypeScript — so the row is `block: "frontmatter", body: "frontmatter_js_block",
+  inner: "typescript"` and no extraction code changes. The span arithmetic
+  carries over unchanged and was the thing verified rather than assumed:
+  `frontmatter_js_block` starts on the opening `---` row exactly as `raw_text`
+  starts on its tag row, so slice line N lands on file line N +
+  `startPosition.row`. A fixture whose fence is pushed down the file by a leading
+  HTML comment pins it, because the usual case — a fence on line 1 — has offset 0
+  and passes even when the shift is dropped.
+
+  Frontmatter is where an Astro page's imports and server-side code live, so
+  pages stop being invisible: a `lib` function's `callers` now names the pages
+  that import it, and `graft grep` reaches `.astro` at all. Client `<script>`
+  blocks are deliberately still out — they nest inside the markup, and `blocks()`
+  walks the root's named children only, so reaching them needs a recursive walk
+  and a `block` that can name two node types. A file with only a client script
+  degrades to a file node; it never reports a wrong line. Svelte stays out of the
+  registry for the reason Astro just left it: nobody has verified its `body` node
+  against a real repo.
+
 - **`graft init --no-statusline`** (and `GRAFT_NO_STATUSLINE=1`) skips writing
   Claude Code's `statusLine` / `subagentStatusLine`. A custom bar — in the
   project's `.claude/settings.json` or in `~/.claude/settings.json` — stays in
