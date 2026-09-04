@@ -23,13 +23,20 @@ import {
   containerLangOf,
   containerExtensions,
   isContainerWarm,
+  isJavaScriptScript,
 } from "../src/graph/container.js";
+import { loadWasmLanguage, parseWasm, type TsNode } from "../src/graph/generic.js";
 import { supportedExtensions } from "../src/graph/source-files.js";
 import { buildGraph } from "../src/graph/build.js";
 import { checkGraph } from "../src/graph/check.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 
 const VUE = containerLangOf("Any.vue")!;
+const ASTRO = containerLangOf("Any.astro")!;
+
+/** Same contract as `sfc`, named for the Astro fixtures so the two fixture
+ * shapes are not confused when a test fails. */
+const astro = sfc;
 
 /** Line N of the fixture is `lines[N - 1]` — that is the whole point. */
 function sfc(lines: string[]): string {
@@ -289,4 +296,326 @@ test("container: a clean build of a .vue file checks as in sync", async () => {
   assert.deepEqual(check.added, []);
   assert.deepEqual(check.changed, []);
   assert.equal(check.ok, true, "a clean build checks OK");
+});
+
+/* ---------------------------------------------------------------------------
+ * Astro. Same tier, different fence: the embedded block is the `---`
+ * frontmatter (`frontmatter` → `frontmatter_js_block`) rather than a
+ * `<script>` element, and it holds TypeScript.
+ *
+ * Frontmatter usually opens on line 1, which makes the offset 0 — the case a
+ * naive implementation passes. The tests below therefore lead with a fixture
+ * whose fence is pushed down the file, because that is the one that fails when
+ * the shift is dropped.
+ * ------------------------------------------------------------------------- */
+
+test("container: registry claims .astro and reports it as supported", () => {
+  assert.equal(containerLangOf("src/pages/index.astro")?.name, "astro");
+  assert.equal(containerLangOf("src/pages/Index.ASTRO")?.name, "astro", "extension match is case-insensitive");
+  assert.ok(containerExtensions().includes(".astro"));
+  assert.ok(supportedExtensions().includes(".astro"), ".astro must be in the -e supported set");
+});
+
+test("container: spans point at the .astro line, not the frontmatter line", async () => {
+  await warmContainerGrammars(["astro"]);
+  assert.ok(isContainerWarm("astro"), "astro grammar must be available in tree-sitter-wasms");
+
+  const lines = [
+    "<!-- a comment above the fence pushes it down the file -->", //  1
+    "---",                                                        //  2
+    'import Card from "../components/Card.astro";',               //  3
+    "",                                                           //  4
+    "const rows = await load();",                                 //  5
+    "",                                                           //  6
+    "export function shout(what: string) {",                      //  7
+    "  return what.toUpperCase();",                               //  8
+    "}",                                                          //  9
+    "---",                                                        // 10
+    "<main>",                                                     // 11
+    "  <Card rows={rows} />",                                     // 12
+    "</main>",                                                    // 13
+  ];
+
+  const { nodes } = extractContainer("pages/index.astro", astro(lines), ASTRO);
+
+  // Line 7 in the file; line 6 inside the frontmatter block. Getting 6 here
+  // would be the exact failure this tier exists to avoid.
+  assert.equal(spanOf(nodes, "shout"), "L7-L9");
+});
+
+test("container: a fence at the top of the file still lands right", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                          // 1
+    "export function first() {}",   // 2
+    "---",                          // 3
+    "<b />",                        // 4
+  ];
+
+  // Offset 0 — the shape almost every real .astro file has, and the one a fix
+  // for the previous test could break.
+  assert.equal(spanOf(extractContainer("A.astro", astro(lines), ASTRO).nodes, "first"), "L2-L2");
+});
+
+test("container: multi-byte characters inside the frontmatter do not shift the spans", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  // Cyrillic and an emoji above the symbol: if the slice were taken by byte
+  // offset against a UTF-16 string, the block would be cut in the wrong place
+  // and the symbol would move or vanish.
+  const lines = [
+    "---",                                        // 1
+    'const title = "Поход в горы 🥾";',           // 2
+    'const note = "Регламент участия";',          // 3
+    "export function label() {",                  // 4
+    "  return title;",                            // 5
+    "}",                                          // 6
+    "---",                                        // 7
+    "<h1>{title}</h1>",                           // 8
+  ];
+
+  assert.equal(spanOf(extractContainer("Ru.astro", astro(lines), ASTRO).nodes, "label"), "L4-L6");
+});
+
+test("container: the file node describes the .astro, not the frontmatter block", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                            // 1
+    "const x = 1;",                   // 2
+    "---",                            // 3
+    "<main>",                         // 4
+    "  <p>{x}</p>",                   // 5
+    "</main>",                        // 6
+    "<style>.a{color:red}</style>",   // 7
+  ];
+  const source = astro(lines);
+
+  const { nodes } = extractContainer("Card.astro", source, ASTRO);
+  const file = nodes[0];
+
+  assert.equal(file.kind, "file");
+  assert.equal(file.id, "Card.astro");
+  assert.equal(file.span, "L1-L8", "spans the whole component, markup and style included");
+  assert.equal(file.chars, source.length);
+  assert.equal(file.origin, "ast");
+});
+
+test("container: an .astro with no usable frontmatter degrades to a file node", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  for (const [label, lines] of [
+    ["no frontmatter at all", ["<main>", "  <p>static</p>", "</main>"]],
+    ["empty frontmatter", ["---", "---", "<p />"]],
+    // A `<script src>` has an empty `raw_text`, not a missing one: the block is
+    // found and handed over, and the inner extractor returns nothing from it.
+    ["external script only", ["<main>", '  <script src="/boot.js"></script>', "</main>"]],
+  ] as const) {
+    const { nodes, rawEdges } = extractContainer("Empty.astro", astro([...lines]), ASTRO);
+    assert.equal(nodes.length, 1, `${label}: file node only`);
+    assert.equal(nodes[0].kind, "file");
+    assert.equal(rawEdges.length, 0, `${label}: no edges`);
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * Astro client `<script>`: the second embedded shape. Nested in the markup
+ * rather than at the root, and living in the same tree as the frontmatter, so
+ * the risks are (a) the offset, again, now with a much larger shift, and
+ * (b) document order across two different node types.
+ * ------------------------------------------------------------------------- */
+
+test("container: a client <script> nested in the markup is extracted", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                                    //  1
+    "const title = 'hi';",                    //  2
+    "---",                                    //  3
+    "<main>",                                 //  4
+    "  <section>",                            //  5
+    "    <p>{title}</p>",                     //  6
+    "    <script>",                           //  7
+    "      export function boot() {",         //  8
+    "        return 1;",                      //  9
+    "      }",                                // 10
+    "    </script>",                          // 11
+    "  </section>",                           // 12
+    "</main>",                                // 13
+  ];
+
+  // Three levels down, and 7 lines below the fence: the offset here is neither
+  // zero nor the frontmatter's.
+  assert.equal(spanOf(extractContainer("Deep.astro", astro(lines), ASTRO).nodes, "boot"), "L8-L10");
+});
+
+test("container: fence and scripts come back in document order, each with its own offset", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                              //  1
+    "export function fromFence() {}",   //  2
+    "---",                              //  3
+    "<script>",                         //  4
+    "function firstScript() {}",        //  5
+    "</script>",                        //  6
+    "<p>between</p>",                   //  7
+    "<script>",                         //  8
+    "function secondScript() {}",       //  9
+    "</script>",                        // 10
+  ];
+
+  const { nodes } = extractContainer("Order.astro", astro(lines), ASTRO);
+  assert.equal(spanOf(nodes, "fromFence"), "L2-L2");
+  assert.equal(spanOf(nodes, "firstScript"), "L5-L5");
+  assert.equal(spanOf(nodes, "secondScript"), "L9-L9");
+  assert.equal(nodes.filter((n) => n.kind === "file").length, 1, "exactly one file node");
+});
+
+test("container: a name defined in both the fence and a script gets two nodes", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                    // 1
+    "function dup() {}",      // 2
+    "---",                    // 3
+    "<script>",               // 4
+    "function dup() {}",      // 5
+    "</script>",              // 6
+  ];
+
+  const { nodes, rawEdges } = extractContainer("Dup.astro", astro(lines), ASTRO);
+  const dups = nodes.filter((n) => n.name === "dup");
+
+  assert.equal(dups.length, 2, "both definitions survive");
+  assert.equal(new Set(dups.map((n) => n.id)).size, 2, "ids are distinct");
+  assert.deepEqual(dups.map((n) => n.span).sort(), ["L2-L2", "L5-L5"]);
+
+  const ids = new Set(nodes.map((n) => n.id));
+  for (const e of rawEdges) {
+    assert.ok(ids.has(e.source), `edge source ${e.source} has no node`);
+    if (e.targetId) assert.ok(ids.has(e.targetId), `edge target ${e.targetId} has no node`);
+  }
+});
+
+test("container: a <script> holding data, not code, is left alone", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  // JSON-LD parses fine as a TypeScript block, so nothing downstream would
+  // complain — it would just mint nodes out of a structured-data blob.
+  const lines = [
+    "<head>",                                             //  1
+    '  <script type="application/ld+json">',              //  2
+    '    {"@type": "Organization", "name": "Acme"}',      //  3
+    "  </script>",                                        //  4
+    "  <script type=application/json>",                   //  5
+    '    {"a": 1}',                                       //  6
+    "  </script>",                                        //  7
+    '  <script type="module">',                           //  8
+    "    export function real() {}",                      //  9
+    "  </script>",                                        // 10
+    "</head>",                                            // 11
+  ];
+
+  const { nodes } = extractContainer("Data.astro", astro(lines), ASTRO);
+  assert.equal(spanOf(nodes, "real"), "L9-L9", 'type="module" is JavaScript and is indexed');
+  assert.equal(nodes.length, 2, "the file node and `real` — the two data blocks contribute nothing");
+});
+
+test("container: isJavaScriptScript reads the type attribute, defaulting to JS", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  // Exercised through extraction rather than by hand-building nodes, so the
+  // assertion is about behaviour and not about a helper's signature.
+  for (const [tag, indexed] of [
+    ["<script>", true],
+    ['<script is:inline>', true],
+    ['<script type="module">', true],
+    ["<script type=text/javascript>", true],
+    ['<script type="text/typescript">', true],
+    ['<script type="application/ld+json">', false],
+    ['<script type="importmap">', false],
+    ['<script type="speculationrules">', false],
+    ["<script type={dynamic}>", false],
+  ] as const) {
+    const { nodes } = extractContainer("T.astro", astro(["<div>", `  ${tag}`, "  function probe() {}", "  </script>", "</div>"]), ASTRO);
+    const hit = nodes.some((n) => n.name === "probe");
+    assert.equal(hit, indexed, `${tag} should ${indexed ? "" : "not "}be indexed`);
+  }
+});
+
+test("container: Vue does not descend into the template — nesting is opt-in per shape", async () => {
+  await warmContainerGrammars(["vue"]);
+
+  // Astro's row is `nested`; Vue's is not. A <script> written inside a Vue
+  // template is markup the framework never runs as a module, and indexing it
+  // would be a behaviour change to `.vue` smuggled in with the Astro work.
+  const lines = [
+    "<template>",                     // 1
+    "  <div>",                        // 2
+    "    <script>",                   // 3
+    "      function inTemplate() {}", // 4
+    "    </script>",                  // 5
+    "  </div>",                       // 6
+    "</template>",                    // 7
+  ];
+
+  const { nodes } = extractContainer("Nested.vue", sfc(lines), VUE);
+  assert.equal(nodes.length, 1, "file node only");
+  assert.ok(!nodes.some((n) => n.name === "inTemplate"));
+});
+
+/** The first `script_element` in a parsed snippet. Only `isJavaScriptScript`
+ * needs one directly — every other test goes through `extractContainer`,
+ * because what matters there is which spans come back, not which node was
+ * handed to which helper. */
+async function firstScriptElement(markup: string): Promise<TsNode> {
+  const language = await loadWasmLanguage("astro");
+  assert.ok(language, "astro grammar must be available in tree-sitter-wasms");
+  const root = parseWasm(language, markup);
+  assert.ok(root, "snippet must parse");
+  const stack: TsNode[] = [root];
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (node.type === "script_element") return node;
+    for (let i = (node.namedChildCount ?? 0) - 1; i >= 0; i--) {
+      const child = node.namedChild?.(i);
+      if (child) stack.push(child);
+    }
+  }
+  throw new Error(`no script_element in: ${markup}`);
+}
+
+test("container: isJavaScriptScript classifies a <script> by its type attribute", async () => {
+  // The predicate's own truth table, asserted directly. The extraction-level
+  // test above covers the same ground behaviourally; this one exists so the
+  // rule is legible as a rule, and so a future `type` value can be added here
+  // without reasoning about spans.
+  for (const [tag, isJs] of [
+    ["<script>", true],
+    ["<script is:inline>", true],
+    ["<script defer async>", true],
+    ['<script src="/boot.js">', true],
+    ["<script type>", true],
+    ['<script type="">', true],
+    ['<script type="module">', true],
+    ["<script type=module>", true],
+    ['<script type="MODULE">', true],
+    ['<script type=" text/javascript ">', true],
+    ['<script type="application/javascript">', true],
+    ['<script type="text/typescript">', true],
+    ['<script type="application/ld+json">', false],
+    ['<script type="application/json">', false],
+    ["<script type=application/json>", false],
+    ['<script type="importmap">', false],
+    ['<script type="speculationrules">', false],
+    ['<script type="text/plain">', false],
+    // Present but not readable without evaluating the expression. Treated as
+    // data: one un-indexed block beats guessing at content we cannot see.
+    ["<script type={contentType}>", false],
+  ] as const) {
+    const node = await firstScriptElement(`<div>${tag}const x = 1;</script></div>`);
+    assert.equal(isJavaScriptScript(node), isJs, `${tag} should be ${isJs ? "" : "not "}JavaScript`);
+  }
 });
