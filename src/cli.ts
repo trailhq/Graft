@@ -39,6 +39,7 @@ import { formatNonInteractiveHelp, formatPlan, runPicker } from "./cli-picker.js
 import { homedir } from "node:os";
 import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurrentVersion, runUpgrade } from "./cli-meta.js";
 import { patchBuildConfig, type BuildConfig } from "./util/state.js";
+import { NEVER_INCLUDE_DIRS } from "./ingest/fs.js";
 import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
 import { setInputRate } from "./context/savings.js";
@@ -330,8 +331,9 @@ program
   )
   .option(
     "--include-dir <name>",
-    "override SKIP_DIRS for this repo's walks — repeatable (e.g. --include-dir build --include-dir tools); " +
-      "persisted, so a later build (and the hooks/refresh path) include it without the flag; dot-dirs are never overridable",
+    "override SKIP_DIRS (and named hidden directories) for this repo's walks — repeatable " +
+      "(e.g. --include-dir build --include-dir .kb); persisted, so a later build (and the " +
+      "hooks/refresh path) include it without the flag; .git is never overridable",
     (val: string, prev: string[]) => [...prev, val],
     [] as string[],
   )
@@ -377,14 +379,13 @@ program
     // walkDir call sites read it from state, not from a threaded option.
     const buildConfigPatch: BuildConfig = {};
     if (opts.includeDir && opts.includeDir.length > 0) {
-      // --include-dir takes bare SKIP_DIRS-style directory NAMES (shouldSkipDir
-      // compares a single path segment), never paths, and dot-dirs are never
-      // overridable at all (see the option's own help text) — reject anything
-      // else up front instead of silently persisting a value that can never
-      // match a real directory name.
+      // --include-dir takes bare directory NAMES (shouldSkipDir compares a
+      // single path segment), never paths. Named hidden directories (.kb) are
+      // the same opt-in as SKIP_DIRS names; NEVER_INCLUDE_DIRS (.git) stay
+      // forbidden — reject those up front instead of persisting a no-op.
       for (const name of opts.includeDir) {
-        if (name.startsWith(".")) {
-          console.error(`✗ --include-dir "${name}": dot-directories are never overridable`);
+        if (NEVER_INCLUDE_DIRS.has(name)) {
+          console.error(`✗ --include-dir "${name}": ${name} is never overridable`);
           process.exit(1);
         }
         if (name.includes("/") || name.includes("\\")) {
