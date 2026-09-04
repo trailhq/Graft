@@ -343,6 +343,10 @@ program
     (val: string, prev: string[]) => [...prev, val],
     [] as string[],
   )
+  .option(
+    "--all-dirs",
+    "clear a persisted --only-dir whitelist and index the whole repo again",
+  )
   .option("--no-gitignore", "skip writing graft/ into .gitignore (same as GRAFT_NO_GITIGNORE=1)")
   .option("--no-ignore", "skip writing .ignore for ripgrep re-admit (same as GRAFT_NO_IGNORE=1)")
   .action(async (
@@ -356,6 +360,7 @@ program
       allowPartial?: boolean;
       includeDir?: string[];
       onlyDir?: string[];
+      allDirs?: boolean;
       followSubmodules?: boolean;
       followNestedRepos?: boolean;
       gitignore?: boolean;
@@ -410,6 +415,8 @@ program
         process.exit(1);
       }
       onlyDirs = normalized;
+    } else if (opts.allDirs) {
+      onlyDirs = []; // an empty list is the explicit "clear the whitelist" signal
     }
     const followSubmodulesWasExplicit = command.getOptionValueSource("followSubmodules") === "cli";
     if (followSubmodulesWasExplicit && typeof opts.followSubmodules === "boolean") {
