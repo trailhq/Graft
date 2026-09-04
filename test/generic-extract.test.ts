@@ -471,3 +471,55 @@ test("a throwing grammar is a per-file build error, cached as a failure (#139)",
     swapGrammarForTest("rust", prev);
   }
 });
+
+// GDScript: a .gd file IS a class, so `class_name` names the file's own type and
+// `class Inner:` is a nested one. Locals inside a func body must stay out.
+const GDSCRIPT = `extends Node
+class_name WaterCache
+
+signal chunk_ready(id: int)
+
+enum Mode { FAST, SLOW }
+
+const MAX_CHUNKS := 32
+var cache := {}
+
+class Inner:
+\thelper_placeholder
+
+func _ready() -> void:
+\tvar local_only := 1
+\t_build(local_only)
+
+func _build(n: int) -> int:
+\treturn n + MAX_CHUNKS
+`.replace(/helper_placeholder/, "func helper() -> void:\n\t\tpass");
+
+test("genericLangOf routes .gd to the breadth tier", () => {
+  assert.equal(genericLangOf("scripts/save/water_cache.gd")?.name, "gdscript");
+});
+
+test("GDScript: class_name/nested class/signal/enum/const become symbols, body locals do not", async () => {
+  await warmGenericGrammars(["gdscript"]);
+  assert.ok(isWarm("gdscript"), "gdscript grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("water_cache.gd", GDSCRIPT, "gdscript");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const byName = new Map(symbols.map((n) => [n.name, n]));
+
+  assert.equal(byName.get("WaterCache")?.kind, "class", "class_name is the file's own class");
+  assert.equal(byName.get("Inner")?.kind, "class", "nested class");
+  assert.equal(byName.get("helper")?.kind, "method", "func inside a class body is a method");
+  assert.equal(byName.get("_build")?.kind, "function", "top-level func");
+  assert.equal(byName.get("Mode")?.kind, "enum");
+  assert.equal(byName.get("MAX_CHUNKS")?.kind, "constant");
+  assert.equal(byName.get("chunk_ready")?.kind, "variable", "signals are named so callers can find emits");
+  assert.equal(byName.get("cache")?.kind, "variable", "class-level var");
+
+  assert.ok(!symbols.some((n) => n.name === "local_only"), "function-body local is not a symbol");
+
+  const edges = resolveEdges(nodes, rawEdges);
+  const calls = edges
+    .filter((e) => e.relation === "calls")
+    .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
+  assert.ok(calls.includes("_ready→_build"), `_ready → _build (got ${calls.join(", ")})`);
+});
