@@ -53,3 +53,19 @@
 
 (attribute_call
   (identifier) @name) @reference.call
+
+; GDScript has no import statement — a script pulls in another script with
+; `preload("res://...")` (compile time) or `load(...)` (runtime). Capturing the
+; literal is what gives a .gd file incoming `imports` edges, and with them a
+; blast radius: edit a script and graft can say who preloads it.
+(call
+  (identifier) @_fn
+  arguments: (arguments
+    . (string) @name)
+  (#eq? @_fn "preload")) @reference.import
+
+(call
+  (identifier) @_fn
+  arguments: (arguments
+    . (string) @name)
+  (#eq? @_fn "load")) @reference.import

@@ -523,3 +523,58 @@ test("GDScript: class_name/nested class/signal/enum/const become symbols, body l
     .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
   assert.ok(calls.includes("_ready→_build"), `_ready → _build (got ${calls.join(", ")})`);
 });
+
+const GD_TARGET = `extends Node
+class_name WaterCache
+
+func build() -> void:
+	pass
+`;
+
+const GD_USER = `extends Node
+
+const WaterCacheScript := preload("res://scripts/save/water_cache.gd")
+const Missing := preload("res://scripts/does_not_exist.gd")
+
+func run() -> void:
+	var runtime := load("res://scripts/save/water_cache.gd")
+`;
+
+test("GDScript: preload/load give the imported FILE an incoming edge (blast radius)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-gd-import-"));
+  mkdirSync(join(dir, "scripts", "save"), { recursive: true });
+  writeFileSync(join(dir, "scripts", "save", "water_cache.gd"), GD_TARGET);
+  writeFileSync(join(dir, "scripts", "save", "user.gd"), GD_USER);
+
+  await buildGraph(dir, { reuse: false });
+  const g = readGraph(wiringPath(join(dir, "graft")))!;
+  const imports = g.edges.filter((e) => e.relation === "imports");
+
+  // `res://` is the Godot project root, so the prefix is stripped and the rest
+  // matched as a path suffix — this is the edge a post-edit blast radius reads.
+  assert.ok(
+    imports.some(
+      (e) =>
+        e.source === "scripts/save/user.gd" && e.target === "scripts/save/water_cache.gd",
+    ),
+    `user.gd imports water_cache.gd (got ${imports.map((e) => `${e.source}→${e.target}`).join(", ")})`,
+  );
+
+  // preload and load of the SAME path are one edge, not two.
+  assert.equal(
+    imports.filter((e) => e.target === "scripts/save/water_cache.gd").length,
+    1,
+    "preload + load of one path must not double the edge",
+  );
+
+  // A path with no file behind it keeps the raw specifier as its target — the
+  // same shape every other resolver uses for an unresolved import — rather than
+  // being pointed at some same-named node elsewhere in the repo.
+  const dangling = imports.filter((e) => e.target.includes("does_not_exist"));
+  assert.equal(dangling.length, 1, "the dangling import is still recorded");
+  assert.equal(
+    dangling[0].target,
+    "res://scripts/does_not_exist.gd",
+    "an unresolvable res:// path stays the raw specifier, never a node id",
+  );
+});

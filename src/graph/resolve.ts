@@ -128,6 +128,7 @@ export function resolveEdges(
   // node ids. A `use App\Models\User` names a PSR-4 class whose file mirrors the namespace
   // tail under some (unknown) source root, so the suffix is the portable key.
   const phpFilesBySuffix = new Map<string, string[]>();
+  const gdFilesBySuffix = new Map<string, string[]>();
   const hasGoModules = !!opts.goModules?.length;
   for (const n of nodes) {
     if (n.kind === "file") {
@@ -149,6 +150,15 @@ export function resolveEdges(
       if (n.path.endsWith(".php")) {
         const parts = toPosixPath(n.path).split("/");
         for (let i = 0; i < parts.length; i++) push(phpFilesBySuffix, parts.slice(i).join("/"), n.id);
+      }
+      if (n.path.endsWith(".gd")) {
+        // Same suffix trick as Java/C/PHP, for the same reason: a `res://` path is
+        // relative to the GODOT project root, which sits at an unknown depth under
+        // the repo root (and there may be several — a repo can hold more than one
+        // Godot project). Indexing every boundary suffix lets the specifier itself
+        // pick the depth, and an ambiguous match is dropped rather than guessed.
+        const parts = toPosixPath(n.path).split("/");
+        for (let i = 0; i < parts.length; i++) push(gdFilesBySuffix, parts.slice(i).join("/"), n.id);
       }
       {
         const p = toPosixPath(n.path);
@@ -216,7 +226,9 @@ export function resolveEdges(
                 ? resolveRustUse(e.specifier, e.file, byId, rustCrateRoots)
                 : e.file.endsWith(".php")
                   ? resolvePhpUse(e.specifier, phpFilesBySuffix)
-                  : resolveImport(e.specifier, e.file, byId);
+                  : e.file.endsWith(".gd")
+                    ? resolveGodotRes(e.specifier, gdFilesBySuffix)
+                    : resolveImport(e.specifier, e.file, byId);
       add(e.source, target, "imports", "extracted");
     } else if (e.relation === "extends" || e.relation === "implements") {
       // `implements` also resolves to a `trait` — PHP models trait composition
@@ -505,6 +517,25 @@ function resolveImport(spec: string, file: string, byId: Map<string, NodeV1>): s
   ];
   for (const c of candidates) if (byId.has(c)) return c;
   return spec;
+}
+
+/**
+ * Resolve a GDScript `preload("res://...")` / `load(...)` path to an in-repo file
+ * node; otherwise return the raw specifier.
+ *
+ * `res://` is the Godot project root, not the repo root, so the prefix is stripped
+ * and what remains is matched as a path suffix. Only a unique hit resolves: two
+ * Godot projects in one repo can each own a `scripts/save/cache.gd`, and pointing
+ * an edge at the wrong one is worse than leaving it unresolved. A non-`res://`
+ * specifier is a runtime `load()` of a user:// or computed path — nothing static
+ * to resolve, so it is returned as written.
+ */
+function resolveGodotRes(spec: string, gdFilesBySuffix: Map<string, string[]>): string {
+  if (!spec.startsWith("res://")) return spec;
+  const rest = spec.slice("res://".length).replace(/^\/+/, "");
+  if (!rest) return spec;
+  const hits = gdFilesBySuffix.get(rest);
+  return hits && hits.length === 1 ? hits[0] : spec;
 }
 
 /**
