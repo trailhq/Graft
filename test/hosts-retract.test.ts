@@ -305,13 +305,14 @@ test('a renamed allowlist entry is dropped; the user\'s own rules stay', () => {
   assert.equal(allow.filter((a) => a === 'Bash(graft-dev:*)').length, 1, 'no duplicate of graft\'s own entry');
 });
 
-test('a superseded footer regex is replaced rather than stacked', () => {
+test('a superseded footer regex is stripped from project settings; the user\'s stays', () => {
   const { merged } = mergeGraftSettings({
     footerLinksRegexes: ['graft/OLD-PATTERN\\.md', 'docs/.*'],
   });
   assert.ok(!merged.footerLinksRegexes.includes('graft/OLD-PATTERN\\.md'), 'old graft pattern gone');
   assert.ok(merged.footerLinksRegexes.includes('docs/.*'), 'user pattern kept');
-  assert.equal(merged.footerLinksRegexes.filter((r: string) => r.startsWith('graft/')).length, 1);
+  assert.equal(merged.footerLinksRegexes.filter((r: string) => r.startsWith('graft/')).length, 0,
+    'graft footer is not rewritten into the project file');
 });
 
 test('mergeGraftSettings stays idempotent over repeated runs', () => {
