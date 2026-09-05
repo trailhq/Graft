@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeGraftSettings } from '../src/claude/settings-merge.js';
+import { mergeGraftHooks, mergeGraftSettings } from '../src/claude/settings-merge.js';
 
 const SL = 'node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs"';
 
@@ -19,7 +19,13 @@ test('empty settings gets the full Graft blocks', () => {
   const savings = merged.hooks.PostToolUse[1];
   assert.equal(savings.matcher, 'Bash|mcp__graft__|Read|Grep|Glob');
   assert.ok(savings.hooks[0].command.includes('tool-savings'), 'savings hook wired');
-  assert.ok(merged.footerLinksRegexes.includes('graft/[\\w./-]+\\.md'));
+  // Claude Code ignores footerLinksRegexes in project settings — don't write it.
+  assert.equal(merged.footerLinksRegexes, undefined);
+  assert.equal(merged.hooks.PostToolUse[0].hooks[0].timeout, 10);
+  assert.equal(savings.hooks[0].timeout, 8);
+  assert.equal(merged.hooks.UserPromptSubmit[0].hooks[0].timeout, 15);
+  assert.equal(merged.hooks.SessionStart[0].hooks[0].timeout, 8);
+  assert.equal(merged.hooks.Stop[0].hooks[0].timeout, 8);
   assert.deepEqual(warnings, []);
 });
 
@@ -88,12 +94,61 @@ test('existing foreign hooks are preserved; Graft appended', () => {
   assert.ok(merged.hooks.PostToolUse[2].hooks[0].command.includes('graft-hooks.cjs'));
 });
 
-test('re-running is idempotent (no duplicate Graft entries or footer)', () => {
+test('re-running is idempotent (no duplicate Graft entries; timeouts stay seconds)', () => {
   const once = mergeGraftSettings({}).merged;
   const twice = mergeGraftSettings(once).merged;
   assert.equal(twice.hooks.PostToolUse.length, 2); // post-edit + tool-savings, not duplicated
   assert.equal(twice.hooks.Stop.length, 1);
-  assert.equal(twice.footerLinksRegexes.filter((r: string) => r === 'graft/[\\w./-]+\\.md').length, 1);
+  assert.equal(twice.footerLinksRegexes, undefined);
+  // A SessionStart refresh must not write the 0.16.0 millisecond values back.
+  assert.equal(twice.hooks.PostToolUse[0].hooks[0].timeout, 10);
+  assert.equal(twice.hooks.PostToolUse[1].hooks[0].timeout, 8);
+  assert.equal(twice.hooks.UserPromptSubmit[0].hooks[0].timeout, 15);
+  assert.equal(twice.hooks.SessionStart[0].hooks[0].timeout, 8);
+  assert.equal(twice.hooks.Stop[0].hooks[0].timeout, 8);
+});
+
+test('a refresh replaces leftover millisecond timeouts with seconds', () => {
+  const stale = mergeGraftSettings({}).merged;
+  stale.hooks.PostToolUse[0].hooks[0].timeout = 10000;
+  stale.hooks.PostToolUse[1].hooks[0].timeout = 8000;
+  stale.hooks.UserPromptSubmit[0].hooks[0].timeout = 15000;
+  stale.hooks.SessionStart[0].hooks[0].timeout = 8000;
+  stale.hooks.Stop[0].hooks[0].timeout = 8000;
+  const { merged } = mergeGraftSettings(stale);
+  assert.equal(merged.hooks.PostToolUse[0].hooks[0].timeout, 10);
+  assert.equal(merged.hooks.PostToolUse[1].hooks[0].timeout, 8);
+  assert.equal(merged.hooks.UserPromptSubmit[0].hooks[0].timeout, 15);
+  assert.equal(merged.hooks.SessionStart[0].hooks[0].timeout, 8);
+  assert.equal(merged.hooks.Stop[0].hooks[0].timeout, 8);
+});
+
+test('project merge strips graft footer regexes and keeps the user\'s', () => {
+  const { merged } = mergeGraftSettings({
+    footerLinksRegexes: ['graft/[\\w./-]+\\.md', 'docs/.*'],
+  });
+  assert.deepEqual(merged.footerLinksRegexes, ['docs/.*']);
+});
+
+test('project merge drops footerLinksRegexes when only graft\'s pattern was there', () => {
+  const { merged } = mergeGraftSettings({
+    footerLinksRegexes: ['graft/[\\w./-]+\\.md'],
+  });
+  assert.equal(merged.footerLinksRegexes, undefined);
+});
+
+test('user-level merge writes footerLinksRegexes and keeps the user\'s regexes', () => {
+  const { merged } = mergeGraftHooks({ footerLinksRegexes: ['docs/.*'] }, '/tmp/helpers');
+  assert.deepEqual(merged.footerLinksRegexes, ['docs/.*', 'graft/[\\w./-]+\\.md']);
+  assert.equal(merged.hooks.UserPromptSubmit[0].hooks[0].timeout, 15);
+  assert.equal(merged.hooks.SessionStart[0].hooks[0].timeout, 8);
+});
+
+test('user-level footer merge is idempotent and replaces a superseded graft pattern', () => {
+  const once = mergeGraftHooks({ footerLinksRegexes: ['graft/OLD-PATTERN\\.md', 'docs/.*'] }, '/tmp/helpers').merged;
+  const twice = mergeGraftHooks(structuredClone(once), '/tmp/helpers').merged;
+  assert.deepEqual(twice.footerLinksRegexes, ['docs/.*', 'graft/[\\w./-]+\\.md']);
+  assert.deepEqual(twice.hooks, once.hooks);
 });
 
 test('foreign top-level keys survive', () => {
