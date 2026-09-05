@@ -65,6 +65,7 @@ test("ChatCruxSummarizer forces record_symbols and normalizes numbers", async ()
     nodes: [{ id: "sym1", kind: "function", signature: null, startLine: 1, endLine: 5 }],
   });
   assert.deepEqual(m.last?.responseFormat, { kind: "tool", name: "record_symbols" });
+  assert.equal(m.last?.maxTokens, 8192);
   assert.deepEqual(out, [{ id: "sym1", summary: "does x", crux_start: 3, crux_end: 5 }]);
 });
 

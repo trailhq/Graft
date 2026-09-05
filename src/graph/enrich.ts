@@ -19,7 +19,14 @@
  * once, to cut `crux.code` verbatim from the source. `crux.span` is a pointer
  * only and is never used to re-slice.
  */
-import { formatCruxMiss, type CruxMissKind, type CruxSummarizer, type NodeCrux, type NodeRef } from "../ai/crux.js";
+import {
+  formatCruxMiss,
+  normalizeCruxId,
+  type CruxMissKind,
+  type CruxSummarizer,
+  type NodeCrux,
+  type NodeRef,
+} from "../ai/crux.js";
 import { LlmFailureGate } from "../ai/failure.js";
 import type { Crux, NodeV1 } from "./types.js";
 
@@ -257,12 +264,21 @@ async function collectFileCrux(
   refs: NodeRef[],
 ): Promise<{ results: Map<string, NodeCrux>; error?: string; quality?: boolean }> {
   const results = new Map<string, NodeCrux>();
+  const wanted = new Set(refs.map((r) => r.id));
   let missing = refs;
   let error: string | undefined;
+  let unmatched = false;
   for (let attempt = 0; attempt < 2 && missing.length > 0; attempt++) {
     try {
       const list = await summarizer.describeFile({ path, source, nodes: missing });
-      for (const r of list) if (!results.has(r.id)) results.set(r.id, r);
+      for (const r of list) {
+        const id = normalizeCruxId(r.id);
+        if (!wanted.has(id)) {
+          if (r.summary.trim()) unmatched = true;
+          continue;
+        }
+        if (!results.has(id)) results.set(id, { ...r, id });
+      }
       missing = refs.filter((r) => !results.has(r.id));
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -274,7 +290,8 @@ async function collectFileCrux(
   // re-run `--deep` forever (#172). Surface it as a failure like a thrown error.
   // Content-quality, not quota: count the file, keep going (#235).
   if (!error && refs.length > 0 && results.size === 0) {
-    return { results, error: cruxMissMessage(summarizer, "empty-toolCalls"), quality: true };
+    const kind: CruxMissKind = unmatched ? "id-mismatch" : "empty-toolCalls";
+    return { results, error: cruxMissMessage(summarizer, kind), quality: true };
   }
   return { results, error };
 }
