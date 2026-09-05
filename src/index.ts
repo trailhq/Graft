@@ -36,6 +36,7 @@ export { OpenAIChatModel } from "./ai/llm/openai.js";
 export { AnthropicChatModel } from "./ai/llm/anthropic.js";
 export { LiteLLMChatModel, listLiteLLMModels, DEFAULT_LITELLM_BASE_URL } from "./ai/llm/litellm.js";
 export { OrcaRouterChatModel, listOrcaRouterModels, DEFAULT_ORCAROUTER_BASE_URL } from "./ai/llm/orcarouter.js";
+export { AtlasCloudChatModel, listAtlasCloudModels, DEFAULT_ATLASCLOUD_BASE_URL } from "./ai/llm/atlascloud.js";
 
 // Engine ops, for advanced/custom setups.
 export { ChatSynthesizer } from "./ai/synthesize.js";
