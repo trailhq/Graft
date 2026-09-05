@@ -47,7 +47,12 @@ export interface CruxSummarizer {
 }
 
 /** Why a crux call produced no usable summaries (#235). */
-export type CruxMissKind = "empty-toolCalls" | "unparseable" | "truncated" | "empty-parsed";
+export type CruxMissKind =
+  | "empty-toolCalls"
+  | "unparseable"
+  | "truncated"
+  | "empty-parsed"
+  | "id-mismatch";
 
 export interface CruxMiss {
   kind: CruxMissKind;
@@ -75,7 +80,21 @@ export function classifyCruxMiss(res: ChatResponse, parsed: NodeCrux[]): CruxMis
 /** Per-file error text: miss class + the provider's finish_reason (#235). */
 export function formatCruxMiss(kind: CruxMissKind, finishReason: string | null): string {
   const fr = finishReason == null || finishReason === "" ? "null" : finishReason;
+  if (kind === "id-mismatch") {
+    return `model returned symbol summaries that matched no requested id [id-mismatch, finish_reason=${fr}]`;
+  }
   return `model returned no usable symbol summaries [${kind}, finish_reason=${fr}]`;
+}
+
+/**
+ * `userContent` renders each target as `id=${n.id} | ${kind} | lines Lx-Ly`.
+ * Node ids never contain `" | "`; models that follow "use that id verbatim"
+ * often echo the whole decoration for file nodes (whose id is a bare path).
+ * Strip it so `collectFileCrux` can look up the real node (#298).
+ */
+export function normalizeCruxId(id: string): string {
+  const cut = id.indexOf(" | ");
+  return (cut === -1 ? id : id.slice(0, cut)).trim();
 }
 
 const SYSTEM_PROMPT = `You explain code definitions for a code graph that helps engineers navigate a codebase.
@@ -142,11 +161,12 @@ function parseResults(obj: { symbols?: unknown } | undefined): NodeCrux[] {
     .map((s) => s as Record<string, unknown>)
     .filter((s) => typeof s.id === "string")
     .map((s) => ({
-      id: s.id as string,
+      id: normalizeCruxId(s.id as string),
       summary: typeof s.summary === "string" ? s.summary.trim() : "",
       crux_start: num(s.crux_start),
       crux_end: num(s.crux_end),
-    }));
+    }))
+    .filter((s) => s.id.length > 0);
 }
 
 /**
