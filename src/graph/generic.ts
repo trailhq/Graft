@@ -243,6 +243,10 @@ export function swapGrammarForTest(name: string, entry: Loaded | null): Loaded |
   return prev;
 }
 
+/** Test seam: pre-seed the parser parseWasm will use for `language`, so a
+ * throwing parse() can be driven without a real crashing grammar. */
+export function seedWasmParserForTest(language: object, parser: WasmParser): void { parsersByLanguage.set(language, parser); }
+
 /** Load one grammar from the tree-sitter-wasms bundle, initialising
  * web-tree-sitter on first call. Null when the wasm is missing or won't
  * instantiate — never throws, so a caller degrades instead of failing the build.

@@ -17,10 +17,12 @@ import {
   loadWasmLanguage,
   parseWasm,
   swapGrammarForTest,
+  seedWasmParserForTest,
   wasmRuntimePoisoned,
   clearWasmPoisonForTest,
   type TsNode,
   type Loaded,
+  type WasmParser,
 } from "../src/graph/generic.js";
 import { resolveEdges } from "../src/graph/resolve.js";
 import { buildGraph } from "../src/graph/build.js";
@@ -948,4 +950,46 @@ test("extractGeneric frees WASM memory: 400 parses of a 40 KB file do not grow R
   // ~750 MB (and 1,100 parses would hit the 2 GB abort, so the loop stays at
   // 400). Freed, growth is V8 noise. 100 MB is the line.
   assert.ok(grewMb < 100, `RSS grew by ${grewMb.toFixed(0)} MB over 400 parses: the tree is not being deleted`);
+});
+
+// parseWasm has its OWN parse-catch path (generic.ts, distinct from extractGeneric's):
+// notePoison → parser.reset() → throw. It is the path the container (.vue) tier hits.
+// parseWasm keys a WeakMap<object, WasmParser> by the language object and creates the
+// parser itself on first use, so a fake language cannot make parse() throw on its own —
+// seedWasmParserForTest pre-seeds the parser parseWasm will use, so a throwing parse()
+// can be driven without a real crashing grammar.
+test("parseWasm rethrows a throwing parse and resets the shared parser (an ordinary throw does not poison)", async () => {
+  await warmGenericGrammars(["rust"]); // initialises web-tree-sitter
+  const language = {};
+  let resets = 0;
+  const parser: WasmParser = {
+    parse(): never { throw new Error("memory access out of bounds (fake)"); },
+    reset(): void { resets++; },
+    delete(): void {},
+  };
+  seedWasmParserForTest(language, parser);
+  assert.throws(() => parseWasm(language, "x"), /memory access out of bounds/);
+  assert.equal(resets, 1, "reset() called once before rethrow");
+  assert.equal(wasmRuntimePoisoned(), null, "an ordinary throw does not poison the runtime");
+});
+
+test("parseWasm poisons the runtime on a WebAssembly.RuntimeError; every later call fails with the aborted-earlier error", async () => {
+  await warmGenericGrammars(["rust"]);
+  const language = {};
+  // The ES2022 lib has no WebAssembly type; read its RuntimeError constructor off globalThis.
+  const RuntimeError = (globalThis as { WebAssembly: { RuntimeError: new (m: string) => Error } }).WebAssembly.RuntimeError;
+  const parser: WasmParser = {
+    parse(): never { throw new RuntimeError("Aborted()."); },
+    reset(): void {},
+    delete(): void {},
+  };
+  seedWasmParserForTest(language, parser);
+  try {
+    assert.throws(() => parseWasm(language, "x"), /Aborted\(/);
+    assert.match(wasmRuntimePoisoned() ?? "", /^Aborted\(/);
+    // The runtime is poisoned now: a further parseWasm never attempts a parse.
+    assert.throws(() => parseWasm(language, "x"), /aborted earlier in this process/);
+  } finally {
+    clearWasmPoisonForTest();
+  }
 });
