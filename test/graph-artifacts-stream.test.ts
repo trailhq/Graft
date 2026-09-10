@@ -16,8 +16,38 @@ test("extract cache round-trips through NDJSON, including quotes and newlines in
   assert.ok(writeExtractCache(d, { ...emptyExtractCache(), files: FILES }));
   assert.ok(extractCachePath(d)!.endsWith(".ndjson"));
   const back = readExtractCache(d);
-  assert.deepEqual(back.files, FILES);
+  assert.deepEqual({ ...back.files }, FILES); // spread: the reader's map has a null prototype
   assert.equal(back.version, 2);
+});
+
+test("extract cache: a blank first line fails the header check, so the entries after it are not trusted", () => {
+  const d = mkdtempSync(join(tmpdir(), "graft-ndjson-"));
+  writeExtractCache(d, { ...emptyExtractCache(), files: FILES });
+  const p = extractCachePath(d)!;
+  const lines = readFileSync(p, "utf8").split("\n");
+  writeFileSync(p, ["", ...lines.slice(1)].join("\n"));
+  assert.deepEqual(readExtractCache(d).files, {});
+});
+
+test("extract cache: a rel of __proto__ is an ordinary key, not the prototype setter", () => {
+  const d = mkdtempSync(join(tmpdir(), "graft-ndjson-"));
+  writeExtractCache(d, emptyExtractCache());
+  const p = extractCachePath(d)!;
+  const e: ExtractEntry = { size: 1, mtimeMs: 1, hash: "hp", nodes: [], rawEdges: [] };
+  writeFileSync(p, readFileSync(p, "utf8") + JSON.stringify({ rel: "__proto__", e }) + "\n");
+  const files = readExtractCache(d).files;
+  assert.ok(Object.prototype.hasOwnProperty.call(files, "__proto__"), "stored as its own key");
+  assert.deepEqual({ ...files["__proto__"] }, e);
+  assert.equal(Object.getPrototypeOf(files), null, "no prototype for a crafted rel to reach");
+  assert.equal(files["toString"], undefined, "an inherited name is not a cache hit");
+});
+
+test("extract cache: a CRLF file reads back the same", () => {
+  const d = mkdtempSync(join(tmpdir(), "graft-ndjson-"));
+  writeExtractCache(d, { ...emptyExtractCache(), files: { "src/a.ts": FILES["src/a.ts"] } });
+  const p = extractCachePath(d)!;
+  writeFileSync(p, readFileSync(p, "utf8").replace(/\n/g, "\r\n"));
+  assert.deepEqual({ ...readExtractCache(d).files }, { "src/a.ts": FILES["src/a.ts"] });
 });
 
 test("extract cache: one line per entry, header first", () => {
@@ -43,11 +73,11 @@ test("extract cache: a wrong version, a wrong stamp, or a corrupt line means an 
 test("extract cache: an empty file set still writes a valid header the reader accepts", () => {
   const d = mkdtempSync(join(tmpdir(), "graft-ndjson-"));
   assert.ok(writeExtractCache(d, emptyExtractCache()));
-  assert.deepEqual(readExtractCache(d).files, {});
+  assert.deepEqual({ ...readExtractCache(d).files }, {});
 });
 
 import { readGraph, wiringPath, writeGraph } from "../src/graph/write.js";
-import { askIndexPath, readAskIndex, writeAskIndex } from "../src/ask/index-file.js";
+import { askIndexPath, readAskIndex, writeAskIndex, type AskIndex } from "../src/ask/index-file.js";
 import type { GraphV1, NodeV1 } from "../src/graph/types.js";
 
 function node(id: string, extra: Partial<NodeV1> = {}): NodeV1 {
@@ -78,13 +108,43 @@ test("writeGraph with no nodes and no edges is still valid", () => {
   assert.deepEqual(readGraph(wiringPath(d))!.nodes, []);
 });
 
-test("writeAskIndex streams a document equal to the one-shot JSON.stringify", () => {
+/** The AskIndex GRAPH must produce, written out by hand: one-letter names and the
+ * "a" of "a.ts" are dropped by tokenize, as is "on" (a stop word). */
+const GRAPH_ASK_INDEX: AskIndex = {
+  version: 1,
+  avgBodyLen: 1,
+  df: [["ts", 2], ["dropped", 1], ["disk", 1]],
+  docCount: 2,
+  docs: [
+    { id: "a", name: [], path: [["ts", 1]], body: [] },
+    { id: "b", name: [], path: [["ts", 1]], body: [["dropped", 1], ["disk", 1]] },
+  ],
+};
+
+/** JSON.stringify of an AskIndex with a newline before every doc and the close. */
+function askLineShaped(idx: AskIndex): string {
+  const { docs, ...head } = idx;
+  return `${JSON.stringify(head).slice(0, -1)},"docs":[${docs.map((doc) => "\n" + JSON.stringify(doc)).join(",")}\n]}\n`;
+}
+
+test("writeAskIndex writes exactly the line-shaped JSON.stringify of the index it should build", () => {
   const d = mkdtempSync(join(tmpdir(), "graft-askidx-"));
   writeAskIndex(d, GRAPH);
   const text = readFileSync(askIndexPath(d), "utf8");
-  const back = readAskIndex(d)!;
-  assert.deepEqual(JSON.parse(text), back);
-  assert.equal(back.docCount, 2);
+  assert.equal(text, askLineShaped(GRAPH_ASK_INDEX));
+  assert.deepEqual(JSON.parse(text), JSON.parse(JSON.stringify(GRAPH_ASK_INDEX)), "and it is that object as JSON");
+  assert.deepEqual(readAskIndex(d), GRAPH_ASK_INDEX);
+});
+
+test("readGraph and readAskIndex stream a CRLF file over the cap", () => {
+  const d = mkdtempSync(join(tmpdir(), "graft-crlf-"));
+  writeGraph(GRAPH, d);
+  writeAskIndex(d, GRAPH);
+  const graphText = readFileSync(wiringPath(d), "utf8");
+  writeFileSync(wiringPath(d), graphText.replace(/\n/g, "\r\n"));
+  writeFileSync(askIndexPath(d), readFileSync(askIndexPath(d), "utf8").replace(/\n/g, "\r\n"));
+  assert.deepEqual(readGraph(wiringPath(d), { maxStringLength: 16 }), JSON.parse(graphText));
+  assert.deepEqual(readAskIndex(d, { maxStringLength: 16 }), GRAPH_ASK_INDEX);
 });
 
 import { readGraphFromBuffer } from "../src/graph/write.js";
@@ -120,6 +180,26 @@ test("readGraph streams a file over the cap and returns the same graph as JSON.p
 test("readGraph streaming returns null on a file that is not line-shaped", () => {
   assert.equal(readGraphFromBuffer(Buffer.from('{"meta":{},"nodes":[{"id":"a"}],"edges":[]}\n')), null, "one-line JSON is not the streamed shape");
   assert.equal(readGraphFromBuffer(Buffer.from("garbage\n")), null);
+});
+
+test("readGraphFromBuffer tolerates a top-level header key other than meta before nodes", () => {
+  // A hand-written header carrying an extra key ahead of "nodes": the reader must
+  // parse the whole header object rather than slice `meta` out by fixed offsets, so
+  // the extra field survives on the result instead of failing the parse.
+  const meta = JSON.stringify(GRAPH.meta);
+  const buf = Buffer.from(`{"meta":${meta},"extra":1,"nodes":[\n],"edges":[\n]}\n`);
+  const g = readGraphFromBuffer(buf);
+  assert.ok(g, "parsed the hand-written header");
+  assert.deepEqual(g!.meta, GRAPH.meta);
+  assert.equal((g as unknown as { extra: number }).extra, 1, "the extra key survives on the result");
+  assert.deepEqual(g!.nodes, []);
+  assert.deepEqual(g!.edges, []);
+});
+
+test("writeGraph refuses a graph carrying a top-level key other than meta/nodes/edges", () => {
+  const d = mkdtempSync(join(tmpdir(), "graft-wiring-guard-"));
+  const rogue = { ...GRAPH, extra: 1 } as unknown as GraphV1;
+  assert.throws(() => writeGraph(rogue, d), /extra/, "the error names the offending key so it can't silently corrupt the head slice");
 });
 
 test("writeAskIndex writes one doc per line, still valid JSON, and streams back identically", () => {

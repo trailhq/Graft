@@ -650,6 +650,7 @@ trail map --max-dirs N               # raise/lower the number of directories sho
 #   GRAFT_NO_REFRESH=1               # same, for every command
 #   GRAFT_REFRESH=hash               # hash every file instead of trusting size+mtime
 #   GRAFT_PARSE_WORKERS=auto         # trail build only: parse in child processes (or a number); default in-process
+#                                    #   auto = min(cores-1, free memory / 300 MB, files / 200); in-process under 200 files or below 2 workers
 
 # learnings
 trail note --title "<about>" [dir]   # save a learning: what this session decided, tried and ruled out (the text on stdin)
@@ -682,6 +683,7 @@ trail build --check                  # build nothing: fail (exit 1) if graft/ ha
 trail build --deep -e .ts .py        # with --deep: only summarize these extensions
 trail build --no-reuse               # re-parse every file instead of replaying unchanged ones from cache
 trail build --workers auto           # large repo? parse in parallel child processes (opt-in; never used by the pre-query refresh)
+# very large repos (tens of thousands of files) need a bigger V8 heap: NODE_OPTIONS=--max-old-space-size=16384 trail build
 trail build --follow-submodules      # include initialized submodules; persist the choice for builds + MCP refresh
 trail build --no-follow-submodules   # exclude submodules again and persist that choice (the default)
 trail build --follow-nested-repos    # include nested git clones the index doesn't track; persist the choice

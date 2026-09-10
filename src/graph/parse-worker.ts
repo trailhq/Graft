@@ -9,6 +9,7 @@
  * for good) costs one file instead of the build.
  */
 import { extractOne, type ExtractOneResult, type PriorParse } from "./extract-one.js";
+import { wasmRuntimePoisoned } from "./generic.js";
 import { warmGrammars, type GrammarSet } from "./tier.js";
 import type { SourceStat } from "./source-files.js";
 
@@ -16,7 +17,11 @@ export type ToChild =
   | { type: "init"; grammars: GrammarSet }
   | { type: "job"; seq: number; f: SourceStat; prior: PriorParse | null }
   | { type: "stop" };
-export type FromChild = { type: "ready" } | { type: "done"; seq: number; result: ExtractOneResult };
+/** `retire`: this child's WASM runtime is poisoned, so every later WASM parse in
+ * it would fail. The pool answers with `stop` and replaces it. The child never
+ * exits on its own: IPC is ordered, so the pool handles this `done` before the
+ * `exit` its `stop` causes, and cannot mistake the retirement for a crash. */
+export type FromChild = { type: "ready" } | { type: "done"; seq: number; result: ExtractOneResult; retire?: true };
 
 function send(msg: FromChild): void {
   try { process.send?.(msg); } catch { /* parent gone; disconnect handler exits */ }
@@ -30,7 +35,8 @@ if (process.send) {
       void warmGrammars(m.grammars)
         .then(() => send({ type: "ready" }), () => process.exit(3));
     } else if (m.type === "job") {
-      send({ type: "done", seq: m.seq, result: extractOne(m.f, m.prior) });
+      const result = extractOne(m.f, m.prior);
+      send(wasmRuntimePoisoned() === null ? { type: "done", seq: m.seq, result } : { type: "done", seq: m.seq, result, retire: true });
     } else if (m.type === "stop") {
       process.exit(0);
     }

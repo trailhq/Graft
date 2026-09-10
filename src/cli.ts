@@ -564,9 +564,15 @@ grouped(program.command("build"), GROUP.setup)
     }
     // Opt-in only. The env var is read HERE, by the one command a human runs,
     // never by buildGraph: the pre-query refresh must not fork under a query.
-    const workersArg = (opts.workers as string | undefined) ?? process.env.GRAFT_PARSE_WORKERS;
+    // An empty GRAFT_PARSE_WORKERS= line in a .env reads as unset, not as invalid.
+    const workersArg = (opts.workers as string | undefined) ?? (process.env.GRAFT_PARSE_WORKERS?.trim() || undefined);
+    if (workersArg !== undefined && workersArg !== "auto" && !/^\d+$/.test(workersArg)) {
+      const source = opts.workers !== undefined ? "--workers" : "GRAFT_PARSE_WORKERS";
+      console.error(`✗ ${source} must be a non-negative integer or "auto", got "${workersArg}"`);
+      process.exit(1);
+    }
     const parseWorkers: number | "auto" | undefined =
-      workersArg === undefined ? undefined : workersArg === "auto" ? "auto" : Number.parseInt(workersArg, 10) || 0;
+      workersArg === undefined ? undefined : workersArg === "auto" ? "auto" : Number(workersArg);
     warnUnsupportedExtensions(opts.extensions);
     // Persisted BEFORE the build itself runs, so this invocation's walks (and
     // every later no-flag build / hooks refresh) see it identically — the
@@ -648,6 +654,10 @@ grouped(program.command("build"), GROUP.setup)
     // Another build or sync of this map already running as this one starts.
     const overlap = lockHeldByOther(join(contextDirFor(buildRoot, buildGlobalDir), CACHE_DIR));
     if (isWorkspaceBuildRoot(buildRoot, buildGlobalDir)) {
+      // Children build in-thread; `0` asks for exactly that, so only a pool request is ignored.
+      if (parseWorkers !== undefined && parseWorkers !== 0) {
+        console.error(`⚠ --workers / GRAFT_PARSE_WORKERS is ignored for workspace builds; each repo parses in-process`);
+      }
       await runWorkspaceBuild(buildRoot, {
         deep: !!deep,
         extensions: opts.extensions,
@@ -708,7 +718,8 @@ grouped(program.command("build"), GROUP.setup)
     process.stderr.write("\n");
     console.log(`✓ wiring: ${g.nodes} nodes (${fmt(g.byKind)}), ${g.edges} edges, ${g.cards} cards [${g.languages.join(", ")}]`);
     console.log(`  parsed: ${g.parsed} of ${g.files} files (${g.reused} replayed from cache)`);
-    if (g.parseWorkers > 0) console.log(`  workers: ${g.parseWorkers} parser processes`);
+    if (g.parseWorkers > 0 && g.poolFallback) console.log(`  workers: ${g.parseWorkers} parser processes, until the pool could not keep them alive; the rest parsed in-process`);
+    else if (g.parseWorkers > 0) console.log(`  workers: ${g.parseWorkers} parser processes`);
     // Worth one line: this build started from a graph the user never built *here*.
     if (g.seededFrom) console.log(`  seeded: copied a starting graph from ${g.seededFrom} (git worktree)`);
     if (deep) {

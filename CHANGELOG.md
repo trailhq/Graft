@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Changed
+
+- **Very large repos build and load.** The extract cache, wiring.json and the
+  ask index were each one `JSON.stringify` and one `JSON.parse`, which V8 caps
+  at 512 MB; a C source base of ~65,000 files overshoots that on all three.
+  The extract cache is now newline-delimited JSON, and wiring.json and the ask
+  index are written one element per line (still plain JSON for every reader)
+  and read back line by line when they are over the cap. `graft viz` still
+  reads wiring.json as one string and is limited to graphs under 512 MB.
+- **`graft build` holds far less memory on big repos.** Source text is no
+  longer kept for every file across the build; the meaning pass reads a file
+  when it summarizes it, and only if its bytes still hash to what was parsed.
+  A repo this size still needs a larger V8 heap than Node's default
+  (`NODE_OPTIONS=--max-old-space-size=16384` completed the 65k-file build);
+  moving `body_text` out of the retained node set is the next step.
+- **`graft build --workers <n|auto>`** parses a large cold build in child
+  processes and merges their output in file order, so the graph is
+  byte-identical to a single-process build, except that a file whose parse
+  exceeds the 120 s per-file timeout is recorded as an error. Opt-in; the
+  refresh that runs before a query never forks. `GRAFT_PARSE_WORKERS` sets
+  the default; `auto` is min(cores - 1, free memory / 300 MB, files / 200),
+  and stays in-process under 200 files or below 2 workers.
+
 ### Fixed
 
 - **`graft build` no longer aborts partway through very large repos.** The

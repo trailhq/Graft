@@ -28,7 +28,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, join } from "node:path";
 import { CACHE_DIR } from "../context/node-file.js";
-import { forEachLine, openAtomic, type AtomicWriter } from "../util/json-stream.js";
+import { forEachFileLine, openAtomic, type AtomicWriter } from "../util/json-stream.js";
 import { asciiJson } from "./write.js";
 import type { RawEdge } from "./extract.js";
 import type { NodeV1 } from "./types.js";
@@ -204,26 +204,31 @@ export function readExtractCache(outDir: string): ExtractCache {
   const path = extractCachePath(outDir);
   const stamp = extractorStamp();
   if (path === null || stamp === null) return emptyExtractCache();
-  let buf: Buffer;
-  try { buf = readFileSync(path); } catch { return emptyExtractCache(); }
-  // Decoded a line at a time: the file may be larger than any string V8 holds.
-  const files: Record<string, ExtractEntry> = {};
+  // Read in chunks and decoded a line at a time: the file may be larger than any
+  // string V8 holds, and than the 2 GiB one Buffer can.
+  // No prototype: `rel` comes from disk, and `__proto__` must stay a plain key.
+  const files: Record<string, ExtractEntry> = Object.create(null) as Record<string, ExtractEntry>;
   let ok = true;
+  let header = false;
   try {
-    forEachLine(buf, (line, i) => {
-      if (!ok || line === "") return;
-      const parsed = JSON.parse(line) as { version?: number; extractor?: string; rel?: string; e?: ExtractEntry };
+    forEachFileLine(path, (line, i) => {
+      if (!ok) return;
       if (i === 0) {
-        if (parsed.version !== CACHE_VERSION || parsed.extractor !== stamp) ok = false;
+        // A blank or missing header is no header: nothing after it is trusted.
+        const head = (line === "" ? null : JSON.parse(line)) as { version?: number; extractor?: string } | null;
+        header = head !== null && head.version === CACHE_VERSION && head.extractor === stamp;
+        if (!header) ok = false;
         return;
       }
+      if (line === "") return;
+      const parsed = JSON.parse(line) as { rel?: string; e?: ExtractEntry };
       if (typeof parsed.rel !== "string" || !parsed.e || typeof parsed.e !== "object") { ok = false; return; }
       files[parsed.rel] = parsed.e;
     });
   } catch {
-    ok = false; // a corrupt line: the whole memo is suspect
+    ok = false; // unreadable, or a corrupt line: the whole memo is suspect
   }
-  return ok ? { version: CACHE_VERSION, extractor: stamp, files } : emptyExtractCache();
+  return ok && header ? { version: CACHE_VERSION, extractor: stamp, files } : emptyExtractCache();
 }
 
 /** Best-effort write — a full graph is already on disk by the time this runs, so an
@@ -233,7 +238,7 @@ export function readExtractCache(outDir: string): ExtractCache {
  *
  * NDJSON: a header line, then one line per entry. Each element is stringified on its
  * own, so the writer never builds a string larger than one entry, and the reader — via
- * {@link forEachLine} — never decodes more than one line at a time. The atomic rename
+ * {@link forEachFileLine} — never decodes more than one line at a time. The atomic rename
  * means a half-written file is never visible under `path`, so it can never be read as a
  * valid (but truncated) cache. */
 export function writeExtractCache(outDir: string, cache: ExtractCache): boolean {

@@ -13,7 +13,16 @@
  *   - if no job ever succeeded, the crashes are environmental (fork, loader,
  *     permissions), so the parked jobs are parsed in-thread with the rest.
  * A pool that cannot keep children alive hands the remaining queue back to the
- * parent, which has warmed grammars.
+ * parent, which has warmed grammars; a queued job that already killed a child
+ * follows the parked jobs' rule. A child that dies before it ever signals
+ * `ready` is a warm-up failure, not a parse failure — in a broken environment
+ * (fork, loader, permissions) each such wave costs a full warm-up timeout with
+ * nothing to show — so it is charged two respawn credits instead of one, and the
+ * pool falls back to in-thread after half as many warm-up waves. A child whose
+ * WASM runtime was poisoned marks its result `retire`; the pool stops it and
+ * replaces it free of charge for the first `workers * 4` retirements, then for
+ * one respawn credit each. A child that exits because the pool told it to stop
+ * costs nothing.
  */
 import { fork, type ChildProcess, type ForkOptions } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -21,6 +30,8 @@ import { availableParallelism, freemem } from "node:os";
 import { fileURLToPath } from "node:url";
 import { extractOne, type ExtractOneResult, type PriorParse } from "./extract-one.js";
 import type { GrammarSet } from "./tier.js";
+import { contentHash } from "../util/id.js";
+import { readSourceFile } from "../util/source.js";
 import type { SourceStat } from "./source-files.js";
 import type { FromChild, ToChild } from "./parse-worker.js";
 
@@ -36,6 +47,9 @@ export interface PoolOptions {
   workers: number;
   entry?: string;
   onResult?: (index: number, file: string) => void;
+  /** Called once if the parent ends up parsing files itself (the pool could not
+   * keep children alive, or every crash looked environmental). */
+  onFallback?: () => void;
   jobTimeoutMs?: number;
   warmTimeoutMs?: number;
 }
@@ -72,6 +86,8 @@ export function poolSize(
   return n >= 2 ? n : 0;
 }
 
+/** `exit` is how the job's last child died, in words ("exited (code 9)",
+ * "timed out after 120 s"); set on every death. */
 interface Job { index: number; attempts: number; exit?: string }
 
 export function runParsePool(
@@ -91,11 +107,17 @@ export function runParsePool(
   let inFlight = 0;
   let respawns = 0;
   const maxRespawns = opts.workers * 2;
+  // Retirements (a poisoned WASM runtime) are replaced free up to this many; past
+  // it each costs a respawn credit, so a grammar that aborts on a common construct
+  // ends in the in-thread fallback instead of a fork per file.
+  const freeRetirements = Math.max(1, opts.workers) * 4;
+  let retirements = 0;
   const children = new Set<ChildProcess>();
   // Jobs that killed MAX_ATTEMPTS children: held here until the pool settles, when
   // `succeeded` decides error (poisoned file) vs in-thread parse (environmental).
   const parked: Job[] = [];
   let settled = false;
+  let fellBack = false;
 
   return new Promise<ExtractOneResult[]>((resolvePool) => {
     const killAll = (): void => {
@@ -108,31 +130,52 @@ export function runParsePool(
       killAll();
       resolvePool(results);
     };
+    /** The parent parses a file itself; the caller hears about it once. */
+    const parseHere = (job: Job): void => {
+      if (!fellBack) { fellBack = true; opts.onFallback?.(); }
+      const f = files[job.index];
+      results[job.index] = extractOne(f, priorOf(f.rel));
+    };
+    /** The `error` result for a job that killed a child and is not parsed here.
+     * Its entry keeps the file's real hash (read the way `extractOne` reads it;
+     * "" if unreadable), so the fingerprint keeps it on the stat fast path and the
+     * pre-query refresh does not re-parse it in-process. */
+    const crashed = (job: Job, why: string): ExtractOneResult => {
+      const f = files[job.index];
+      let hash = "";
+      try {
+        const source = readSourceFile(f.abs);
+        if (source !== null) hash = contentHash(source);
+      } catch { /* unreadable: "" */ }
+      const message = `${f.rel}: parse failed — parser process ${job.exit ?? "exited (unknown)"} ${why}`;
+      return { kind: "error", message, entry: { size: f.size, mtimeMs: f.mtimeMs, hash, nodes: [], rawEdges: [], error: message } };
+    };
     /** Drain the parked jobs. `inThread` (i.e. `succeeded === 0`) means the crashes
      * were environmental, so parse them like the rest of the queue; otherwise they
      * are the brief's twice-crashed `error` result. */
     const settleParked = (inThread: boolean): void => {
       if (settled) return;
       for (const job of parked.splice(0)) {
-        const f = files[job.index];
-        if (inThread) {
-          results[job.index] = extractOne(f, priorOf(f.rel));
-        } else {
-          const message = `${f.rel}: parse failed — parser process exited (${job.exit ?? "unknown"}) on this file twice`;
-          results[job.index] = { kind: "error", message, entry: { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [], error: message } };
-        }
-        opts.onResult?.(job.index, f.rel);
+        if (inThread) parseHere(job);
+        else results[job.index] = crashed(job, "on this file twice");
+        opts.onResult?.(job.index, files[job.index].rel);
         outstanding--;
       }
       if (outstanding === 0) finish();
     };
     /** The pool cannot keep children alive: parse what is left here, in order,
-     * then settle the parked jobs (in-thread, since none ever succeeded). */
+     * then settle the parked jobs. A queued job that already killed a child is
+     * held to the parked jobs' rule: once any job has completed in a child the
+     * crash is the file's, and parsing it here could take down the build. */
     const fallbackInThread = (): void => {
       if (settled) return;
       killAll();
       for (const job of queue.splice(0)) {
-        results[job.index] = extractOne(files[job.index], priorOf(files[job.index].rel));
+        if (job.exit !== undefined && succeeded > 0) {
+          results[job.index] = crashed(job, "on this file; not retried in-process after the pool gave up, where the same crash would end the build");
+        } else {
+          parseHere(job);
+        }
         opts.onResult?.(job.index, files[job.index].rel);
         outstanding--;
       }
@@ -147,12 +190,21 @@ export function runParsePool(
       if (parked.length > 0) settleParked(succeeded === 0);
       else if (outstanding === 0) finish();
     };
+    /** A child is gone and work remains: replace it within reason, charging
+     * `credits` against the budget. Past that the pool is not working on this
+     * machine, and once no child is left the parent finishes the job itself. */
+    const replace = (credits: number): void => {
+      respawns += credits;
+      if (respawns <= maxRespawns) spawn();
+      else if (children.size === 0) fallbackInThread();
+    };
     const post = (child: ChildProcess, msg: ToChild): boolean => {
       if (!child.connected) return false;
       try { child.send(msg); return true; } catch { return false; }
     };
 
     const spawn = (): void => {
+      if (settled) return;
       // `windowsHide` is a real, effective fork option (forwarded to spawn) but
       // @types/node 26 lists it on CommonOptions, which ForkOptions does not
       // extend — hence the intersection rather than dropping the flag or `any`.
@@ -161,10 +213,29 @@ export function runParsePool(
         serialization: "advanced",
         windowsHide: true,
       };
-      const child = fork(entry, [], forkOpts);
+      let child: ChildProcess;
+      try {
+        child = fork(entry, [], forkOpts);
+      } catch {
+        // fork() can throw synchronously (an invalid path, some spawn errnos):
+        // a child that died before `ready`, holding no job.
+        if (queue.length === 0) drainIfIdle();
+        else replace(2);
+        return;
+      }
       children.add(child);
       let current: Job | null = null;
       let ready = false;
+      // `onGone` is wired to both `exit` and `error` and is also called directly
+      // when the initial `post(init)` fails; the second firing for the same child
+      // must be a no-op, or a slot would be freed twice.
+      let gone = false;
+      // An exit the pool asked for: after `stop` with nothing left to give it, or
+      // after a `retire` (its WASM runtime is poisoned). It held no job and is not
+      // a failure.
+      let stopping = false;
+      let retiring = false;
+      let timedOut = false;
       let timer: NodeJS.Timeout | null = setTimeout(() => child.kill(), warmTimeoutMs);
       timer.unref();
       const clearTimer = (): void => { if (timer) { clearTimeout(timer); timer = null; } };
@@ -173,6 +244,7 @@ export function runParsePool(
         const job = queue.shift();
         if (!job) {
           current = null;
+          stopping = true;
           post(child, { type: "stop" });
           drainIfIdle();
           return;
@@ -180,7 +252,7 @@ export function runParsePool(
         job.attempts++;
         current = job;
         inFlight++;
-        timer = setTimeout(() => child.kill(), jobTimeoutMs);
+        timer = setTimeout(() => { timedOut = true; child.kill(); }, jobTimeoutMs);
         timer.unref();
         if (!post(child, { type: "job", seq: job.index, f: files[job.index], prior: priorOf(files[job.index].rel) })) {
           // Dead channel: the exit handler re-queues `current` and decrements inFlight.
@@ -189,8 +261,16 @@ export function runParsePool(
       };
 
       child.on("message", (m: FromChild) => {
-        if (settled) return;
-        if (m.type === "ready") { ready = true; clearTimer(); next(); return; }
+        // A message read after this child's exit or error must not hand a dead
+        // child a job; a repeated `ready` must not hand a busy one a second.
+        if (settled || gone) return;
+        if (m.type === "ready") {
+          if (ready) return;
+          ready = true;
+          clearTimer();
+          next();
+          return;
+        }
         if (m.type !== "done" || current === null || m.seq !== current.index) return;
         clearTimer();
         succeeded++;
@@ -198,39 +278,65 @@ export function runParsePool(
         opts.onResult?.(m.seq, files[m.seq].rel);
         current = null;
         inFlight--;
+        if (m.retire) {
+          // Its WASM runtime is poisoned: stop it (it waits for this rather than
+          // exiting by itself, so its `exit` can never overtake this `done`), and
+          // replace it in onGone.
+          retiring = true;
+          post(child, { type: "stop" });
+        }
         if (--outstanding === 0) finish();
-        else next();
+        else if (!retiring) next();
       });
 
       const onGone = (code: number | null, signal: NodeJS.Signals | null): void => {
+        if (gone) return;
+        gone = true;
         clearTimer();
         children.delete(child);
+        // After an `error` the process may still be running; it no longer counts.
+        try { child.kill(); } catch { /* already gone */ }
         if (settled) return;
         if (current !== null) {
           const job = current;
           current = null;
           inFlight--;
+          job.exit = timedOut ? `timed out after ${jobTimeoutMs / 1000} s` : `exited (${signal ?? `code ${code}`})`;
           if (job.attempts < MAX_ATTEMPTS) {
             queue.unshift(job);
           } else {
             // Twice-crashed: park it. Whether it is an error or parsed in-thread is
             // decided at settle time by `succeeded`, not here.
-            job.exit = signal ?? `code ${code}`;
             parked.push(job);
           }
+        } else if (retiring || stopping) {
+          if (retiring) retirements++;
+          if (queue.length === 0) drainIfIdle();
+          // A retired child did its job: replace it outright, up to `freeRetirements`.
+          else if (retiring) {
+            if (retirements > freeRetirements) replace(1);
+            else spawn();
+          }
+          // Another child's crash re-queued work after this one was told to stop:
+          // that crash already paid for a replacement, so step in, free of charge,
+          // only if no child is left to take the work.
+          else if (children.size === 0) replace(0);
+          return;
         }
         if (queue.length === 0) { drainIfIdle(); return; }
-        // Work remains. Replace the child within reason; past that, the pool is
-        // not working on this machine and the parent finishes the job itself.
-        if (respawns++ < maxRespawns) spawn();
-        else if (children.size === 0) fallbackInThread();
-        void ready;
+        // Work remains. A death before this child ever signalled `ready` is a
+        // warm-up failure, so it costs a second respawn credit: a pathological
+        // environment burns its budget in half as many warm-up waves before
+        // falling back to in-thread.
+        replace(ready ? 1 : 2);
       };
       child.once("exit", onGone);
-      child.once("error", () => onGone(null, null)); // spawn failure: no exit follows
+      // `on`, not `once`: a second `error` (a failed kill or send) must still find
+      // a listener, or it is thrown in the parent.
+      child.on("error", () => onGone(null, null));
       if (!post(child, init)) onGone(null, null);
     };
 
-    for (let i = 0; i < Math.max(1, opts.workers); i++) spawn();
+    for (let i = 0; i < Math.max(1, opts.workers) && !settled; i++) spawn();
   });
 }

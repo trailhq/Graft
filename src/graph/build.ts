@@ -14,6 +14,7 @@
  * one — the invariant `test/graph-incremental.test.ts` pins down.
  */
 import { readFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { contextDirFor, ensureGitignored, ensureSearchable } from "../context/node-file.js";
@@ -125,6 +126,8 @@ export interface GraphBuildResult {
   reused: number;
   /** Parser children forked (0 = parsed in-thread). */
   parseWorkers: number;
+  /** The pool could not do the parsing and the parent parsed files in-thread. */
+  poolFallback: boolean;
   /** The parent checkout this build copied a starting graph from, when it was run in
    * a git worktree that had none of its own. See `./seed.ts`. */
   seededFrom?: string;
@@ -273,14 +276,18 @@ export async function buildGraph(
   // `cli.ts` does not know the file count, so `"auto"` is resolved here — the one
   // place that already knows it. `buildGraph` never reads `process.env`: a number
   // (or `"auto"`) had to be asked for explicitly by the `graft build` command.
+  // An explicit count is honoured up to the cores and one child per file: more
+  // children than either only costs warm-ups (`auto` has its own, tighter, bounds).
   const workers = opts.parseWorkers === "auto"
     ? poolSize(files.length, { GRAFT_PARSE_WORKERS: "auto" })
-    : Math.max(0, Math.floor(opts.parseWorkers ?? 0));
+    : Math.min(Math.max(0, Math.floor(opts.parseWorkers ?? 0)), availableParallelism(), files.length);
+  let poolFallback = false;
   if (workers > 0 && files.length > 0) {
     let done = 0;
     const results = await runParsePool(files, cachedOf, grammars, {
       workers,
       onResult: (_index, file) => opts.onProgress?.({ phase: "parse", index: done++, total: files.length, file }),
+      onFallback: () => { poolFallback = true; },
     });
     // Fold in FILE order, never completion order: node and edge order is what
     // makes a pooled build byte-identical to an in-thread one.
@@ -435,6 +442,7 @@ export async function buildGraph(
     parsed,
     reused,
     parseWorkers: workers,
+    poolFallback,
     seededFrom: seed.from,
     nodes: nodes.length,
     edges: edges.length,

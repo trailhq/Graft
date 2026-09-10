@@ -23,7 +23,7 @@ import { constants as bufferConstants } from "node:buffer";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { GraphV1 } from "../graph/types.js";
-import { forEachLine, openAtomic } from "../util/json-stream.js";
+import { forEachFileLine, forEachLine, openAtomic, type LineWalker } from "../util/json-stream.js";
 import { CACHE_DIR } from "../context/node-file.js";
 
 /** Words too common/short to carry query intent — dropped before scoring. */
@@ -127,10 +127,15 @@ export function writeAskIndex(outDir: string, graph: GraphV1): string {
   // Streamed one doc per line: still valid JSON for JSON.parse readers, but the
   // newline at each doc boundary lets readAskIndexFromBuffer walk a file over
   // V8's string cap without ever holding it as one string. On a 65k-file repo
-  // the one-shot string was ~360 MB, within the cap but with no headroom. Key
+  // the one-shot string measured ~590 MB, over the ~512 MB cap. Key
   // order matches AskIndex (version, avgBodyLen, df, docCount, docs).
   const w = openAtomic(outPath);
   try {
+    // The header is one line, and the whole `df` array lives on it — the streaming
+    // reader walks a line at a time, so this single line must itself fit under
+    // buffer.constants.MAX_STRING_LENGTH (~512 MB). df is the corpus vocabulary
+    // (one entry per distinct token, not per node), so even at 65k files it is a
+    // few MB — far off the ceiling. Only the per-line docs below scale with nodes.
     w.write(`{"version":1,"avgBodyLen":${JSON.stringify(avgBodyLen)},"df":${JSON.stringify(pairs(df))},"docCount":${nodes.length},"docs":[`);
     docs.forEach((doc, i) => w.write("\n" + doc + (i < docs.length - 1 ? "," : "")));
     w.write("\n]}\n");
@@ -175,7 +180,8 @@ export function readAskIndex(outDir: string, opts: ReadAskIndexOptions = {}): As
   try { size = statSync(path).size; } catch { return null; }
   const cap = opts.maxStringLength ?? bufferConstants.MAX_STRING_LENGTH;
   if (size > cap) {
-    try { return readAskIndexFromBuffer(readFileSync(path)); } catch { return null; }
+    // Chunked: past 2 GiB the file is too large for one Buffer, let alone a string.
+    try { return readAskIndexFromLines((fn) => forEachFileLine(path, fn)); } catch { return null; }
   }
   let raw: unknown;
   try {
@@ -190,13 +196,17 @@ export function readAskIndex(outDir: string, opts: ReadAskIndexOptions = {}): As
  * the whole file as one string. Null when the buffer is not in that shape or
  * fails {@link validateAskIndex}. */
 export function readAskIndexFromBuffer(buf: Buffer): AskIndex | null {
+  return readAskIndexFromLines((fn) => forEachLine(buf, fn));
+}
+
+function readAskIndexFromLines(eachLine: LineWalker): AskIndex | null {
   const DOCS_OPEN = ',"docs":[';
   const END = "]}";
   let head: Record<string, unknown> | null = null;
   const docs: AskIndexDoc[] = [];
   let closed = false;
   let bad = false;
-  forEachLine(buf, (line, i) => {
+  eachLine((line, i) => {
     if (bad || closed) { if (line !== "") bad = true; return; }
     try {
       if (i === 0) {

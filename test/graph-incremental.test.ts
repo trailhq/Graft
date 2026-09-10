@@ -412,8 +412,14 @@ test("with no extractor identity, nothing is memoized — and 'unknown' is never
   // failure sentinel AND a value written into the files, so every later run compared
   // equal to it and extractor-change invalidation silently stopped working forever.
   for (const f of readdirSync(join(outOf(d), ".cache"))) {
-    if (!f.endsWith(".json")) continue;
+    if (!f.endsWith(".json") && !f.endsWith(".ndjson")) continue;
     assert.ok(!f.includes("unknown"), `${f} is filed under the failure sentinel`);
+    if (f.endsWith(".ndjson")) {
+      // The extract memo is NDJSON — its extractor identity is on the header line, not
+      // parseable as whole-file JSON — so read it back through readExtractCache.
+      assert.notEqual(readExtractCache(outOf(d)).extractor, "unknown", `${f} stores the sentinel`);
+      continue;
+    }
     const body = JSON.parse(readFileSync(join(outOf(d), ".cache", f), "utf8")) as { extractor?: string };
     if (body.extractor !== undefined) assert.notEqual(body.extractor, "unknown", `${f} stores the sentinel`);
   }
