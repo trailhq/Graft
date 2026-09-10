@@ -165,7 +165,7 @@ export interface GraphBuildResult {
   /** Per-file wiring cards written (Tier-2 passive surface). */
   cards: number;
   files: number;
-  /** Files re-parsed this run (the rest were replayed from the extraction cache). */
+  /** Files parsed this run (the rest were replayed from the extraction cache). Includes files whose previous build recorded a parse error: those are always re-attempted. */
   parsed: number;
   /** Files replayed from the extraction cache. */
   reused: number;
@@ -310,14 +310,18 @@ export async function buildGraph(
     }
 
     const hash = contentHash(source);
-    if (cached && hash === cached.hash && cached.via === via) {
+    // A cached FAILURE is never replayed. Most parse failures are not properties
+    // of the file: a WASM grammar that aborted because the heap was exhausted by
+    // the files before it fails again only if the heap is exhausted again. Replaying
+    // the error would pin it to the file until its bytes changed; on a 65k-file
+    // repo that was 52k files stuck failing after a single abort. Re-parsing a
+    // genuinely broken file costs one parse per build, which is nothing. (The
+    // pre-query refresh is unaffected: fingerprint.ts keeps an errored entry with
+    // a real hash on its stat fast path, so only an explicit build retries.)
+    if (cached && hash === cached.hash && cached.via === via && !cached.error) {
       entries[rel] = { ...cached, size: f.size, mtimeMs: f.mtimeMs };
       sources.set(rel, source);
       reused++;
-      if (cached.error) {
-        errors.push(cached.error); // this file failed to parse last time too
-        return;
-      }
       nodes.push(...cached.nodes);
       rawEdges.push(...cached.rawEdges);
       langs.add(label);

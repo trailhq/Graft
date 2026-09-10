@@ -744,7 +744,7 @@ test("extractGeneric rethrows a throwing grammar with the language named (#139)"
   }
 });
 
-test("a throwing grammar is a per-file build error, cached as a failure (#139)", async () => {
+test("a throwing grammar is a per-file build error, and the file is retried next build (#139)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft-throwing-grammar-"));
   writeFileSync(join(dir, "lib.rs"), "pub fn f() {}\n");
   await warmGenericGrammars(["rust"]); // so buildGraph's own warm call is a no-op
@@ -758,15 +758,34 @@ test("a throwing grammar is a per-file build error, cached as a failure (#139)",
     assert.ok(g, "graph built");
     assert.ok(!g!.nodes.some((n) => n.path === "lib.rs"), "failed file has no file node");
 
-    // The extract cache must remember the failure, not an empty success: an
-    // incremental rebuild of the unchanged file replays the error.
+    // The failure is recorded (so the freshness probe is quiet) but NOT replayed:
+    // the second build parses the unchanged file again and, the grammar still
+    // throwing, reports the error again as a fresh parse, not a cache hit.
     const second = await buildGraph(dir, { reuse: true });
-    assert.equal(second.parsed, 0, "unchanged file is not re-parsed");
-    assert.equal(second.errors.length, 1, `error replayed (got: ${second.errors.join("; ")})`);
+    assert.equal(second.errors.length, 1, `error reported again (got: ${second.errors.join("; ")})`);
     assert.match(second.errors[0], /rust grammar threw/);
+    assert.equal(second.parsed, 1, "the errored file was re-parsed, not replayed");
+    assert.equal(second.reused, 0, "an errored entry never counts as reused");
   } finally {
     swapGrammarForTest("rust", prev);
   }
+});
+
+test("a file that failed for an environmental reason recovers on the next build without a cache delete", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-recovering-grammar-"));
+  writeFileSync(join(dir, "lib.rs"), "pub fn f() {}\npub fn g() { f() }\n");
+  await warmGenericGrammars(["rust"]);
+  const prev = swapGrammarForTest("rust", THROWING_GRAMMAR);
+  try {
+    const first = await buildGraph(dir, { reuse: false });
+    assert.equal(first.errors.length, 1, "first build fails");
+  } finally {
+    swapGrammarForTest("rust", prev); // the "environment" is healthy again
+  }
+  const second = await buildGraph(dir, { reuse: true });
+  assert.equal(second.errors.length, 0, `second build clean (got: ${second.errors.join("; ")})`);
+  const g = readGraph(wiringPath(contextDirFor(dir)));
+  assert.ok(g!.nodes.some((n) => n.id === "lib.rs#f"), "the file's symbols are in the graph now");
 });
 
 /** Wrap the real rust grammar so every tree it hands out is counted on the way
