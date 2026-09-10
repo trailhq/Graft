@@ -71,10 +71,18 @@ export interface EnrichStats {
   fatal?: string;
 }
 
+/** Where the meaning pass gets a file's text. `Map<string, string>` satisfies it,
+ * which is what tests pass; `buildGraph` passes a lazy, hash-checked reader so a
+ * 65k-file build does not hold every source for a pass that touches a handful. */
+export interface SourceLookup {
+  has(path: string): boolean;
+  get(path: string): string | undefined;
+}
+
 export async function enrichGraph(
   nodes: NodeV1[],
   prior: Map<string, NodeV1>,
-  sources: Map<string, string>,
+  sources: SourceLookup,
   opts: EnrichOptions = {},
 ): Promise<EnrichStats> {
   const stats: EnrichStats = {
@@ -144,7 +152,20 @@ export async function enrichGraph(
 
   await mapWithConcurrency(files, limit, async (path) => {
     const fileNodes = byFile.get(path)!;
-    const source = sources.get(path)!;
+    const source = sources.get(path);
+    if (source === undefined) {
+      // The file changed or vanished between parse and summary: a crux sliced
+      // against different bytes would point at the wrong lines. Leave the nodes
+      // pending; the next build re-hashes and settles them. This runs before the
+      // gate.stopped check and, unlike the fatal-abort branch below, is not a
+      // provider failure, so it does not call gate.skip().
+      for (const node of fileNodes) {
+        if (node.summary_state === "stale") stats.stale++;
+        else stats.pending++;
+      }
+      opts.onProgress?.({ index: done++, total: files.length, node: path });
+      return;
+    }
     const lineCount = source.split("\n").length;
 
     // Once the pass is fatal, the remaining files are not attempted: every call
