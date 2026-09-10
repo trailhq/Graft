@@ -20,7 +20,7 @@ import { contextDirFor, ensureGitignored, ensureSearchable } from "../context/no
 import { languageLabelOf, type Language, type RawEdge } from "./extract.js";
 import { depthReady, missingDepthPackages } from "./depth-parser.js";
 import type { NativeFallback } from "./native.js";
-import { tierOf, warmGrammarsFor } from "./tier.js";
+import { grammarsFor, tierOf, warmGrammars } from "./tier.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
@@ -35,6 +35,7 @@ import { writeFingerprint } from "./fingerprint.js";
 import { seedGraph, type SeedResult } from "./seed.js";
 import { filterByOnlyDirs, listSourceStats } from "./source-files.js";
 import { extractOne, type ExtractOneResult, type PriorParse } from "./extract-one.js";
+import { poolSize, runParsePool } from "./parse-pool.js";
 import type { SourceStat } from "./source-files.js";
 import { resolveEdges, type GoModule } from "./resolve.js";
 import { enrichGraph, type EnrichStats, type SourceLookup } from "./enrich.js";
@@ -98,6 +99,12 @@ export interface GraphBuildOptions {
    * set, only files under these prefixes are indexed; the list is recorded in the
    * fingerprint so the freshness probe enumerates the same set. */
   onlyDirs?: string[];
+  /** Parser child processes for the parse loop (`graft build --workers`). Absent
+   * or 0: parse in-thread. `"auto"` sizes the pool from cores, free memory and
+   * the file count (see {@link poolSize}). `buildGraph` never decides this itself
+   * and never reads `process.env`: the pre-query refresh, the MCP server and the
+   * App must never fork under a query. */
+  parseWorkers?: number | "auto";
   onProgress?: (info: {
     phase: "parse" | "enrich";
     index: number;
@@ -116,6 +123,8 @@ export interface GraphBuildResult {
   parsed: number;
   /** Files replayed from the extraction cache. */
   reused: number;
+  /** Parser children forked (0 = parsed in-thread). */
+  parseWorkers: number;
   /** The parent checkout this build copied a starting graph from, when it was run in
    * a git worktree that had none of its own. See `./seed.ts`. */
   seededFrom?: string;
@@ -201,7 +210,8 @@ export async function buildGraph(
   // repo needs ONCE here (buildGraph is async) before the synchronous parse loop
   // below can call extractFile/extractGeneric/extractContainer. A depth grammar
   // that can't load gets its breadth stand-in warmed instead.
-  await warmGrammarsFor(files.map((f) => f.abs));
+  const grammars = grammarsFor(files.map((f) => f.abs));
+  await warmGrammars(grammars);
   /** Languages whose files went to a stand-in: grammars for the fix, labels for people. */
   const fellBack = new Set<Language>();
   const fellBackLabels = new Set<string>();
@@ -260,10 +270,27 @@ export async function buildGraph(
     return c && !c.error ? { hash: c.hash, via: c.via } : null;
   };
 
-  files.forEach((f, i) => {
-    opts.onProgress?.({ phase: "parse", index: i, total: files.length, file: f.rel });
-    applyResult(f, extractOne(f, cachedOf(f.rel)));
-  });
+  // `cli.ts` does not know the file count, so `"auto"` is resolved here — the one
+  // place that already knows it. `buildGraph` never reads `process.env`: a number
+  // (or `"auto"`) had to be asked for explicitly by the `graft build` command.
+  const workers = opts.parseWorkers === "auto"
+    ? poolSize(files.length, { GRAFT_PARSE_WORKERS: "auto" })
+    : Math.max(0, Math.floor(opts.parseWorkers ?? 0));
+  if (workers > 0 && files.length > 0) {
+    let done = 0;
+    const results = await runParsePool(files, cachedOf, grammars, {
+      workers,
+      onResult: (_index, file) => opts.onProgress?.({ phase: "parse", index: done++, total: files.length, file }),
+    });
+    // Fold in FILE order, never completion order: node and edge order is what
+    // makes a pooled build byte-identical to an in-thread one.
+    files.forEach((f, i) => applyResult(f, results[i]));
+  } else {
+    files.forEach((f, i) => {
+      opts.onProgress?.({ phase: "parse", index: i, total: files.length, file: f.rel });
+      applyResult(f, extractOne(f, cachedOf(f.rel)));
+    });
+  }
 
   // Persist the memo BEFORE enrichment, because `enrichGraph` mutates these very
   // node objects (summary/crux/summary_state) and the cache must only ever hold
@@ -407,6 +434,7 @@ export async function buildGraph(
     files: files.length,
     parsed,
     reused,
+    parseWorkers: workers,
     seededFrom: seed.from,
     nodes: nodes.length,
     edges: edges.length,

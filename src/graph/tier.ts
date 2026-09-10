@@ -40,29 +40,46 @@ export function tierOf(path: string): FileTier {
   return { lang: null, container: null, generic: genericLangOf(path), fellBack: null };
 }
 
-/** Load every WASM grammar these files need, before a synchronous parse loop can
- * call `extractFile`/`extractGeneric`/`extractContainer`: the depth tier's first
- * (a container's embedded language included), then the breadth tier's, the
- * containers', and the stand-ins for depth languages whose grammar didn't load. */
-export async function warmGrammarsFor(paths: Iterable<string>): Promise<void> {
-  const list = [...paths];
-  const depth = new Set<Language>();
-  for (const path of list) {
-    const lang = languageOf(path) ?? containerLangOf(path)?.inner;
-    if (lang) depth.add(lang);
-  }
-  await warmDepthGrammars(depth);
-  const generic = new Set<string>();
-  const containers = new Set<string>();
-  for (const path of list) {
-    const t = tierOf(path);
-    if (t.generic) generic.add(t.generic.name);
-    if (t.container) {
-      containers.add(t.container.name);
-      if (!depthReady(t.container.inner)) generic.add(fallbackLangOf(t.container.inner).name);
-    }
-  }
-  await warmGenericGrammars(generic);
-  await warmContainerGrammars(containers);
+/** The grammars a set of files needs, by name: what {@link warmGrammars} loads.
+ * Plain data, so a parser child (`parse-worker.ts`) can be told to warm exactly
+ * what the parent would. Stand-ins are not listed: which ones are needed depends
+ * on which depth grammars load, so {@link warmGrammars} works them out after. */
+export interface GrammarSet {
+  /** Depth-tier languages, a container's embedded language included. */
+  depth: Language[];
+  /** Breadth-tier grammars of files no depth language or container claims. */
+  generic: string[];
+  containers: string[];
 }
 
+export function grammarsFor(paths: Iterable<string>): GrammarSet {
+  const depth = new Set<Language>();
+  const generic = new Set<string>();
+  const containers = new Set<string>();
+  for (const path of paths) {
+    const lang = languageOf(path);
+    if (lang) { depth.add(lang); continue; }
+    const container = containerLangOf(path);
+    if (container) { containers.add(container.name); depth.add(container.inner); continue; }
+    const g = genericLangOf(path);
+    if (g) generic.add(g.name);
+  }
+  return { depth: [...depth], generic: [...generic], containers: [...containers] };
+}
+
+/** Load every WASM grammar in `set`, before a synchronous parse loop can call
+ * `extractFile`/`extractGeneric`/`extractContainer`: the depth tier's first, then
+ * the breadth tier's plus the stand-in of every depth language whose grammar
+ * didn't load (a container's embedded language included), then the containers'. */
+export async function warmGrammars(set: GrammarSet): Promise<void> {
+  await warmDepthGrammars(set.depth);
+  const generic = new Set(set.generic);
+  for (const lang of set.depth) if (!depthReady(lang)) generic.add(fallbackLangOf(lang).name);
+  await warmGenericGrammars(generic);
+  await warmContainerGrammars(set.containers);
+}
+
+/** {@link warmGrammars} for the grammars `paths` need. */
+export async function warmGrammarsFor(paths: Iterable<string>): Promise<void> {
+  await warmGrammars(grammarsFor(paths));
+}

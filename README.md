@@ -649,6 +649,7 @@ trail map --max-dirs N               # raise/lower the number of directories sho
 #   --no-refresh                     # answer from the graph exactly as it is on disk
 #   GRAFT_NO_REFRESH=1               # same, for every command
 #   GRAFT_REFRESH=hash               # hash every file instead of trusting size+mtime
+#   GRAFT_PARSE_WORKERS=auto         # trail build only: parse in child processes (or a number); default in-process
 
 # learnings
 trail note --title "<about>" [dir]   # save a learning: what this session decided, tried and ruled out (the text on stdin)
@@ -680,6 +681,7 @@ trail build --deep                   # add the LLM layer: concept nodes + per-sy
 trail build --check                  # build nothing: fail (exit 1) if graft/ has drifted from the code, for CI
 trail build --deep -e .ts .py        # with --deep: only summarize these extensions
 trail build --no-reuse               # re-parse every file instead of replaying unchanged ones from cache
+trail build --workers auto           # large repo? parse in parallel child processes (opt-in; never used by the pre-query refresh)
 trail build --follow-submodules      # include initialized submodules; persist the choice for builds + MCP refresh
 trail build --no-follow-submodules   # exclude submodules again and persist that choice (the default)
 trail build --follow-nested-repos    # include nested git clones the index doesn't track; persist the choice
