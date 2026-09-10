@@ -11,7 +11,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { buildGraph } from "../src/graph/build.js";
-import { extractCachePath, extractorStamp, readExtractCache, stampDir } from "../src/graph/extract-cache.js";
+import { extractCachePath, extractorStamp, readExtractCache, rewriteExtractCacheForTest, stampDir, writeExtractCache } from "../src/graph/extract-cache.js";
 import { fingerprintPath, isClean, probeDrift, readFingerprint } from "../src/graph/fingerprint.js";
 import { readAskIndex } from "../src/ask/index-file.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
@@ -356,11 +356,12 @@ test("the stamp moves for any module in the extractor directory, not just one", 
 test("a memo written by a different extractor is dropped, not replayed", async () => {
   const d = repo();
   await buildGraph(d);
-  const path = extractCachePath(outOf(d));
-  const cache = JSON.parse(readFileSync(path, "utf8"));
+  const cache = readExtractCache(outOf(d));
   assert.ok(Object.keys(cache.files).length > 0);
 
-  writeFileSync(path, JSON.stringify({ ...cache, extractor: "deadbeefdeadbeef" }));
+  // The header carries the extractor identity; rewriting it with a foreign stamp
+  // is a memo produced by a different extractor, keyed under our own filename.
+  writeExtractCache(outOf(d), { ...cache, extractor: "deadbeefdeadbeef" });
   assert.deepEqual(readExtractCache(outOf(d)).files, {}, "entries from an unknown extractor are worthless");
 
   // So the next build re-parses everything rather than trusting them.
@@ -456,14 +457,11 @@ test("a build repairs an edit that leaves size and mtime untouched", async () =>
   // pre-edit hash and nodes. That is precisely the state a 1s-granularity mount hands
   // you for free, and it avoids `utimesSync`, whose float-seconds round-trip can't
   // reproduce an mtimeMs exactly.
-  const memoPath = extractCachePath(outOf(d))!;
-  const memo = JSON.parse(readFileSync(memoPath, "utf8")) as {
-    files: Record<string, { size: number; mtimeMs: number }>;
-  };
   const now = statSync(file);
-  memo.files["src/math.ts"].size = now.size;
-  memo.files["src/math.ts"].mtimeMs = now.mtimeMs;
-  writeFileSync(memoPath, JSON.stringify(memo));
+  rewriteExtractCacheForTest(outOf(d), (files) => {
+    files["src/math.ts"].size = now.size;
+    files["src/math.ts"].mtimeMs = now.mtimeMs;
+  });
 
   const r = await buildGraph(d);
   assert.equal(r.parsed, 1, "the file was re-parsed despite the identical stat");

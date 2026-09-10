@@ -19,9 +19,11 @@
  * contribution is folded into the stored `df` at query time (see `ask.ts`),
  * which is why `df` here counts symbol/file nodes only.
  */
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { constants as bufferConstants } from "node:buffer";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import type { GraphV1 } from "../graph/types.js";
+import { forEachLine, openAtomic } from "../util/json-stream.js";
 import { CACHE_DIR } from "../context/node-file.js";
 
 /** Words too common/short to carry query intent — dropped before scoring. */
@@ -100,8 +102,7 @@ export function writeAskIndex(outDir: string, graph: GraphV1): string {
   // Each doc is turned into its JSON text as soon as it is tokenized: holding
   // every doc's `[token, count]` pairs and then stringifying the whole index
   // cost ~400 MB on an 88k-node repo (assign), at the top of the build's peak.
-  // The pieces are written in `JSON.stringify(index)`'s own order, so the file
-  // is byte-identical to before.
+  // The pieces are written in `JSON.stringify(index)`'s own key order.
   const docs: string[] = [];
   const df = new Map<string, number>();
   let bodyTotal = 0;
@@ -121,54 +122,95 @@ export function writeAskIndex(outDir: string, graph: GraphV1): string {
   }
 
   const avgBodyLen = docs.length ? bodyTotal / docs.length : 0;
-  const head: Omit<AskIndex, "docs"> = { version: 1, avgBodyLen, df: pairs(df), docCount: nodes.length };
 
   const outPath = askIndexPath(outDir);
-  mkdirSync(dirname(outPath), { recursive: true });
-  const fd = openSync(outPath, "w");
+  // Streamed one doc per line: still valid JSON for JSON.parse readers, but the
+  // newline at each doc boundary lets readAskIndexFromBuffer walk a file over
+  // V8's string cap without ever holding it as one string. On a 65k-file repo
+  // the one-shot string was ~360 MB, within the cap but with no headroom. Key
+  // order matches AskIndex (version, avgBodyLen, df, docCount, docs).
+  const w = openAtomic(outPath);
   try {
-    // `{...,"docCount":N}` with its closing brace swapped for the docs array.
-    let chunk = `${JSON.stringify(head).slice(0, -1)},"docs":[`;
-    docs.forEach((d, i) => {
-      chunk += i ? `,${d}` : d;
-      if (chunk.length >= 1 << 20) { writeAll(fd, chunk); chunk = ""; }
-    });
-    writeAll(fd, `${chunk}]}\n`);
-  } finally {
-    closeSync(fd);
+    w.write(`{"version":1,"avgBodyLen":${JSON.stringify(avgBodyLen)},"df":${JSON.stringify(pairs(df))},"docCount":${nodes.length},"docs":[`);
+    docs.forEach((doc, i) => w.write("\n" + doc + (i < docs.length - 1 ? "," : "")));
+    w.write("\n]}\n");
+    w.commit();
+  } catch (e) {
+    w.abort();
+    throw e;
   }
   return outPath;
 }
 
-function writeAll(fd: number, text: string): void {
-  const buf = Buffer.from(text, "utf8");
-  for (let off = 0; off < buf.length; ) off += writeSync(fd, buf, off, buf.length - off);
+export interface ReadAskIndexOptions { maxStringLength?: number }
+
+/** Validate the shape of a parsed sidecar. Returns null on an unrecognized shape,
+ * an unknown `version`, or a `docCount` that doesn't match the number of docs
+ * actually stored (a corrupted/truncated sidecar would otherwise silently skew
+ * IDF). Runs on the result of both the JSON.parse and the streamed read path. */
+function validateAskIndex(raw: unknown): AskIndex | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (
+    r.version !== 1 ||
+    typeof r.docCount !== "number" ||
+    typeof r.avgBodyLen !== "number" ||
+    !Array.isArray(r.df) ||
+    !Array.isArray(r.docs) ||
+    r.docCount !== r.docs.length
+  ) {
+    return null;
+  }
+  return raw as AskIndex;
 }
 
-/** Read the ask sidecar. Returns null on a missing file, unparseable JSON, an
- * unrecognized shape, an unknown `version`, or a `docCount` that doesn't match
- * the number of docs actually stored (a corrupted/truncated sidecar would
- * otherwise silently skew IDF) — any of which means the caller should fall
- * back to live tokenization, never crash or trust bad data. */
-export function readAskIndex(outDir: string): AskIndex | null {
+/** Read the ask sidecar. Returns null on a missing file, unparseable JSON, or a
+ * shape {@link validateAskIndex} rejects — any of which means the caller should
+ * fall back to live tokenization, never crash or trust bad data. A file over
+ * V8's string cap is walked line by line ({@link readAskIndexFromBuffer});
+ * `opts.maxStringLength` lets a test force that path. */
+export function readAskIndex(outDir: string, opts: ReadAskIndexOptions = {}): AskIndex | null {
   const path = askIndexPath(outDir);
-  if (!existsSync(path)) return null;
+  let size: number;
+  try { size = statSync(path).size; } catch { return null; }
+  const cap = opts.maxStringLength ?? bufferConstants.MAX_STRING_LENGTH;
+  if (size > cap) {
+    try { return readAskIndexFromBuffer(readFileSync(path)); } catch { return null; }
+  }
+  let raw: unknown;
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8"));
-    if (
-      !raw ||
-      typeof raw !== "object" ||
-      raw.version !== 1 ||
-      typeof raw.docCount !== "number" ||
-      typeof raw.avgBodyLen !== "number" ||
-      !Array.isArray(raw.df) ||
-      !Array.isArray(raw.docs) ||
-      raw.docCount !== raw.docs.length
-    ) {
-      return null;
-    }
-    return raw as AskIndex;
+    raw = JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return null;
   }
+  return validateAskIndex(raw);
+}
+
+/** Parse the line-per-doc shape `writeAskIndex` produces without ever holding
+ * the whole file as one string. Null when the buffer is not in that shape or
+ * fails {@link validateAskIndex}. */
+export function readAskIndexFromBuffer(buf: Buffer): AskIndex | null {
+  const DOCS_OPEN = ',"docs":[';
+  const END = "]}";
+  let head: Record<string, unknown> | null = null;
+  const docs: AskIndexDoc[] = [];
+  let closed = false;
+  let bad = false;
+  forEachLine(buf, (line, i) => {
+    if (bad || closed) { if (line !== "") bad = true; return; }
+    try {
+      if (i === 0) {
+        if (!line.startsWith("{") || !line.endsWith(DOCS_OPEN)) { bad = true; return; }
+        head = JSON.parse(line.slice(0, -DOCS_OPEN.length) + "}") as Record<string, unknown>;
+        return;
+      }
+      if (line === END) { closed = true; return; }
+      const body = line.endsWith(",") ? line.slice(0, -1) : line;
+      docs.push(JSON.parse(body) as AskIndexDoc);
+    } catch {
+      bad = true;
+    }
+  });
+  if (bad || !closed || head === null) return null;
+  return validateAskIndex({ ...(head as Record<string, unknown>), docs });
 }
