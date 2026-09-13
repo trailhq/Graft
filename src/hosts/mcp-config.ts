@@ -212,8 +212,15 @@ export function mcpTargets(
           out.push(jsonTarget(id, 'opencode', join(repo, 'opencode.json'), 'mcp', opencodeEntry()));
         }
         break;
+      case 'droid':
+        // Droid reads MCP from `.factory/mcp.json` at the project root — the
+        // committed, team-shared level of its user/folder/project trio
+        // (docs.factory.ai/harness/mcp.md). Standard `{command,args}` under
+        // `mcpServers`, repo scope like cursor/gemini/kiro.
+        out.push(jsonTarget(id, 'droid', join(repo, '.factory', 'mcp.json'), 'mcpServers', entry));
+        break;
       default:
-        break; // copilot / windsurf / adal: no MCP target in this phase
+        break; // copilot / windsurf / adal / pi: no MCP target (pi's own no-MCP stance)
     }
   }
   return out;

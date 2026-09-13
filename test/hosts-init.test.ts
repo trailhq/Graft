@@ -34,12 +34,48 @@ test('explicit agents list overrides detection and flags unknown ids', () => {
 test('all writes every host and re-run converges (idempotent)', () => {
   const home = fresh(); const repo = fresh();
   const first = runHostsInit(repo, { home, all: true });
-  assert.equal(first.written.length, 10);
+  assert.equal(first.written.length, 12);
   const second = runHostsInit(repo, { home, all: true });
   assert.ok(second.written.every((w) => w.action === 'unchanged'));
-  // `agents` and `antigravity` share AGENTS.md, but the fenced section is written once
+  // `agents`, `droid`, and `antigravity` share AGENTS.md, but the fenced section is written once
   const agents = readFileSync(join(repo, 'AGENTS.md'), 'utf8');
   assert.equal(agents.match(/graft:start/g)!.length, 1);
+});
+
+test('droid: detected via ~/.factory or repo .factory, wired as an AGENTS.md section', () => {
+  const home = fresh(); const repo = fresh();
+  mkdirSync(join(home, '.factory'));
+  const r = runHostsInit(repo, { home, agents: ['droid'] });
+  assert.deepEqual(r.written.map((w) => w.id), ['droid']);
+  const agents = readFileSync(join(repo, 'AGENTS.md'), 'utf8');
+  assert.ok(agents.includes('graft ask'));
+  assert.equal(agents.match(/graft:start/g)!.length, 1, 'one fenced section despite the shared file');
+  // selecting the generic agents row on top is an identical upsert, not a duplicate block
+  const both = runHostsInit(repo, { home, agents: ['agents', 'droid'] });
+  assert.deepEqual(both.written.filter((w) => w.id === 'agents' || w.id === 'droid').map((w) => w.action),
+    ['unchanged', 'unchanged']);
+  assert.equal(readFileSync(join(repo, 'AGENTS.md'), 'utf8').match(/graft:start/g)!.length, 1);
+});
+
+test('droid: also detected from a repo-local .factory dir', () => {
+  const home = fresh(); const repo = fresh();
+  mkdirSync(join(repo, '.factory'));
+  const r = runHostsInit(repo, { home });
+  assert.ok(r.written.some((w) => w.id === 'droid'));
+});
+
+test('pi: detected via ~/.pi or repo .pi, wired as a graft-owned skill file', () => {
+  const home = fresh(); const repo = fresh();
+  mkdirSync(join(home, '.pi'));
+  const r = runHostsInit(repo, { home, agents: ['pi'] });
+  assert.deepEqual(r.written.map((w) => w.id), ['pi']);
+  const skill = readFileSync(join(repo, '.pi', 'skills', 'graft', 'SKILL.md'), 'utf8');
+  assert.match(skill, /^---\nname: graft\n/);
+  assert.ok(skill.includes('graft ask'));
+  assert.deepEqual(r.mcp, [], 'pi has no MCP target (its own no-MCP stance)');
+  const repoDotPi = fresh();
+  mkdirSync(join(repoDotPi, '.pi'));
+  assert.ok(runHostsInit(repoDotPi, { home: fresh() }).written.some((w) => w.id === 'pi'));
 });
 
 test('preserves user content around the fenced section', () => {
