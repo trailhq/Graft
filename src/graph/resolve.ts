@@ -15,7 +15,7 @@
 import { posix } from "node:path";
 import { toPosixPath } from "../util/paths.js";
 import type { EdgeV1, Kind, NodeV1, Relation } from "./types.js";
-import { languageOf, type RawEdge } from "./extract.js";
+import { languageOf, type Language, type RawEdge } from "./extract.js";
 import { genericLangOf } from "./generic.js";
 
 const IMPORT_EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py"];
@@ -91,11 +91,22 @@ export interface GoModule {
   dir: string;
 }
 
+/** A Cargo package discovered in the repo: its `[package]` name and the
+ * repo-relative directory containing Cargo.toml. */
+export interface RustCrate {
+  name: string;
+  dir: string;
+  aliases?: Record<string, string>;
+}
+
 export interface ResolveOptions {
   /** The Go modules found in the repo. Enables mapping Go import package paths
    * (`example.com/app/pkg/util`) to the in-repo directory they name, relative to the
    * owning module's `go.mod` location. Empty/absent → Go imports stay external strings. */
   goModules?: GoModule[];
+  /** Cargo packages found in the repo. Enables `crate::` and workspace-crate
+   * module paths to resolve against source file nodes already present in byId. */
+  rustCrates?: RustCrate[];
 }
 
 export function resolveEdges(
@@ -105,6 +116,11 @@ export function resolveEdges(
 ): EdgeV1[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const globalName = new Map<string, NodeV1[]>();
+  // Rust names live in their own domain: a `use`d symbol, a `mod` path and a bare
+  // crate-local function are not reachable from another language's bare-name call,
+  // and a unique Rust name must not bind a Python or TS call either (rustGlobalName
+  // is consulted whenever the edge's own lang is "rust" — see resolveName).
+  const rustGlobalName = new Map<string, NodeV1[]>();
   const perFileName = new Map<string, Map<string, NodeV1[]>>();
   // Owner-qualified method index: "Owner.method" → candidate method nodes, for
   // typed member-call resolution (recvType + name → a specific class's method).
@@ -120,10 +136,6 @@ export function resolveEdges(
   // file node ids, so an `#include` reached through an `-I` dir (not relative to the
   // including file) still resolves to the in-repo header when the suffix is unique.
   const cFilesBySuffix = new Map<string, string[]>();
-  // Rust crate roots: the directory holding a `lib.rs` or `main.rs`. A `use crate::a::b`
-  // resolves to `<crate root>/a/b.rs` (or `.../a/b/mod.rs`), relative to the crate the
-  // importing file belongs to — so a workspace with several crates stays unambiguous.
-  const rustCrateRoots: string[] = [];
   // PHP class resolution: a file's path-suffix (`Models/User.php`, `User.php`) → its file
   // node ids. A `use App\Models\User` names a PSR-4 class whose file mirrors the namespace
   // tail under some (unknown) source root, so the suffix is the portable key.
@@ -150,14 +162,10 @@ export function resolveEdges(
         const parts = toPosixPath(n.path).split("/");
         for (let i = 0; i < parts.length; i++) push(phpFilesBySuffix, parts.slice(i).join("/"), n.id);
       }
-      {
-        const p = toPosixPath(n.path);
-        if (p === "lib.rs" || p === "main.rs") rustCrateRoots.push("");
-        else if (p.endsWith("/lib.rs") || p.endsWith("/main.rs")) rustCrateRoots.push(posix.dirname(p));
-      }
       continue;
     }
-    push(globalName, n.name, n);
+    if (isRustPath(n.path)) push(rustGlobalName, n.name, n);
+    else push(globalName, n.name, n);
     let fileMap = perFileName.get(n.path);
     if (!fileMap) perFileName.set(n.path, (fileMap = new Map()));
     push(fileMap, n.name, n);
@@ -213,7 +221,7 @@ export function resolveEdges(
             : C_EXT.test(e.file)
               ? resolveCInclude(e.specifier, e.file, byId, cFilesBySuffix)
               : e.file.endsWith(".rs")
-                ? resolveRustUse(e.specifier, e.file, byId, rustCrateRoots)
+                ? resolveRustImport(e.specifier, e.file, byId, opts.rustCrates ?? [])
                 : e.file.endsWith(".php")
                   ? resolvePhpUse(e.specifier, phpFilesBySuffix)
                   : resolveImport(e.specifier, e.file, byId);
@@ -222,7 +230,7 @@ export function resolveEdges(
       // `implements` also resolves to a `trait` — PHP models trait composition
       // (`use SomeTrait;`) as an implements edge, and a trait is a valid target.
       const kinds: Kind[] = e.relation === "implements" ? ["interface", "trait"] : ["class", "interface"];
-      const hit = resolveName(e.name!, e.file, kinds, perFileName, globalName);
+      const hit = resolveName(e.name!, e.file, kinds, perFileName, globalName, rustGlobalName, e.lang);
       // an unresolved base is usually an external/imported type — keep the name.
       add(e.source, hit?.id ?? e.name!, e.relation, hit?.confidence ?? "inferred");
     } else if (e.relation === "references" && e.name) {
@@ -232,14 +240,16 @@ export function resolveEdges(
         // same-named symbol elsewhere in the repo cannot become a false edge.
         const targetFile = e.file.endsWith(".php")
           ? resolvePhpUse(e.specifier, phpFilesBySuffix)
-          : resolveImport(e.specifier, e.file, byId);
+          : e.file.endsWith(".rs")
+            ? resolveRustImport(e.specifier, e.file, byId, opts.rustCrates ?? [])
+            : resolveImport(e.specifier, e.file, byId);
         if (!byId.has(targetFile)) continue; // external or unresolved module
         const candidates = perFileName.get(targetFile)?.get(e.name) ?? [];
         if (candidates.length === 1) add(e.source, candidates[0].id, "references", "extracted");
       } else if (e.file.endsWith(".php") && byId.get(e.source)?.origin === "ast") {
         // PHP attribute without a `use` import (same-file or globally unique class).
         const refKinds: Kind[] = ["class", "interface", "trait", "enum"];
-        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
+        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName, rustGlobalName);
         if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
       } else if (e.file.endsWith(".java") && byId.get(e.source)?.origin === "ast") {
         // Java annotation without a specifier (same-file or globally unique
@@ -252,7 +262,7 @@ export function resolveEdges(
         // JsonAdapter`). Unresolved targets keep the bare name, matching
         // heritage, rather than dropping the way PHP attributes do.
         const refKinds: Kind[] = ["interface"];
-        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
+        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName, rustGlobalName);
         const anno = hit ? byId.get(hit.id) : undefined;
         if (hit && hit.id !== e.source && anno?.signature?.includes("@interface"))
           add(e.source, hit.id, "references", hit.confidence);
@@ -264,13 +274,29 @@ export function resolveEdges(
         // generic origin so depth-tier references (which always carry a specifier) are
         // provably untouched.
         const refKinds: Kind[] = ["class", "interface", "struct", "enum", "type", "module"];
-        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName);
+        const hit = resolveName(e.name, e.file, refKinds, perFileName, globalName, rustGlobalName);
         if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
       }
     } else if (e.relation === "calls") {
+      // Rust scoped calls (`crate::worker::run()`, `some_mod::run()`) name the
+      // target's FILE outright — resolve the module path, then require a unique
+      // function of that name in it. Bare-name fallback is deliberately absent:
+      // a scoped path that resolves nowhere is dropped, never stripped to the
+      // callee's bare name (which would bind a same-named local function).
+      if (e.lang === "rust" && e.specifier) {
+        const targetFile = e.file.endsWith(".rs")
+          ? resolveRustImport(e.specifier, e.file, byId, opts.rustCrates ?? [])
+          : e.specifier;
+        if (!byId.has(targetFile)) continue;
+        const candidates = (perFileName.get(targetFile)?.get(e.name!) ?? []).filter(
+          (candidate) => candidate.kind === "function",
+        );
+        if (candidates.length === 1) add(e.source, candidates[0].id, "calls", "extracted");
+        continue;
+      }
       if (e.viaMember) {
         if (!e.recvType) continue;
-        const hit = resolveTypedMember(e.recvType, e.name!, e.file, ownerMethod, classParents, classTraits, e.argCount);
+        const hit = resolveTypedMember(e.recvType, e.name!, e.file, ownerMethod, classParents, classTraits, e.argCount, e.lang);
         if (hit === "ambiguous") continue; // drop — never guess past an ambiguous owner
         if (hit) {
           add(e.source, hit.id, "calls", hit.confidence);
@@ -317,7 +343,7 @@ export function resolveEdges(
           : e.file.endsWith(".java")
             ? ["class", "struct", "enum", "interface"]
             : ["function"]);
-      let hit = resolveName(e.name!, e.file, callKinds, perFileName, globalName);
+      let hit = resolveName(e.name!, e.file, callKinds, perFileName, globalName, rustGlobalName, e.lang);
       // Python is the Java case without the `new` to mark it: `Widget()` is an
       // ordinary call node, so a constructor edge dies against the function-only
       // index. Java can widen to types outright; Python has free functions, so
@@ -325,10 +351,10 @@ export function resolveEdges(
       // not a swap — types are tried only once functions have found nothing, and
       // resolveName's same-file-then-unique-global rule still drops the ambiguous.
       if (!hit && PY_EXT.test(e.file)) {
-        hit = resolveName(e.name!, e.file, PY_CTOR_KINDS, perFileName, globalName);
+        hit = resolveName(e.name!, e.file, PY_CTOR_KINDS, perFileName, globalName, rustGlobalName);
       }
       if (!hit && SWIFT_EXT.test(e.file)) {
-        hit = resolveName(e.name!, e.file, SWIFT_CTOR_KINDS, perFileName, globalName);
+        hit = resolveName(e.name!, e.file, SWIFT_CTOR_KINDS, perFileName, globalName, rustGlobalName);
       }
       if (hit) add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
     }
@@ -342,6 +368,10 @@ function push<T>(map: Map<string, T[]>, key: string, val: T): void {
   else map.set(key, [val]);
 }
 
+function isRustPath(path: string): boolean {
+  return languageOf(path) === "rust";
+}
+
 /** Derive a method's owner from its dotted id when extract did not stamp `owner`
  * (PHP trait/interface methods today). `app.php#Loggable.log` → `Loggable`. */
 function ownerFromMethodId(id: string): string | undefined {
@@ -353,6 +383,11 @@ function ownerFromMethodId(id: string): string | undefined {
 /**
  * Resolve a bare symbol name: same-file match first (certain → `extracted`),
  * else a unique cross-file match (→ `inferred`), else null (ambiguous/unknown).
+ *
+ * Rust edges resolve in their OWN domain: after the same-file tiers, only
+ * `rustGlobalName` is consulted — a unique Rust name must not bind (or be bound
+ * by) another language's bare-name call, and a Rust call must never land on a
+ * non-Rust definition. Ambiguity inside the Rust domain drops, as everywhere.
  */
 function resolveName(
   name: string,
@@ -360,6 +395,8 @@ function resolveName(
   kinds: Kind[],
   perFileName: Map<string, Map<string, NodeV1[]>>,
   globalName: Map<string, NodeV1[]>,
+  rustGlobalName: Map<string, NodeV1[]>,
+  lang?: Language,
 ): { id: string; confidence: EdgeV1["confidence"] } | null {
   const local = (perFileName.get(file)?.get(name) ?? []).filter((n) => kinds.includes(n.kind));
   // Same-file requires a UNIQUE match, exactly as the cross-file branch below does.
@@ -368,6 +405,12 @@ function resolveName(
   // first in document order — and labelled it `extracted`, i.e. certain. That is the
   // guess this module's header says it does not make.
   if (local.length === 1) return { id: local[0].id, confidence: "extracted" };
+  if (lang === "rust") {
+    // Never fall through to the mixed global tier: a Rust name that isn't
+    // uniquely Rust stays unresolved rather than borrowing another language's.
+    const rustGlobal = (rustGlobalName.get(name) ?? []).filter((n) => kinds.includes(n.kind));
+    return rustGlobal.length === 1 ? { id: rustGlobal[0].id, confidence: "inferred" } : null;
+  }
   // Cross-file: also require a language that could actually reach this one.
   // Without it a unique name match ANYWHERE in the repo wins, which is how a Go
   // builtin ended up resolving into a TypeScript test — see FAMILIES above.
@@ -422,12 +465,28 @@ function resolveTypedMember(
   classParents: Map<string, string[]>,
   classTraits: Map<string, string[]>,
   argCount?: number,
+  lang?: Language,
 ): { id: string; confidence: EdgeV1["confidence"] } | "ambiguous" | null {
   const MAX_DEPTH = 3;
   const visited = new Set<string>([recvType]);
   let frontier = [recvType];
   for (let depth = 0; depth <= MAX_DEPTH && frontier.length; depth++) {
+    // Rust: `Type::method()` / `Self::method()` names the owner outright, so the
+    // owner-qualified index is exact — no same-file tiebreak to apply (the impl
+    // block and the call site are often in different files) and no trait/ancestor
+    // guesswork beyond the `impl Trait for Type` extends chain below.
+    if (lang === "rust") {
+      const level = frontier.flatMap((type) =>
+        (ownerMethod.get(`${type}.${name}`) ?? []).filter((candidate) => isRustPath(candidate.path)),
+      );
+      if (level.length > 1) return "ambiguous";
+      if (level.length === 1) {
+        const candidate = level[0];
+        return { id: candidate.id, confidence: candidate.path === file ? "extracted" : "inferred" };
+      }
+    }
     for (const type of frontier) {
+      if (lang === "rust") continue;
       const all = ownerMethod.get(`${type}.${name}`)?.filter((c) => reachable(file, c.path));
       if (all && all.length > 0) {
         const candidates = narrowByArity(all, argCount);
@@ -582,51 +641,240 @@ function resolvePhpUse(fqn: string, bySuffix: Map<string, string[]>): string {
 }
 
 /**
- * Resolve a Rust `crate`-relative module path (`crate/a/b`, from `use crate::a::b::Item`)
- * to the in-repo module file — `<crate root>/a/b.rs` or `<crate root>/a/b/mod.rs`, where
- * the crate root is the `lib.rs`/`main.rs` directory the importing file lives under. The
- * per-file crate root keeps a multi-crate workspace unambiguous. Not found or ambiguous
- * (two roots, both `a/b.rs` and `a/b/mod.rs`) stays a `crate::…` string — never a guess.
+ * Resolve a Rust module path to the in-repo module file that declares it — or
+ * return the raw specifier when it names something outside the repo (an external
+ * crate) or something we cannot pin down (an ambiguous workspace name). Never a
+ * guess: every branch below either finds exactly one file or keeps the string.
+ *
+ * The path grammars, in resolution order:
+ *   - `crate::a::b`  — anchored at the OWNING crate's source root: the crate whose
+ *     `src/` (or crate dir) contains the declaring file, per Cargo; with no Cargo
+ *     data, the nearest directory holding a `lib.rs`/`main.rs` (the breadth tier's
+ *     own root rule). A file under `tests/`/`benches/`/`examples/` is a separate
+ *     crate when it IS that directory's root (`tests/foo.rs`), and its deeper
+ *     support modules keep their paths raw — their declaring root is ambiguous.
+ *   - `self::a`      — the declaring module's own directory.
+ *   - `super::…`     — the declaring module's directory, one `dirname` per `super`.
+ *   - `some_crate::a`— a Cargo workspace package by its `[package]` name
+ *     (hyphen/underscore-folded; `{ package = "…" }` dependency aliases honored).
+ *   - bare `mod x;`  — single-segment paths try the declaring module's child dir.
+ *
+ * `x.rs` and `x/mod.rs` are both honored; `src/parser.rs`'s children live in
+ * `src/parser/` (the stem-dir rule), while crate-root files and `mod.rs` own
+ * their containing directory.
  */
-function resolveRustUse(spec: string, file: string, byId: Map<string, NodeV1>, crateRoots: string[]): string {
-  const full = spec.replace(/^crate\/?/, ""); // "crate/a/b/Item" → "a/b/Item"; "crate" → ""
-  const fpath = toPosixPath(file);
-  // the crate this file belongs to: the longest root that contains it (workspace-safe)
-  const owning = crateRoots
-    .filter((r) => r === "" ? true : fpath === r || fpath.startsWith(`${r}/`))
-    .sort((a, b) => b.length - a.length);
-  // No owning crate root (e.g. an integration test under `tests/`, whose `crate::` is the
-  // TEST binary's own root, not a lib) → do NOT search every crate in a workspace: that
-  // resolves `crate::util` to some unrelated crate's util.rs. Keep it a string instead.
-  if (owning.length === 0) return full === "" ? "crate" : `crate::${full.replace(/\//g, "::")}`;
-  const roots = [owning[0]];
-  const segs = full === "" ? [] : full.split("/");
-  const hitsFor = (rels: string[]): Set<string> => {
-    const hits = new Set<string>();
-    for (const r of roots) for (const rel of rels) {
-      const cand = r === "" ? rel : `${r}/${rel}`;
-      if (byId.has(cand)) hits.add(cand);
+function resolveRustImport(
+  spec: string,
+  file: string,
+  byId: Map<string, NodeV1>,
+  crates: RustCrate[],
+): string {
+  const segments = spec.split("::").filter(Boolean);
+  if (segments.length === 0) return spec;
+
+  let baseDir: string;
+  let remaining: string[];
+  let rootFile: string | null = null;
+  if (segments[0] === "crate") {
+    const crate = owningRustCrate(file, crates);
+    if (crate) {
+      if (isRustAuxiliaryCrateRoot(file, crates)) {
+        rootFile = toPosixPath(file);
+        baseDir = posix.dirname(rootFile);
+      } else if (rustAuxiliaryDir(file, crate)) {
+        // Deeper support under an auxiliary root (e.g. `tests/common/mod.rs`):
+        // its `crate::` names the test binary's root, which we cannot infer —
+        // keep the path a string rather than borrow the library crate's files.
+        return spec;
+      } else {
+        rootFile = rustCrateRoot(crate, byId);
+        baseDir = rustCrateSrcDir(crate);
+      }
+    } else {
+      // No Cargo package claims this file — no Cargo.toml anywhere, or a manifest
+      // whose `[package]` name never parsed. Fall back to the breadth tier's
+      // path-inferred root so `crate::` keeps resolving; a file outside every
+      // root (an integration test beside src/) owns its own test binary, so its
+      // `crate::…` deliberately stays a string.
+      const root = owningInferredRustRoot(file, inferredRustCrateRoots(byId));
+      if (root === null) return spec;
+      rootFile = rustRootFile(root, byId);
+      baseDir = root;
     }
-    return hits;
-  };
-  // Try the longest module prefix first, shrinking toward — but NOT past — the first
-  // segment. `crate::a::b::C` resolves as module `a/b` (C is the item); `crate::net` as
-  // module `net`. The first prefix naming exactly one in-repo file wins; two matches at a
-  // level are ambiguous → drop rather than guess.
-  for (let k = segs.length; k >= 1; k--) {
-    const modPath = segs.slice(0, k).join("/");
-    const hits = hitsFor([`${modPath}.rs`, `${modPath}/mod.rs`]);
-    if (hits.size === 1) return [...hits][0];
-    if (hits.size > 1) break;
+    if (!rootFile) return spec;
+    remaining = segments.slice(1);
+  } else if (segments[0] === "self") {
+    baseDir = rustModuleDir(file, crates);
+    remaining = segments.slice(1);
+  } else if (segments[0] === "super") {
+    baseDir = rustModuleDir(file, crates);
+    let index = 0;
+    while (segments[index] === "super") {
+      baseDir = posix.dirname(baseDir);
+      index++;
+    }
+    remaining = segments.slice(index);
+  } else {
+    const crate = matchingRustCrate(segments[0], file, crates);
+    if (crate) {
+      rootFile = rustCrateRoot(crate, byId);
+      if (!rootFile) return spec;
+      baseDir = rustCrateSrcDir(crate);
+      remaining = segments.slice(1);
+    } else if (segments.length === 1) {
+      // Bodyless `mod x;` has no syntactic marker by resolution time, but its
+      // single-segment shape is enough to try the declaring module's child dir.
+      baseDir = rustModuleDir(file, crates);
+      remaining = segments;
+    } else {
+      return spec;
+    }
   }
-  // The crate root (`lib.rs`/`main.rs`) is a target ONLY for `use crate::Item` or
-  // `use crate::{…}` — a deeper path whose module chain didn't resolve is genuinely
-  // unknown (a re-export, an inline `mod`, or out-of-tree), so keep it as a string.
-  if (segs.length <= 1) {
-    const hits = hitsFor(["lib.rs", "main.rs"]);
-    if (hits.size === 1) return [...hits][0];
+
+  if (remaining.length === 0) return rootFile ?? spec;
+  return resolveRustModule(baseDir, remaining, byId) ?? spec;
+}
+
+/** A Rust module's child directory. Crate-root files and mod.rs own their
+ * containing directory; every other module file owns a same-named directory. */
+function rustModuleDir(file: string, crates: RustCrate[]): string {
+  const normalized = toPosixPath(file);
+  const dir = posix.dirname(normalized);
+  const base = posix.basename(normalized);
+  if (
+    base === "lib.rs" ||
+    base === "main.rs" ||
+    base === "mod.rs" ||
+    isRustAuxiliaryCrateRoot(normalized, crates)
+  ) {
+    return dir;
   }
-  return full === "" ? "crate" : `crate::${full.replace(/\//g, "::")}`;
+  return posix.join(dir, base.slice(0, -3));
+}
+
+function rustAuxiliaryDir(file: string, crate: RustCrate): string | null {
+  const normalized = toPosixPath(file);
+  for (const name of ["tests", "benches", "examples"]) {
+    const dir = crate.dir === "." ? name : posix.join(crate.dir, name);
+    if (pathIsWithin(normalized, dir)) return dir;
+  }
+  return null;
+}
+
+function isRustAuxiliaryCrateRoot(file: string, crates: RustCrate[]): boolean {
+  const normalized = toPosixPath(file);
+  const crate = owningRustCrate(normalized, crates);
+  if (!crate || !normalized.endsWith(".rs")) return false;
+  const auxiliaryDir = rustAuxiliaryDir(normalized, crate);
+  return auxiliaryDir !== null && posix.dirname(normalized) === auxiliaryDir;
+}
+
+function rustCrateSrcDir(crate: RustCrate): string {
+  return crate.dir === "." ? "src" : posix.join(crate.dir, "src");
+}
+
+/** The crate-root file (`lib.rs` preferred, else `main.rs`) inside `root`, where
+ * `root` is "" for the repo root. Null when the directory holds neither. */
+function rustRootFile(root: string, byId: Map<string, NodeV1>): string | null {
+  const lib = root === "" ? "lib.rs" : posix.join(root, "lib.rs");
+  if (byId.has(lib)) return lib;
+  const main = root === "" ? "main.rs" : posix.join(root, "main.rs");
+  return byId.has(main) ? main : null;
+}
+
+function pathIsWithin(path: string, dir: string): boolean {
+  return dir === "." || path === dir || path.startsWith(`${dir}/`);
+}
+
+function rustCrateRoot(crate: RustCrate, byId: Map<string, NodeV1>): string | null {
+  return rustRootFile(rustCrateSrcDir(crate), byId);
+}
+
+/** Crate roots inferred from source paths alone — every directory holding a
+ * `lib.rs`/`main.rs` (the repo root encoded as `""`). This is the breadth tier's
+ * rule (`use crate::a::b` → `<root>/a/b.rs`), kept as the fallback for files no
+ * Cargo package claims: a repo with no `Cargo.toml`, or one whose manifest we
+ * could not read, must still resolve `crate::` paths instead of losing them.
+ * Cargo data stays authoritative whenever it exists. */
+function inferredRustCrateRoots(byId: Map<string, NodeV1>): string[] {
+  const roots = new Set<string>();
+  for (const id of byId.keys()) {
+    const hash = id.indexOf("#");
+    const path = toPosixPath(hash === -1 ? id : id.slice(0, hash));
+    if (path === "lib.rs" || path === "main.rs") roots.add("");
+    else if (path.endsWith("/lib.rs") || path.endsWith("/main.rs")) roots.add(posix.dirname(path));
+  }
+  return [...roots].sort();
+}
+
+/** The longest inferred crate root whose directory contains `file` (the root
+ * itself, or a file strictly under it — a bare `""` root does NOT own a
+ * `tests/it.rs`, whose `crate::` names the test binary's own root, not the lib).
+ * Null means "not owned by any inferable crate": keep the path unresolved rather
+ * than searching every crate in a workspace and wiring an unrelated file. */
+function owningInferredRustRoot(file: string, roots: string[]): string | null {
+  const path = toPosixPath(file);
+  let best: string | null = null;
+  for (const root of roots) {
+    const owned = root === "" ? !path.includes("/") : path.startsWith(`${root}/`);
+    if (!owned) continue;
+    if (best === null || root.length > best.length) best = root;
+  }
+  return best;
+}
+
+function owningRustCrate(file: string, crates: RustCrate[]): RustCrate | null {
+  const normalized = toPosixPath(file);
+  let best: { crate: RustCrate; prefixLength: number } | null = null;
+  for (const crate of crates) {
+    const srcDir = rustCrateSrcDir(crate);
+    const prefix = pathIsWithin(normalized, srcDir)
+      ? srcDir
+      : pathIsWithin(normalized, crate.dir)
+        ? crate.dir
+        : null;
+    if (prefix === null) continue;
+    if (!best || prefix.length > best.prefixLength) best = { crate, prefixLength: prefix.length };
+  }
+  return best?.crate ?? null;
+}
+
+/** The Cargo package a path's first segment names: hyphens and underscores fold
+ * to the same unit (Rust renders `foo-bar` as `foo_bar` in paths), and a
+ * dependency alias (`renamed = { package = "real" }`) resolves from the owning
+ * crate only. Two crates sharing one name stay unresolved — the alias form is
+ * the language's own disambiguator, and guessing a workspace sibling is not. */
+function matchingRustCrate(segment: string, file: string, crates: RustCrate[]): RustCrate | null {
+  const normalized = segment.replace(/-/g, "_");
+  const owner = owningRustCrate(file, crates);
+  const alias = owner
+    ? Object.entries(owner.aliases ?? {}).find(([name]) => name.replace(/-/g, "_") === normalized)?.[1]
+    : undefined;
+  if (alias) {
+    const aliased = crates.filter((crate) => crate.name.replace(/-/g, "_") === alias.replace(/-/g, "_"));
+    if (aliased.length === 1) return aliased[0];
+    if (aliased.length > 1) return null;
+  }
+  const direct = crates.filter((crate) => crate.name.replace(/-/g, "_") === normalized);
+  return direct.length === 1 ? direct[0] : null;
+}
+
+/** Walk module segments to a file: the longest stem wins, `x.rs` over
+ * `x/mod.rs` (Rust 2018's own preference), tried at every trailing-segment
+ * length so an ITEM-suffixed path (`crate::a::B`) retries as its module. */
+function resolveRustModule(
+  baseDir: string,
+  segments: string[],
+  byId: Map<string, NodeV1>,
+): string | null {
+  for (let length = segments.length; length >= 1; length--) {
+    const stem = posix.join(baseDir, ...segments.slice(0, length));
+    const flat = `${stem}.rs`;
+    if (byId.has(flat)) return flat;
+    const nested = posix.join(stem, "mod.rs");
+    if (byId.has(nested)) return nested;
+  }
+  return null;
 }
 
 /**
