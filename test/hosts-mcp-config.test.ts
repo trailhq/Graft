@@ -80,6 +80,16 @@ test('grok gets a repo-local TOML MCP section', () => {
   assert.deepEqual(again.map((x) => x.action), ['unchanged']);
 });
 
+test('droid gets a repo-local .factory/mcp.json; pi gets nothing', () => {
+  const repo = fresh(); const home = fresh();
+  const w = registerMcpConfigs(repo, ['droid', 'pi'], { home });
+  assert.deepEqual(w.map((x) => x.id).sort(), ['droid'], 'pi registers no MCP config at all');
+  const droid = JSON.parse(readFileSync(join(repo, '.factory', 'mcp.json'), 'utf8'));
+  assert.deepEqual(droid.mcpServers.graft, { command: 'npx', args: ['-y', '@nanonets/graft', 'mcp'] });
+  const again = registerMcpConfigs(repo, ['droid'], { home });
+  assert.deepEqual(again.map((x) => x.action), ['unchanged']);
+});
+
 test('JSON with non-object mcpServers value is skipped', () => {
   const repo = fresh(); const home = fresh();
   mkdirSync(join(repo, '.cursor'), { recursive: true });

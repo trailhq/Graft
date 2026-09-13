@@ -10,6 +10,12 @@
 - **A brain verifies the checkout before it mines** (#344): graft checks the
   working copy against the repo a brain expects, so rules are never mined from
   the wrong tree.
+- **Droid and Pi wiring** via `graft init`: Droid (Factory CLI) gets an
+  `AGENTS.md` section plus a repo-level `.factory/mcp.json` MCP registration
+  (its documented project level); Pi gets a graft-owned skill at
+  `.pi/skills/graft/SKILL.md` and deliberately no MCP registration (pi's own
+  no-MCP stance — the CLI on PATH is the integration surface). Both detect
+  from their config dirs (`~/.factory`, `~/.pi`, or repo-local equivalents).
 
 ### Fixed
 
