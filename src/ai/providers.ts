@@ -26,6 +26,14 @@ export interface EngineConfig {
   model?: string;
   /** Base URL for OpenAI-compatible endpoints. Env: GRAFT_BASE_URL. */
   baseUrl?: string;
+  /**
+   * `reasoning_effort` sent on every OpenAI-compatible request. Env:
+   * GRAFT_REASONING_EFFORT. Unset by default (the provider's own default wins).
+   * `none` is what a local thinking model needs: qwen3.x on Ollama otherwise
+   * spends the whole token budget reasoning and returns an empty message, so
+   * every forced-tool pass records a miss.
+   */
+  reasoningEffort?: string;
 
   // --- advanced: bring your own components ---
   /** Override the whole transport (skips provider/apiKey/baseUrl). */
@@ -46,6 +54,7 @@ export interface ResolvedConfig {
   model: string;
   baseUrl?: string;
   headers?: Record<string, string>;
+  reasoningEffort?: string;
   /** True when the key came from the deprecated OPENROUTER_* fallback. */
   usedLegacyEnv: boolean;
   chatModel?: ChatModel;
@@ -108,6 +117,7 @@ export function resolveConfig(config: EngineConfig = {}): ResolvedConfig {
     model,
     baseUrl,
     headers,
+    reasoningEffort: config.reasoningEffort ?? env.GRAFT_REASONING_EFFORT,
     usedLegacyEnv,
     chatModel: config.chatModel,
     synthesizer: config.synthesizer,
