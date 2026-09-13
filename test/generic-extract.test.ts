@@ -26,61 +26,11 @@ import { checkGraph } from "../src/graph/check.js";
 import { contextDirFor } from "../src/context/node-file.js";
 import { skeleton } from "../src/ask/ask.js";
 
-const RUST = `pub struct Config {
-    name: String,
-}
-
-pub fn load() -> Config {
-    let c = parse();
-    Config { name: c }
-}
-
-fn parse() -> String {
-    helper()
-}
-
-fn helper() -> String {
-    String::new()
-}
-`;
-
-test("genericLangOf routes .rs to the breadth tier (and not depth-tier extensions)", () => {
-  assert.equal(genericLangOf("src/main.rs")?.name, "rust");
+test("genericLangOf routes .rs to the depth tier (and not depth-tier extensions)", () => {
+  assert.equal(genericLangOf("src/main.rs"), null); // depth tier owns .rs (PR #59)
   assert.equal(genericLangOf("src/init.lua")?.name, "lua");
   assert.equal(genericLangOf("src/app.ts"), null); // depth tier owns .ts
   assert.equal(genericLangOf("README.md"), null);
-});
-
-test("extractGeneric emits nodes + bare-name call edges for Rust (no rust-specific code)", async () => {
-  await warmGenericGrammars(["rust"]);
-  assert.ok(isWarm("rust"), "rust grammar should warm");
-  const { nodes, rawEdges } = extractGeneric("lib.rs", RUST, "rust");
-
-  const kinds = nodes.filter((n) => n.kind !== "file").map((n) => `${n.kind}:${n.name}`).sort();
-  assert.deepEqual(kinds, ["function:helper", "function:load", "function:parse", "struct:Config"]);
-
-  // every non-file node carries the generic provenance + a span + a signature
-  for (const n of nodes.filter((n) => n.kind !== "file")) {
-    assert.equal(n.origin, "generic");
-    assert.match(n.span, /^L\d+-L\d+$/);
-    assert.ok(n.signature && n.signature.length > 0, `${n.name} has a signature`);
-  }
-
-  // calls are bare-name raw edges attributed to their enclosing function
-  const calls = rawEdges.filter((e) => e.relation === "calls");
-  const pairs = calls.map((e) => `${e.source.split("#")[1]}→${e.name}`).sort();
-  assert.ok(pairs.includes("load→parse"), `load calls parse (got ${pairs.join(", ")})`);
-  assert.ok(pairs.includes("parse→helper"), "parse calls helper");
-});
-
-test("the EXISTING resolver resolves generic-tier Rust calls by name", async () => {
-  await warmGenericGrammars(["rust"]);
-  const { nodes, rawEdges } = extractGeneric("lib.rs", RUST, "rust");
-  const edges = resolveEdges(nodes, rawEdges);
-  const call = edges.find((e) => e.relation === "calls" && e.source.endsWith("#load"));
-  assert.ok(call, "load's call edge survived resolution");
-  assert.equal(call?.target, "lib.rs#parse", "resolved to the same-file parse definition");
-  assert.equal(call?.confidence, "extracted", "same-file → extracted");
 });
 
 // One inline snippet per breadth language, each exercising a definition + a call
@@ -213,55 +163,28 @@ test("breadth tier: C #include becomes a resolved file→file import (local only
   assert.deepEqual(targetsOf("src/amb.c"), ["util.h"], "ambiguous include kept external, never guessed");
 });
 
-// Rust `use crate::…` → a file→module import, resolved against the file's crate root
-// (the lib.rs/main.rs dir). The longest-prefix rule disambiguates a module from an item
-// and a `foo.rs` from a `foo/mod.rs`; std/super/external/glob are skipped, and an
-// unresolvable in-crate path is kept as a `crate::…` string, never guessed.
-test("breadth tier: Rust use crate::… resolves to the in-repo module (longest-prefix, drop-rather-than-guess)", async () => {
-  await warmGenericGrammars(["rust"]);
-  const files: Record<string, string> = {
-    "src/lib.rs": "pub mod error;\npub mod net;\n",
-    "src/error.rs": "pub struct Error;\n",
-    "src/net/mod.rs": "pub mod tcp;\n",
-    "src/net/tcp.rs": "pub struct Stream;\n",
-    "src/app.rs":
-      "use crate::error::Error;\n" +          // item under a module → src/error.rs
-      "use crate::net::tcp::Stream;\n" +       // nested module → src/net/tcp.rs
-      "use crate::net;\n" +                    // single-segment module → src/net/mod.rs
-      "use crate::missing::Thing;\n" +         // in-crate but no such file → kept as string
-      "use std::io::Read;\n" +                 // external — skipped
-      "use super::sibling::Thing;\n" +         // relative — skipped
-      "use serde::Serialize;\n" +              // external crate — skipped
-      "fn go() {}\n",
-    // an integration test lives OUTSIDE the crate root (src/); its `crate::` is the test
-    // binary's own root, not the lib — so it must NOT resolve across to src/error.rs.
-    "tests/it.rs": "use crate::error::Error;\nfn t() {}\n",
-  };
-  const nodes = [], raw = [];
-  for (const [rel, src] of Object.entries(files)) {
-    const r = extractGeneric(rel, src, "rust");
-    nodes.push(...r.nodes); raw.push(...r.rawEdges);
-  }
-  const imports = resolveEdges(nodes, raw).filter((e) => e.relation === "imports" && e.source === "src/app.rs");
-  const targets = imports.map((e) => e.target).sort();
+// The depth-tier Rust extractor, end to end through buildGraph + checkGraph: a
+// repo whose only source is .rs must build (origin "ast"), resolve its bare-name
+// call edges, and read as in-sync on the very next check — no warmup asymmetry.
+const RUST = `pub struct Config {
+    name: String,
+}
 
-  assert.ok(targets.includes("src/error.rs"), "crate::error::Error → error.rs");
-  assert.ok(targets.includes("src/net/tcp.rs"), "crate::net::tcp::Stream → net/tcp.rs");
-  assert.ok(targets.includes("src/net/mod.rs"), "crate::net (single-segment module) → net/mod.rs");
-  // in-crate but unresolvable → the full path kept as a string, never a guessed file edge
-  // (crucially NOT silently resolved to the crate-root lib.rs)
-  assert.ok(targets.includes("crate::missing::Thing"), "unresolved in-crate path kept as a string");
-  // std / super / external crate are not in-crate imports — no edge at all
-  assert.ok(!targets.some((t) => /io|sibling|serde|Read|Serialize/.test(t)), "external/relative use skipped");
-  assert.equal(imports.length, 4, "exactly the 4 crate:: uses became edges");
+pub fn load() -> Config {
+    let c = parse();
+    Config { name: c }
+}
 
-  // an integration test's `crate::error::Error` must NOT cross into src/error.rs — its
-  // crate root is unknown (it's the test binary), so it stays a string, never a false edge
-  const fromTest = resolveEdges(nodes, raw).filter((e) => e.relation === "imports" && e.source === "tests/it.rs");
-  assert.deepEqual(fromTest.map((e) => e.target), ["crate::error::Error"], "test-binary crate:: never resolves into the lib");
-});
+fn parse() -> String {
+    helper()
+}
 
-test("buildGraph + checkGraph handle a breadth-tier (.rs) repo end-to-end", async () => {
+fn helper() -> String {
+    String::new()
+}
+`;
+
+test("buildGraph + checkGraph handle a depth-tier (.rs) repo end-to-end", async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft-rust-"));
   mkdirSync(join(dir, "src"), { recursive: true });
   writeFileSync(join(dir, "src", "lib.rs"), RUST);
@@ -271,13 +194,13 @@ test("buildGraph + checkGraph handle a breadth-tier (.rs) repo end-to-end", asyn
   assert.ok(g, "graph built");
   const rust = g!.nodes.filter((n) => n.path.endsWith(".rs") && n.kind !== "file");
   assert.ok(rust.length >= 4, `indexed the rust defs (got ${rust.length})`);
-  assert.ok(rust.every((n) => n.origin === "generic"), "rust nodes are generic-tier");
+  assert.ok(rust.every((n) => n.origin === "ast"), "rust nodes are depth-tier");
   assert.ok(g!.edges.some((e) => e.relation === "calls"), "rust call edges resolved");
 
-  // check must agree with build — the async warmup means .rs files are re-extracted
-  // identically, so a fresh graph reads as in-sync, not perpetually stale.
+  // check must agree with build — the file is parsed identically on both paths,
+  // so a fresh graph reads as in-sync, not perpetually stale.
   const chk = await checkGraph(dir);
-  assert.equal(chk.ok, true, `check OK on a breadth-tier repo (added=${chk.added}, removed=${chk.removed})`);
+  assert.equal(chk.ok, true, `check OK on a depth-tier repo (added=${chk.added}, removed=${chk.removed})`);
 });
 
 // #134: Dart is a breadth-tier language with no vendored tags.scm, so the
@@ -430,44 +353,44 @@ const THROWING_GRAMMAR = {
 };
 
 test("extractGeneric rethrows a throwing grammar with the language named (#139)", async () => {
-  await warmGenericGrammars(["rust"]); // initialises web-tree-sitter
-  const prev = swapGrammarForTest("rust", THROWING_GRAMMAR);
+  await warmGenericGrammars(["dart"]); // initialises web-tree-sitter
+  const prev = swapGrammarForTest("dart", THROWING_GRAMMAR);
   try {
     assert.throws(
-      () => extractGeneric("src/lib.rs", "pub fn f() {}\n", "rust"),
+      () => extractGeneric("src/main.dart", "void f() {}\n", "dart"),
       (err: unknown): boolean => {
         assert.ok(err instanceof Error, "throws an Error");
-        assert.match(err.message, /^rust grammar threw: /, "names the language");
+        assert.match(err.message, /^dart grammar threw: /, "names the language");
         assert.match(err.message, /memory access out of bounds/, "keeps the original message");
         return true;
       },
     );
   } finally {
-    swapGrammarForTest("rust", prev);
+    swapGrammarForTest("dart", prev);
   }
 });
 
 test("a throwing grammar is a per-file build error, cached as a failure (#139)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft-throwing-grammar-"));
-  writeFileSync(join(dir, "lib.rs"), "pub fn f() {}\n");
-  await warmGenericGrammars(["rust"]); // so buildGraph's own warm call is a no-op
-  const prev = swapGrammarForTest("rust", THROWING_GRAMMAR);
+  writeFileSync(join(dir, "main.dart"), "void f() {}\n");
+  await warmGenericGrammars(["dart"]); // so buildGraph's own warm call is a no-op
+  const prev = swapGrammarForTest("dart", THROWING_GRAMMAR);
   try {
     const first = await buildGraph(dir, { reuse: false });
     assert.equal(first.errors.length, 1, `one build error (got: ${first.errors.join("; ")})`);
-    assert.match(first.errors[0], /lib\.rs: parse failed/);
-    assert.match(first.errors[0], /rust grammar threw: memory access out of bounds/);
+    assert.match(first.errors[0], /main\.dart: parse failed/);
+    assert.match(first.errors[0], /dart grammar threw: memory access out of bounds/);
     const g = readGraph(wiringPath(contextDirFor(dir)));
     assert.ok(g, "graph built");
-    assert.ok(!g!.nodes.some((n) => n.path === "lib.rs"), "failed file has no file node");
+    assert.ok(!g!.nodes.some((n) => n.path === "main.dart"), "failed file has no file node");
 
     // The extract cache must remember the failure, not an empty success: an
     // incremental rebuild of the unchanged file replays the error.
     const second = await buildGraph(dir, { reuse: true });
     assert.equal(second.parsed, 0, "unchanged file is not re-parsed");
     assert.equal(second.errors.length, 1, `error replayed (got: ${second.errors.join("; ")})`);
-    assert.match(second.errors[0], /rust grammar threw/);
+    assert.match(second.errors[0], /dart grammar threw/);
   } finally {
-    swapGrammarForTest("rust", prev);
+    swapGrammarForTest("dart", prev);
   }
 });
