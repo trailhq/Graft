@@ -122,16 +122,44 @@ function numberLines(source: string): string {
     .join("\n");
 }
 
+/**
+ * `id=` LAST on the line, so "everything after `id=`" is exactly the id.
+ * With the id first the field had no terminator, and a model asked to echo it
+ * "verbatim" copied the whole line — `a.js#f | function | lines L1-L9 | sig()` —
+ * which matches no node, so every summary was dropped and the file was recorded
+ * as a total miss (`empty-parsed`) even though the summaries themselves were fine.
+ * {@link normalizeId} repairs the same mistake on the way back in.
+ */
 function userContent(input: FileCruxInput): string {
   const targets = input.nodes
     .map(
       (n) =>
-        `- id=${n.id} | ${n.kind} | lines L${n.startLine}-L${n.endLine}` +
-        (n.signature ? ` | ${n.signature}` : ""),
+        `- ${n.kind} | lines L${n.startLine}-L${n.endLine}` +
+        (n.signature ? ` | ${n.signature}` : "") +
+        ` | id=${n.id}`,
     )
     .join("\n");
   const n = input.nodes.length;
   return `FILE: ${input.path}\n\n${numberLines(input.source)}\n\nTARGETS (${n} — return all ${n}, one entry per id):\n${targets}`;
+}
+
+/**
+ * Repair an id the model echoed with the rest of its target line attached, or
+ * with the `id=` label included. Both are observed against local models and cost
+ * the whole file: a returned id that matches no node is dropped silently, so a
+ * reply full of usable summaries still records as a total miss. Ids are minted as
+ * `<rel>#<scope.name>` in `graph/extract.ts`, so neither ` | ` nor `id=` can occur
+ * inside a real id and both cuts are safe.
+ */
+function normalizeId(raw: string): string {
+  // `id=` is the last field of a target line, so everything after the label is
+  // the id — this also repairs a whole-line echo of the CURRENT format.
+  const label = raw.lastIndexOf("id=");
+  if (label !== -1) return raw.slice(label + 3).trim();
+  // No label: either a bare id (the normal case) or a whole-line echo of the
+  // older `id=<id> | kind | …` layout, whose id ends at the first separator.
+  const cut = raw.indexOf(" | ");
+  return (cut === -1 ? raw : raw.slice(0, cut)).trim();
 }
 
 /** Normalize the tool's parsed argument object into a {@link NodeCrux} list. */
@@ -142,7 +170,7 @@ function parseResults(obj: { symbols?: unknown } | undefined): NodeCrux[] {
     .map((s) => s as Record<string, unknown>)
     .filter((s) => typeof s.id === "string")
     .map((s) => ({
-      id: s.id as string,
+      id: normalizeId(s.id as string),
       summary: typeof s.summary === "string" ? s.summary.trim() : "",
       crux_start: num(s.crux_start),
       crux_end: num(s.crux_end),
