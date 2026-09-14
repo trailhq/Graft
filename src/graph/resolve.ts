@@ -41,13 +41,26 @@ const SWIFT_CTOR_KINDS: Kind[] = ["class", "struct", "enum"];
  * a Koin module and instantiated five times in its integration test reported `no indexed
  * callers`, while the free functions in the same package resolved 51 call sites.
  *
- * `class` alone, unlike Swift's three kinds, because Kotlin's other type kinds cannot be
- * reached this way: `data class`, `object` and `companion object` are all already kind
- * "class" (see extract.ts's KOTLIN_KINDS and describeKotlin), an `enum class` is used
- * through its entries rather than constructed, and an `interface` — the kind an
- * `annotation class` also takes — has no constructor at all. Admitting them would give an
- * otherwise-unresolvable bare call somewhere wrong to land, which is the trade this
- * module's header refuses. */
+ * `class` alone, unlike Swift's three kinds. `data class`, `object` and `companion
+ * object` are that kind already (see extract.ts's KOTLIN_KINDS and describeKotlin), so it
+ * covers construction. The two kinds left out are left out on measured grounds, not
+ * because the language forbids them:
+ *   - `enum`: an enum class's constructor IS private in Kotlin, so `Color(…)` cannot be
+ *     written from outside — this one really is unreachable.
+ *   - `interface`: this one is reachable in principle. A `fun interface` is SAM-converted
+ *     by writing `Action { … }`, which is an ordinary `call_expression`, and since Kotlin
+ *     1.6 an `annotation class` (also kind "interface" here) can be instantiated. It is
+ *     excluded because tree-sitter-kotlin@0.3.8 cannot parse `fun interface` at all — it
+ *     yields an ERROR node, so no such interface becomes a node to resolve against — and
+ *     admitting the kind today would widen what an unresolvable bare call can land on
+ *     while buying nothing. Worth revisiting if that grammar gap closes.
+ *
+ * And this is a fallback, so it inherits the fallback's imprecision honestly: `class` also
+ * covers `object`, where `Factory()` may be an `operator fun invoke` rather than a
+ * constructor, and a local `val Mailer = factory; Mailer()` shadows the type it names.
+ * Python and Swift already make that trade above; this one is no tighter. What keeps it
+ * safe is the ordering — a real function of that name resolves first — and resolveName's
+ * unique-match rule, which drops the ambiguous rather than picking. */
 const KOTLIN_EXT = /\.kts?$/i;
 const KOTLIN_CTOR_KINDS: Kind[] = ["class"];
 

@@ -167,3 +167,69 @@ fun wire() {
     .map((c) => c.to);
   assert.deepEqual(from, ["Mailer"], "the Kotlin class resolves; the TypeScript one is unreachable");
 });
+
+test("kotlin: a function of the same name wins, because types are only the fallback", async () => {
+  // Kotlin allows a function named after a type — the factory idiom the stdlib itself
+  // uses (`fun MutableList(…)`). `Panel()` is that function, not the class, and the
+  // ordering in resolveEdges is what guarantees it: types are tried only after the
+  // function index has found nothing. `Mailer()` in the same file is the other half,
+  // and shows the fallback still fires where there is no function to prefer.
+  const graph = await buildKotlin({
+    "src/main/kotlin/no/acme/svc/Parts.kt": `
+package no.acme.svc
+
+class Panel(val tag: String)
+
+fun Panel(): Panel = Panel("default")
+
+class Mailer(val host: String)
+`,
+    "src/main/kotlin/no/acme/wire/Wire.kt": `
+package no.acme.wire
+
+import no.acme.svc.Mailer
+import no.acme.svc.Panel
+
+fun wire() {
+    Panel()
+    Mailer(host = "smtp")
+}
+`,
+  });
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const from = graph.edges
+    .filter((e) => e.relation === "calls" && byId.get(e.source)?.name === "wire")
+    .map((e) => `${byId.get(e.target)?.kind}:${byId.get(e.target)?.name}`)
+    .sort();
+  assert.deepEqual(from, ["class:Mailer", "function:Panel"]);
+});
+
+test("kotlin: a .kts script resolves construction the same way a .kt file does", async () => {
+  // Both extensions are the same language to the extractor, and a build/tooling script
+  // is often the only place a class is wired up — so the fallback is keyed on the
+  // language, not on `.kt`. A script's top-level `val` is itself a node, so the edge
+  // hangs off that rather than off the file.
+  const graph = await buildKotlin({
+    "src/main/kotlin/no/acme/svc/Mailer.kt": `
+package no.acme.svc
+
+class Mailer(val host: String)
+`,
+    "tools/report.main.kts": `
+import no.acme.svc.Mailer
+
+val mailer = Mailer(host = "smtp")
+`,
+  });
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  assert.ok(
+    graph.edges.some(
+      (e) =>
+        e.relation === "calls" &&
+        byId.get(e.source)?.path === "tools/report.main.kts" &&
+        byId.get(e.target)?.name === "Mailer" &&
+        byId.get(e.target)?.kind === "class",
+    ),
+    "a .kts script's construction resolves to the class",
+  );
+});
