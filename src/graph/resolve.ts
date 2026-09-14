@@ -34,6 +34,22 @@ const PY_CTOR_KINDS: Kind[] = ["class"];
  * implicit-self widening) have found nothing. */
 const SWIFT_EXT = /\.swift$/i;
 const SWIFT_CTOR_KINDS: Kind[] = ["class", "struct", "enum"];
+/** Kotlin is Swift's case again — `Mailer(host = "smtp")` is an ordinary call node with
+ * no `new` to mark it — and it has free functions too, so it takes the same fallback
+ * rather than Java's outright widening. Without it a DI-heavy backend loses most of its
+ * coupling: measured on a 717-file Kotlin monorepo (#387), a service class constructed in
+ * a Koin module and instantiated five times in its integration test reported `no indexed
+ * callers`, while the free functions in the same package resolved 51 call sites.
+ *
+ * `class` alone, unlike Swift's three kinds, because Kotlin's other type kinds cannot be
+ * reached this way: `data class`, `object` and `companion object` are all already kind
+ * "class" (see extract.ts's KOTLIN_KINDS and describeKotlin), an `enum class` is used
+ * through its entries rather than constructed, and an `interface` — the kind an
+ * `annotation class` also takes — has no constructor at all. Admitting them would give an
+ * otherwise-unresolvable bare call somewhere wrong to land, which is the trade this
+ * module's header refuses. */
+const KOTLIN_EXT = /\.kts?$/i;
+const KOTLIN_CTOR_KINDS: Kind[] = ["class"];
 
 /**
  * Languages whose symbols can genuinely reach each other. A call edge may not
@@ -329,6 +345,9 @@ export function resolveEdges(
       }
       if (!hit && SWIFT_EXT.test(e.file)) {
         hit = resolveName(e.name!, e.file, SWIFT_CTOR_KINDS, perFileName, globalName);
+      }
+      if (!hit && KOTLIN_EXT.test(e.file)) {
+        hit = resolveName(e.name!, e.file, KOTLIN_CTOR_KINDS, perFileName, globalName);
       }
       if (hit) add(e.source, hit.id, "calls", hit.confidence); // drop unresolved calls (too noisy)
     }
