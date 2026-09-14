@@ -159,3 +159,45 @@ export function Page() {
   // guess resolve.ts refuses to make for `ui.button()` either.
   assert.deepEqual(from, ["Panel"]);
 });
+
+test("jsx: the intrinsic test is JSX's own rule, not an A-Z check", async () => {
+  // TypeScript states the rule as `ch >= 'a' && ch <= 'z' || name.includes("-")`
+  // (isIntrinsicJsxName). Asking the opposite question — "does it start A-Z" — is not
+  // the complement: it drops `_Widget`, `$Widget` and every non-ASCII capital, all of
+  // which are ordinary bindings the grammar hands back as plain `identifier`. A
+  // French-named component is not a DOM tag.
+  const graph = await buildJsx({
+    "lib/parts.tsx": `
+export function Écran() {
+  return null;
+}
+
+export function _Widget() {
+  return null;
+}
+
+export function $Widget() {
+  return null;
+}
+`,
+    "app/page.tsx": `
+import { Écran, _Widget, $Widget } from '../lib/parts';
+
+export function Page() {
+  return (
+    <div className="page">
+      <Écran />
+      <_Widget />
+      <$Widget />
+      <my-element />
+      <svg:circle />
+    </div>
+  );
+}
+`,
+  });
+  const from = callEdges(graph).filter((c) => c.from === "Page").map((c) => c.to).sort();
+  // `my-element` is a custom element and `svg:circle` a namespaced name — both intrinsic,
+  // and the namespaced one does not even arrive as an `identifier`.
+  assert.deepEqual(from, ["$Widget", "_Widget", "Écran"]);
+});

@@ -2293,10 +2293,23 @@ if (lang === "kotlin") {
     // spell it as a `call_expression`. There is no receiver to type: an element
     // name is a value in lexical scope, exactly like a bare call's callee.
     //
-    // Casing is not a heuristic. JSX's own rule is that a lowercase name is an
-    // intrinsic host element — React forwards `<div>` to the DOM as the string
-    // "div" — and only a capitalized one refers to a binding. So the lowercase
-    // half is not an unresolved symbol to be dropped later; it is not a symbol.
+    // Casing is not a heuristic, and the test is deliberately for the INTRINSIC
+    // side rather than the component side. JSX's rule, as TypeScript's own
+    // `isIntrinsicJsxName` states it, is `ch >= 'a' && ch <= 'z' || name.includes("-")`:
+    // a name starting with an ASCII lowercase letter is a host element React
+    // forwards to the DOM as a string, and so is any hyphenated name (a custom
+    // element). EVERYTHING else is an ordinary binding in lexical scope.
+    //
+    // Asking "does it start A-Z" instead is not the same question, and gets three
+    // real cases wrong: `<Écran/>` (uppercase, but not ASCII), `<_Widget/>` and
+    // `<$Widget/>` — all three are bindings the grammar hands back as plain
+    // `identifier`, and all three would vanish silently. The ASCII range is correct
+    // here precisely because it is the lowercase half: TypeScript restricts the
+    // intrinsic test to a-z, so a non-ASCII initial is a component by definition.
+    //
+    // A namespaced name (`<svg:circle/>`) arrives as `jsx_namespace_name`, not
+    // `identifier`, so the type check above already excludes it — which is right,
+    // since TypeScript treats those as intrinsic too.
     //
     // A dotted element name (`<UI.Button/>`, `<Widget.Slot/>`) is a
     // `member_expression`, not an `identifier`, and is left alone on purpose: it
@@ -2310,7 +2323,8 @@ if (lang === "kotlin") {
     // function one, and this is scoped to element names, so an ordinary
     // `Widget()` call in the same file still resolves against functions alone.
     const name = node.childForFieldName("name");
-    if (name?.type !== "identifier" || !/^[A-Z]/.test(name.text)) return null;
+    if (name?.type !== "identifier") return null;
+    if (/^[a-z]/.test(name.text) || name.text.includes("-")) return null;
     return { name: name.text, viaMember: false, kinds: ["function", "class"] };
   }
 
