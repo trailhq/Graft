@@ -45,35 +45,46 @@ function runShim(root: string, bakedDir: string, projectDir: string): string | n
   return existsSync(marker) ? readFileSync(marker, 'utf8') : null;
 }
 
+// The fakes' versions sit far above any real release ON PURPOSE: the shim's
+// candidate list includes the node install the TEST RUNNER itself lives under
+// (`process.execPath`/../lib), so on a machine with a real `npm i -g` graft
+// (0.18.0 as of this comment) that real install joins the race and outranks
+// 0.11/0.9 fakes — the shim correctly loads it, the fake marker never lands,
+// and the test reports a resolution the fixture never contained. The fakes
+// only model relative order against each other, so they claim versions no
+// real install will carry and stay hermetic either way.
+const WINNER = '99.0.0';
+const LOSER = '0.9.1';
+
 test('an upgraded global install wins over the stale baked path', () => {
   const root = tmpRepo('shim-upgrade');
-  const stale = fakeInstall(root, 'old-node-install', '0.9.1');
-  fakeInstall(join(root, 'project', 'node_modules', '@nanonets'), 'graft', '0.11.0');
+  const stale = fakeInstall(root, 'old-node-install', LOSER);
+  fakeInstall(join(root, 'project', 'node_modules', '@nanonets'), 'graft', WINNER);
   // BAKED points at the install that `graft init` ran from — still on disk (an
   // nvm switch leaves it there), still first in the candidate list, now stale.
-  assert.equal(runShim(root, stale, join(root, 'project')), '0.11.0');
+  assert.equal(runShim(root, stale, join(root, 'project')), WINNER);
 });
 
 test('the baked path still wins when it is the newest', () => {
   const root = tmpRepo('shim-baked-newest');
-  const baked = fakeInstall(root, 'current', '0.11.0');
-  fakeInstall(join(root, 'project', 'node_modules', '@nanonets'), 'graft', '0.9.1');
-  assert.equal(runShim(root, baked, join(root, 'project')), '0.11.0');
+  const baked = fakeInstall(root, 'current', WINNER);
+  fakeInstall(join(root, 'project', 'node_modules', '@nanonets'), 'graft', LOSER);
+  assert.equal(runShim(root, baked, join(root, 'project')), WINNER);
 });
 
 test('a single candidate is used whatever its version', () => {
   const root = tmpRepo('shim-single');
-  const only = fakeInstall(root, 'only', '0.9.1');
+  const only = fakeInstall(root, 'only', WINNER);
   mkdirSync(join(root, 'project'), { recursive: true });
-  assert.equal(runShim(root, only, join(root, 'project')), '0.9.1');
+  assert.equal(runShim(root, only, join(root, 'project')), WINNER);
 });
 
 test('an install with an unreadable version loses to a known one', () => {
   const root = tmpRepo('shim-noversion');
   const broken = fakeInstall(root, 'broken', '0.0.0');
   writeFileSync(join(root, 'broken', 'package.json'), 'not json');
-  fakeInstall(join(root, 'project', 'node_modules', '@nanonets'), 'graft', '0.9.1');
-  assert.equal(runShim(root, broken, join(root, 'project')), '0.9.1');
+  fakeInstall(join(root, 'project', 'node_modules', '@nanonets'), 'graft', WINNER);
+  assert.equal(runShim(root, broken, join(root, 'project')), WINNER);
 });
 
 test('no candidate at all exits quietly — a hook must never fail the session', () => {

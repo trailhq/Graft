@@ -31,6 +31,7 @@ import { ALL_MARKERS, type Markers } from './sections.js';
 import { mcpTargets, stripTomlSection } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
 import { antigravitySkillTargets } from './antigravity.js';
+import { projectAgentSkillTargets } from './project-agents.js';
 import { claudeGlobalTargets } from './claude-global.js';
 import { claudeTargets } from '../claude/init.js';
 import { isGraftAllowEntry, isGraftFooterRegex } from '../claude/settings-merge.js';
@@ -418,6 +419,17 @@ function targets(repo: string, opts: RetractOpts): Target[] {
       hostId: t.hostId, path: t.path, what: t.what, scope: t.scope,
       run: (a) => (t.format === 'toml' ? removeTomlSection(t.path, a) : removeJsonKey(t.path, t.topKey!, a)),
     });
+  }
+
+  // 2b. The project-agents skill — a repo-local write outside the host's own
+  //     relPath (AGENTS.md), so it needs its own target here. Removing it is
+  //     safe while AGENTS.md stays: the standard-reading agents lose the
+  //     on-demand playbook but keep the always-on section, matching what a
+  //     repo wired by an older graft had.
+  if (!exclude.has('project-agents')) {
+    for (const t of projectAgentSkillTargets(repo)) {
+      add({ hostId: t.hostId, path: t.path, what: t.what, scope: t.scope, run: (a) => removeFile(t.path, a) });
+    }
   }
 
   // 3. Claude Code: settings fragments, both shims, the skill, and the .mcp.json key.
