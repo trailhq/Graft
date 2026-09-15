@@ -22,7 +22,7 @@
  * LLM and without re-reading every node body.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, isAbsolute, win32 } from "node:path";
 import matter from "gray-matter";
 import { contentHash, normalizeName } from "../util/id.js";
 import { relPosix, stripTrailingSlashes } from "../util/paths.js";
@@ -123,12 +123,13 @@ export function contextDirFor(root: string, override?: string): string {
 export function ensureGitignored(root: string, contextDir: string): void {
   if (envTruthy("GRAFT_NO_GITIGNORE")) return;
   const rel = relPosix(root, contextDir);
-  if (rel === "" || rel.startsWith("..")) return; // dir is at/above the repo root — nothing sane to ignore
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel) || win32.isAbsolute(rel)) return; // dir is at/above the repo root — nothing sane to ignore
   const bare = stripTrailingSlashes(rel); // "graft" (or a `--dir` subpath like "tools/ctx")
   // Root-ANCHORED, so it ignores exactly this repo's `graft/` and not a directory named
   // `graft` at any depth. An unanchored `graft/` also matched `.claude/skills/graft/`, so
-  // committing the skill graft just wrote was silently dropped (#79). `rel` is always
-  // repo-relative here, so a leading `/` is always safe (incl. a `--dir` subpath).
+  // committing the skill graft just wrote was silently dropped (#79). `rel` is
+  // repo-relative here (cross-drive Windows paths are rejected above), so a leading
+  // `/` is always safe (incl. a `--dir` subpath).
   const entry = `/${bare}/`;
   const path = join(root, ".gitignore");
   let current = "";
@@ -168,7 +169,7 @@ export function ensureGitignored(root: string, contextDir: string): void {
 export function ensureSearchable(root: string, contextDir: string): void {
   if (envTruthy("GRAFT_NO_IGNORE")) return;
   const rel = relPosix(root, contextDir);
-  if (rel === "" || rel.startsWith("..")) return; // outside the repo — nothing to re-admit
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel) || win32.isAbsolute(rel)) return; // outside the repo — nothing to re-admit
   const dir = stripTrailingSlashes(rel);
   const entry = `!${dir}/`;
   const path = join(root, ".ignore");

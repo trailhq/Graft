@@ -515,6 +515,20 @@ test("ensureGitignored: no-op when the graph dir is outside the repo root", () =
   }
 });
 
+test("ensureGitignored: a Windows cross-drive --dir is not written into .gitignore (#384)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxgi-xdrive-"));
+  try {
+    writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
+    ensureGitignored(dir, "F:/graft-dir-repro-tmp");
+    const gi = readFileSync(join(dir, ".gitignore"), "utf8");
+    assert.equal(gi, "node_modules/\n", `cross-drive --dir must not append, got:\n${gi}`);
+    ensureGitignored(dir, join(dir, "graft"));
+    assert.match(readFileSync(join(dir, ".gitignore"), "utf8"), /\/graft\//);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ensureGitignored: GRAFT_NO_GITIGNORE=1 skips writing .gitignore", () => {
   const dir = mkdtempSync(join(tmpdir(), "ctxgi-"));
   process.env.GRAFT_NO_GITIGNORE = "1";
@@ -605,6 +619,20 @@ test("ensureSearchable: no-op when the graph dir is outside the repo root", () =
   try {
     ensureSearchable(dir, join(tmpdir(), "somewhere-else-graft"));
     assert.equal(existsSync(join(dir, ".ignore")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensureSearchable: a Windows cross-drive --dir is not written into .ignore (#384)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctxsearch-xdrive-"));
+  try {
+    ensureSearchable(dir, "F:/graft-dir-repro-tmp");
+    assert.equal(existsSync(join(dir, ".ignore")), false, ".ignore must not mention another drive");
+    ensureSearchable(dir, join(dir, "graft"));
+    const ign = readFileSync(join(dir, ".ignore"), "utf8");
+    assert.ok(!/F:/i.test(ign), ign);
+    assert.match(ign, /!graft\//);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
