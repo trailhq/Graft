@@ -82,7 +82,7 @@ export type Surface = 'cli' | 'mcp' | 'hook';
 
 /** Which editor/agent graft is running under. Derived from the surface and the
  *  wiring on disk — never from a hostname, a username, or an env var's value. */
-export type AgentHost = 'claude-code' | 'cursor' | 'mcp' | 'cli';
+export type AgentHost = 'claude-code' | 'cursor' | 'mcp' | 'cli' | 'pi' | 'omp';
 
 /**
  * The commands worth counting. A command absent here is simply not reported —
