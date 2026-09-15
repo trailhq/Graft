@@ -121,6 +121,25 @@ export const HOSTS: HostTarget[] = [
     content: windsurfRule,
     detect: (p) => p.dirExists(join(p.home, '.codeium', 'windsurf')) || p.dirExists(join(p.repo, '.windsurf')),
   },
+  {
+    // pi reads AGENTS.md natively (the `agents` host covers orientation);
+    // the extension file carries per-prompt retrieval — see hosts/pi-omp.ts.
+    id: 'pi',
+    name: 'pi (pi.dev)',
+    kind: 'section',
+    relPath: 'AGENTS.md',
+    content: instructionBody,
+    detect: (p) => p.dirExists(join(p.home, '.pi')) || p.dirExists(join(p.repo, '.pi')),
+  },
+  {
+    // omp shares pi's extension API and reads AGENTS.md the same way.
+    id: 'omp',
+    name: 'Oh My Pi (omp)',
+    kind: 'section',
+    relPath: 'AGENTS.md',
+    content: instructionBody,
+    detect: (p) => p.dirExists(join(p.home, '.omp')) || p.dirExists(join(p.repo, '.omp')),
+  },
 ];
 
 export function hostIds(): string[] {
