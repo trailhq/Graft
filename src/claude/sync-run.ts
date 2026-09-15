@@ -1,8 +1,20 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, type ExecFileSyncOptions } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { readWiring, computeStats } from './stats.js';
 import { patchStats, releaseLock, resolveContextDir } from './state.js';
 import { graftCliPath } from './paths.js';
+
+/**
+ * Spawn options for the Stop-hook's `graft build` grandchild.
+ *
+ * `handleStop` already passes `windowsHide: true`, but that flag is per-spawn
+ * and is not inherited. The parent is `detached` with `stdio: 'ignore'`, so it
+ * owns no console; without this the grandchild allocates a visible node.exe
+ * window on Windows (#393).
+ */
+export function execOptsForHiddenBuild(cwd: string): ExecFileSyncOptions {
+  return { cwd, stdio: 'ignore', timeout: 120000, windowsHide: true };
+}
 
 /** MONEY GUARD: plain `graft build` only — structural, $0, offline. Never --deep. */
 function realBuild(dir: string): void {
@@ -13,7 +25,7 @@ function realBuild(dir: string): void {
   // Mirrors `withContextDirArg` in hooks.ts: a no-op unless GRAFT_DIR is set, so an
   // unconfigured repo's rebuild sees byte-identical argv to before this existed.
   if (process.env.GRAFT_DIR) args.push('--dir', resolveContextDir(dir));
-  execFileSync(process.execPath, args, { cwd: dir, stdio: 'ignore', timeout: 120000 });
+  execFileSync(process.execPath, args, execOptsForHiddenBuild(dir));
 }
 
 export function runSync(dir: string, build: (d: string) => void = realBuild): void {
