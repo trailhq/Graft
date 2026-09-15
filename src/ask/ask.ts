@@ -19,6 +19,7 @@ import matter from "gray-matter";
 import { contextDirFor } from "../context/node-file.js";
 import { withSavings, savingsFor, savingsTurnNudge, type Savings } from "../context/savings.js";
 import { loadGraphCached, loadAskIndexCached } from "../graph/load.js";
+import { formatSizeSkipLine, matchSkippedFile, skippedFromGraph, skippedQueryNote } from "../graph/skipped.js";
 import {
   assertPrefixIndexed,
   pathUnderPrefix,
@@ -138,6 +139,9 @@ export interface AskResult {
    * this answer. Populated in `--source` mode only, alongside `saved`: a pack
    * the agent does not read the code from has nothing for a rule to sit beside. */
   rules?: AppliedRule[];
+  /** Files the last build refused to index for size. Set so a zero-hit ask
+   * can name them instead of claiming the symbol does not exist. */
+  skipped?: Array<{ path: string; bytes: number; reason: "size" }>;
 }
 
 /** First real prose line of a node body (skips headings, markers, blanks). */
@@ -1396,6 +1400,12 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
     const applied = attachBrainRules(root, result.hits, corpus.graph);
     if (applied.length) result.rules = applied;
   }
+  const skipped = skippedFromGraph(corpus.graph);
+  if (skipped.length) result.skipped = skipped;
+  if (result.hits.length === 0 && skipped.length) {
+    const extra = skippedQueryNote(skipped);
+    result.note = result.note ? `${result.note}; ${extra}` : extra;
+  }
   return result;
 }
 
@@ -1450,7 +1460,11 @@ export function skeleton(dir: string, file: string, opts: { contextDir?: string 
     const [path] = matches;
     if (path) defs = graph.nodes.filter((n) => n.kind !== "file" && n.path === path);
   }
-  if (!defs.length) return { file, entries: [], note: "no definitions indexed for this file" };
+  if (!defs.length) {
+    const hit = matchSkippedFile(skippedFromGraph(graph), file);
+    if (hit) return { file: hit.path, entries: [], note: `${formatSizeSkipLine(hit)} — not indexed` };
+    return { file, entries: [], note: "no definitions indexed for this file" };
+  }
 
   const startLine = (span: string) => Number(span.match(/^L(\d+)/)?.[1] ?? 0);
   defs.sort((a, b) => startLine(a.span) - startLine(b.span));
@@ -1542,9 +1556,11 @@ export function formatAsk(r: AskResult): string {
 function escalationNudge(r: AskResult): string {
   if ((r.mode !== "lexical" && r.mode !== "empty") || r.hits.length > 3) return "";
   const n = r.hits.length;
+  const sizeNote = n === 0 ? skippedQueryNote(r.skipped ?? []) : "";
   return (
     `\n\n[graft] ${n === 0 ? "no hits" : `only ${n} hit${n === 1 ? "" : "s"}`} — don't re-ask with new wording; switch tool: ` +
-    "`graft grep \"<literal>\"` for every occurrence · `graft skeleton <file>` for a file's full API · `graft callers <symbol>` for who-uses."
+    "`graft grep \"<literal>\"` for every occurrence · `graft skeleton <file>` for a file's full API · `graft callers <symbol>` for who-uses." +
+    (sizeNote ? ` ${sizeNote}.` : "")
   );
 }
 

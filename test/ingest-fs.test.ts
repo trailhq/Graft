@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep, isAbsolute } from "node:path";
-import { shouldSkipDir, walkDir, SKIP_DIRS } from "../src/ingest/fs.js";
+import { shouldSkipDir, walkDir, SKIP_DIRS, MAX_FILE_BYTES, type SizeSkip } from "../src/ingest/fs.js";
 import { discoverScopes, discoverWorkspaceChildren } from "../src/graph/scopes.js";
 
 function fixture(tag: string): string {
@@ -447,6 +447,39 @@ test("walkDir on an ordinary directory is unchanged when siblings are symlink fi
     write(dir, "src/app.ts");
     write(dir, "node_modules/pkg/index.ts");
     assert.deepEqual(walked(dir), ["src/app.ts"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("walkDir records files over the 1 MB cap instead of dropping them silently (#370)", () => {
+  const dir = fixture("oversize");
+  try {
+    write(dir, "ok.ts");
+    writeFileSync(join(dir, "big.ts"), Buffer.alloc(MAX_FILE_BYTES + 1, 0x61));
+    commitAll(dir, "init");
+    const skipped: SizeSkip[] = [];
+    const files = walkDir(dir, undefined, { skipped }).map((path) => relative(dir, path).replace(/\\/g, "/")).sort();
+    assert.deepEqual(files, ["ok.ts"]);
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0].reason, "size");
+    assert.ok(skipped[0].bytes > MAX_FILE_BYTES);
+    assert.match(skipped[0].path.replace(/\\/g, "/"), /big\.ts$/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("walkDir filesystem fallback also records oversized files (#370)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-walk-oversize-fs-"));
+  try {
+    writeFileSync(join(dir, "ok.ts"), "export const x = 1;\n");
+    writeFileSync(join(dir, "big.ts"), Buffer.alloc(MAX_FILE_BYTES + 1, 0x61));
+    const skipped: SizeSkip[] = [];
+    const files = walkDir(dir, undefined, { skipped }).map((path) => relative(dir, path).replace(/\\/g, "/")).sort();
+    assert.deepEqual(files, ["ok.ts"]);
+    assert.equal(skipped.length, 1);
+    assert.match(skipped[0].path.replace(/\\/g, "/"), /big\.ts$/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

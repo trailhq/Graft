@@ -26,6 +26,7 @@ import { contextDirFor } from "./context/node-file.js";
 import { loadGraphCached } from "./graph/load.js";
 import { ensureFreshChildren, ensureFreshGraph, refreshNote } from "./graph/refresh.js";
 import { isWorkspaceBuildRoot, readWorkspace } from "./graph/workspace.js";
+import { formatSizeSkipLine } from "./graph/skipped.js";
 import { nearestGraftRoot } from "./graph/root.js";
 import { unsupportedExtensions, supportedExtensions } from "./graph/source-files.js";
 import { discoverWorkspaceChildren } from "./graph/scopes.js";
@@ -525,7 +526,15 @@ program
     });
     process.stderr.write("\n");
     console.log(`✓ wiring: ${g.nodes} nodes (${fmt(g.byKind)}), ${g.edges} edges, ${g.cards} cards [${g.languages.join(", ")}]`);
-    console.log(`  parsed: ${g.parsed} of ${g.files} files (${g.reused} replayed from cache)`);
+    const skipped = g.skipped ?? [];
+    if (skipped.length > 0) {
+      for (const s of skipped) console.error(`⚠ ${formatSizeSkipLine(s)}`);
+      console.log(
+        `  parsed: ${g.parsed} of ${g.files + skipped.length} files (${g.reused} replayed from cache, ${skipped.length} skipped: size)`,
+      );
+    } else {
+      console.log(`  parsed: ${g.parsed} of ${g.files} files (${g.reused} replayed from cache)`);
+    }
     // Worth one line: this build started from a graph the user never built *here*.
     if (g.seededFrom) console.log(`  seeded: copied a starting graph from ${g.seededFrom} (git worktree)`);
     if (deep) {
