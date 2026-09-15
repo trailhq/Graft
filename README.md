@@ -591,6 +591,16 @@ npm test
 npm run cli -- build --deep .      # run the CLI from source
 ```
 
+Run `npm link` after building to use this checkout for the `graft` command.
+
+Native parsers load only when a file in their language is parsed. A missing
+binding does not block `graft --version`, language detection, or builds of other
+languages. If a required parser reports `No native build was found`, rebuild
+its dependency in this checkout (for example, `npm rebuild tree-sitter-kotlin`)
+and retry. Native rebuilds require a C/C++ toolchain and Python for node-gyp.
+The error is still reported when that language is needed; files are not silently
+treated as successfully parsed.
+
 ---
 
 ## License

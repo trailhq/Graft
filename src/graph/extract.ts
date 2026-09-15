@@ -6,15 +6,8 @@
  * arrow-function consts) plus unresolved edge intents. Edge *targets* are
  * resolved against the whole-repo node index later, in build.ts.
  */
-import Parser from "tree-sitter";
-import TypeScript from "tree-sitter-typescript";
-import Python from "tree-sitter-python";
-import Go from "tree-sitter-go";
-import R from "tree-sitter-r";
-import Java from "tree-sitter-java";
-import Kotlin from "tree-sitter-kotlin";
-import Swift from "tree-sitter-swift";
-import PHP from "tree-sitter-php";
+import type Parser from "tree-sitter";
+import { createRequire } from "node:module";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
@@ -310,17 +303,20 @@ const FUNCTION_VALUE_TYPES = new Set([
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
 
-const parser = new Parser();
-const GRAMMARS: Record<Language, unknown> = {
-  typescript: TypeScript.typescript,
-  tsx: TypeScript.tsx,
-  python: Python,
-  go: Go,
-  r: R,
-  java: Java,
-  kotlin: Kotlin,
-  swift: Swift,
-  php: PHP.php,
+// A missing native binding must not prevent metadata queries or other languages
+// from working. require caches each grammar after its first use.
+const require = createRequire(import.meta.url);
+let parser: Parser | null = null;
+const GRAMMARS: Record<Language, () => unknown> = {
+  typescript: () => require("tree-sitter-typescript").typescript,
+  tsx: () => require("tree-sitter-typescript").tsx,
+  python: () => require("tree-sitter-python"),
+  go: () => require("tree-sitter-go"),
+  r: () => require("tree-sitter-r"),
+  java: () => require("tree-sitter-java"),
+  kotlin: () => require("tree-sitter-kotlin"),
+  swift: () => require("tree-sitter-swift"),
+  php: () => require("tree-sitter-php").php,
 };
 
 export interface WalkCtx {
@@ -380,13 +376,17 @@ interface DefDescriptor {
  * no such limit as long as each returned chunk is under 32 KB, so we always feed
  * the source in <32 KB slices. Code-unit indexing matches `String.slice`. */
 const PARSE_CHUNK = 16384;
-function parseSource(source: string): Parser.SyntaxNode {
+function parseSource(source: string, lang: Language): Parser.SyntaxNode {
+  if (!parser) {
+    const NativeParser: typeof Parser = require("tree-sitter");
+    parser = new NativeParser();
+  }
+  parser.setLanguage(GRAMMARS[lang]());
   return parser.parse((index: number) => source.slice(index, index + PARSE_CHUNK)).rootNode;
 }
 
 export function extractFile(rel: string, source: string, lang: Language): ExtractResult {
-  parser.setLanguage(GRAMMARS[lang] as never);
-  const root = parseSource(source);
+  const root = parseSource(source, lang);
   const bindings = collectBindings(root, lang);
   const importedSymbols = collectImportedSymbols(root, lang);
   const rGenerics = lang === "r" ? collectRGenerics(root) : EMPTY_SET;
