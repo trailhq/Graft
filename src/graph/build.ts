@@ -120,6 +120,9 @@ export interface GraphBuildResult {
   byRelation: Record<Relation, number>;
   languages: string[];
   meaning: EnrichStats;
+  /** Recoverable Tier-1/build-output errors. These leave a partial graph on
+   * disk, but the CLI must not report the build as successful. */
+  structuralErrors: number;
   errors: string[];
 }
 
@@ -405,6 +408,7 @@ export async function buildGraph(
     byRelation,
     languages: [...langs].sort(),
     meaning,
+    structuralErrors: errors.length - meaning.errors.length,
     errors,
   };
 }

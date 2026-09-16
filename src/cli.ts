@@ -524,7 +524,16 @@ program
       throw err;
     });
     process.stderr.write("\n");
-    console.log(`✓ wiring: ${g.nodes} nodes (${fmt(g.byKind)}), ${g.edges} edges, ${g.cards} cards [${g.languages.join(", ")}]`);
+    const structuralFailed = g.structuralErrors > 0;
+    if (structuralFailed) {
+      console.error(
+        `✗ wiring incomplete: ${g.structuralErrors} structural error(s), ` +
+          `${g.nodes} nodes, ${g.edges} edges, ${g.cards} cards.`,
+      );
+      process.exitCode = 1;
+    } else {
+      console.log(`✓ wiring: ${g.nodes} nodes (${fmt(g.byKind)}), ${g.edges} edges, ${g.cards} cards [${g.languages.join(", ")}]`);
+    }
     console.log(`  parsed: ${g.parsed} of ${g.files} files (${g.reused} replayed from cache)`);
     // Worth one line: this build started from a graph the user never built *here*.
     if (g.seededFrom) console.log(`  seeded: copied a starting graph from ${g.seededFrom} (git worktree)`);
@@ -535,17 +544,21 @@ program
     console.log(`  → ${g.contextDir}`);
     // The activation event. Everything here is a bucket or a fixed label: repo
     // scale rather than a file count, a language set rather than file names.
-    track(
-      "build_completed",
-      {
-        files_bucket: filesBucket(g.files),
-        langs: langsValue(g.languages),
-        mode: deep ? "deep" : "fast",
-        duration_bucket: durationBucket(Date.now() - buildStartedAt),
-        incremental: String(g.reused > 0),
-      },
-      { repo: buildRoot },
-    );
+    if (structuralFailed) {
+      track("build_failed", { stage: "graph", code: errorCode(new Error(g.errors[0])) }, { repo: buildRoot });
+    } else {
+      track(
+        "build_completed",
+        {
+          files_bucket: filesBucket(g.files),
+          langs: langsValue(g.languages),
+          mode: deep ? "deep" : "fast",
+          duration_bucket: durationBucket(Date.now() - buildStartedAt),
+          incremental: String(g.reused > 0),
+        },
+        { repo: buildRoot },
+      );
+    }
     for (const e of g.errors) console.error(`✗ ${e}`);
 
     const rel = relative(process.cwd(), g.contextDir) || "graft";
