@@ -327,7 +327,7 @@ program
   .argument("[dir]", "repository root", ".")
   .option("--deep", "run the LLM pass: concept nodes (graft/*.md) + per-symbol summary/crux")
   .option("-e, --extensions <exts...>", 'code extensions to include (e.g. ".ts" ".py"); an extension with no parser is ignored with a warning that lists the supported set')
-  .option("-j, --concurrency <n>", "files summarized in parallel during --deep (default 5)")
+  .option("-j, --concurrency <n>", "LLM calls in parallel during --deep (summaries, synthesis batches, crux; default 5)")
   .option("--no-reuse", "re-parse every file instead of replaying unchanged ones from the extraction cache")
   .option("--lsp", "add compiler-grade call edges via a language server if one is installed (opt-in, slower; e.g. rust-analyzer, clangd)")
   .option("--allow-partial", "with --deep: exit 0 even when some files' summaries failed (default: a degraded meaning tier exits 1)")
@@ -490,6 +490,7 @@ program
       const c = await engine.init(dir, {
         extensions: opts.extensions,
         onlyDirs,
+        concurrency,
         onProgress: ({ phase, index, total, file }) =>
           process.stderr.write(
             `\r${phase === "summarize" ? "reading" : "writing"} concepts ${index + 1}/${total}: ${file.slice(0, 40).padEnd(40)}`,
