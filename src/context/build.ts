@@ -245,9 +245,18 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
   const batches = batchBySize(summarized, BATCH_CHAR_BUDGET);
   result.batches = batches.length;
 
+  // Detach from the CLI's \r summarize spinner. Synthesis progress is a
+  // full line (start) plus a full line (result) so concurrent batches
+  // cannot share a carriage-return.
+  process.stderr.write("\n");
   const synthGate = new LlmFailureGate();
-  let synthDone = 0;
   const batchNodes = await mapWithConcurrency(batches, limit, async (batch, b) => {
+    opts.onProgress?.({
+      phase: "synthesize",
+      index: b,
+      total: batches.length,
+      file: `batch ${b + 1}`,
+    });
     const key = batchKey(batch, hashByPath);
     let nodes = cache.synth[key];
     // An empty array is a miss, not a hit: caching [] made a silent empty
@@ -276,12 +285,6 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
     console.error(
       `  synthesis batch ${b + 1}/${batches.length}: ${nodes.length} nodes, ${links} links${cached ? " (cached)" : ""}`,
     );
-    opts.onProgress?.({
-      phase: "synthesize",
-      index: synthDone++,
-      total: batches.length,
-      file: `batch ${b + 1}`,
-    });
     return nodes;
   });
   const synthNodes = batchNodes.flat();

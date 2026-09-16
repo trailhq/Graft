@@ -491,10 +491,12 @@ program
         extensions: opts.extensions,
         onlyDirs,
         concurrency,
-        onProgress: ({ phase, index, total, file }) =>
-          process.stderr.write(
-            `\r${phase === "summarize" ? "reading" : "writing"} concepts ${index + 1}/${total}: ${file.slice(0, 40).padEnd(40)}`,
-          ),
+        onProgress: ({ phase, index, total, file }) => {
+          const line = `${phase === "summarize" ? "reading" : "writing"} concepts ${index + 1}/${total}: ${file.slice(0, 40).padEnd(40)}`;
+          // Synthesis already prints newline-terminated batch results; a \r
+          // spinner would share that line and scramble under concurrency.
+          process.stderr.write(phase === "synthesize" ? `${line}\n` : `\r${line}`);
+        },
       }).catch((err: unknown) => {
         // Only the stage and a code enum; the message stays on this machine.
         track("build_failed", { stage: "summarize", code: errorCode(err) }, { repo: buildRoot });
