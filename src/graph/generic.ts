@@ -11,8 +11,9 @@
  * `extractGeneric` degrades to a file node only (never throws).
  *
  * What it emits (signature-only): a file node + one node per `@definition.<kind>`
- * capture, and bare-name `calls` raw edges from `@reference.call` attributed to
- * the innermost enclosing definition. resolve.ts then resolves those calls by
+ * capture, bare-name `calls` raw edges from `@reference.call` attributed to the
+ * innermost enclosing definition, and file-level `imports` edges from any
+ * `@reference.import` specifier. resolve.ts then resolves those calls by
  * name for free (same-file → extracted, unique-global → inferred). Member-call
  * receiver typing (recvType) is NOT produced here — that needs a per-language
  * binding pass; the opt-in LSP tier fills that gap for popular languages.
@@ -58,6 +59,7 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "clojure", exts: [".clj", ".cljs", ".cljc", ".bb"], wasm: "clojure" },
   { name: "nix", exts: [".nix"], wasm: "nix" },
   { name: "lua", exts: [".lua"], wasm: "lua" },
+  { name: "gdscript", exts: [".gd"], wasm: "gdscript" },
 ];
 
 const byExt = new Map<string, GenericLang>();
@@ -392,6 +394,7 @@ function tagsExtract(
   const defNameAt = new Set<number>();
   const calls: Array<{ name: string; at: number }> = [];
   const refs: Array<{ name: string; at: number }> = [];
+  const imports: string[] = [];
   for (const m of matches) {
     const cap: Record<string, TsNode> = {};
     for (const c of m.captures) cap[c.name] = c.node;
@@ -402,6 +405,19 @@ function tagsExtract(
     }
     if (("reference.call" in cap || "reference.send" in cap) && cap.name)
       calls.push({ name: cap.name.text, at: cap.name.startIndex });
+    // A module specifier the grammar marks. Unlike a call or a type reference
+    // this is a STRING, not a name to resolve, and it belongs to the FILE rather
+    // than to whatever definition encloses it — that is what makes it land as an
+    // incoming edge on the imported file, which is what a blast radius reads.
+    if ("reference.import" in cap && cap.name) {
+      const raw = cap.name.text;
+      const quote = raw[0];
+      const spec =
+        (quote === '"' || quote === "'") && raw.endsWith(quote) && raw.length >= 2
+          ? raw.slice(1, -1)
+          : raw;
+      if (spec) imports.push(spec);
+    }
     // Structural references the grammar already marks: a supertype (extends), an
     // implemented interface, an object creation (`new Foo`), a module alias. Grammars
     // label these @reference.class/.interface/.implementation/.module — heterogeneous
@@ -422,6 +438,9 @@ function tagsExtract(
     if (defNameAt.has(c.at)) continue;
     const enc = enclosing(c.at);
     rawEdges.push({ source: enc ? enc.id : rel, relation: "calls", file: rel, name: c.name });
+  }
+  for (const spec of new Set(imports)) {
+    rawEdges.push({ source: rel, relation: "imports", file: rel, specifier: spec });
   }
   for (const r of refs) {
     if (defNameAt.has(r.at)) continue;

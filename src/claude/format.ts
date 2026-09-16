@@ -1,4 +1,5 @@
 import { basename } from 'node:path';
+import { toPosixPath } from '../util/paths.js';
 import type { Stats, SessionState } from './state.js';
 import type { GraphV1, EdgeV1 } from '../graph/types.js';
 // The injection gate reuses the federation floors rather than inventing its own:
@@ -53,8 +54,14 @@ export function renderStatusline(
 
 function nodeIdsInFile(w: GraphV1, filePath: string): Set<string> {
   const nodes = w.nodes ?? [];
+  // The hook is handed whatever the host wrote in `tool_input.file_path` — on
+  // Windows that is a backslash path (`E:\repo\src\a.gd`), while every
+  // `node.path` is posix by construction. Without this normalization the suffix
+  // test could never match on Windows and the blast radius was silently empty
+  // for every language, not just one.
+  const target = toPosixPath(filePath);
   return new Set(
-    nodes.filter((n) => n.path && (filePath === n.path || filePath.endsWith(`/${n.path}`)))
+    nodes.filter((n) => n.path && (target === n.path || target.endsWith(`/${n.path}`)))
       .map((n) => n.id),
   );
 }
