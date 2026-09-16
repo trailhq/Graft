@@ -52,9 +52,11 @@ export function hitLine(direction: Direction, hit: EdgeHit, showDepth: boolean, 
   const depthTag = showDepth ? ` [depth ${hit.depth}]` : "";
   const label = hit.node ? `${hit.node.name} (${hit.node.path}:${hit.node.span})` : `${hit.id} (unresolved import)`;
   const list = quotes === undefined ? [] : Array.isArray(quotes) ? quotes : [quotes];
-  // One edge per calling function, however many times it calls: say so, or the
-  // list reads as complete when it is one line per caller (#363).
-  const sitesTag = list.length > 1 ? ` · ${list.length} call sites` : "";
+  // One edge per calling function, however many times it references the
+  // symbol: say so, or the list reads as complete when it is one line per
+  // caller (#363). "sites", not "call sites": the walk also follows
+  // references/imports/extends edges.
+  const sitesTag = list.length > 1 ? ` · ${list.length} sites` : "";
   const line = `  ${hit.relation} ${arrow} ${label}${depthTag}${sitesTag}`;
   return list.length ? [line, ...list.map((q) => `      ${q.n}: ${q.text.trim()}`)].join("\n") : line;
 }
@@ -76,11 +78,16 @@ interface Quote {
  */
 function quotesFor(
   hit: EdgeHit,
-  name: string,
+  symbol: NodeV1,
   read: (path: string) => string[] | null,
 ): Quote[] {
   if (!hit.node || hit.depth > 1) return [];
-  return referenceLines(hit.node.path, hit.node.span, [wordRe(name)], read);
+  const lines = referenceLines(hit.node.path, hit.node.span, [wordRe(symbol.name)], read);
+  // A recursive function is its own caller, and its span opens with its own
+  // declaration — which names the symbol but is not a site. Drop that line.
+  if (hit.node.id !== symbol.id) return lines;
+  const declLine = Number(/^L(\d+)/.exec(hit.node.span)?.[1]);
+  return Number.isFinite(declLine) ? lines.filter((q) => q.n !== declLine) : lines;
 }
 
 /** Tokens-saved baseline for a callers/callees walk: the files of the matched
@@ -138,9 +145,11 @@ interface HitJson {
   span?: string;
   relation: string;
   depth: number;
-  /** Line numbers of the call sites inside this hit (depth-1 hits only). The
-   * quoted text stays out of the JSON contract; the count does not, because a
-   * caller with three sites is a different answer from one with one (#363). */
+  /** Line numbers inside this hit that reference the symbol. Present only for a
+   * depth-1 hit whose file could be read and had at least one matching line;
+   * absent otherwise (not computed, or nothing matched). The quoted text stays
+   * out of the JSON contract; the count does not, because a caller with three
+   * sites is a different answer from one with one (#363). */
   sites?: number[];
 }
 
@@ -231,7 +240,7 @@ export function runCallersCommand(query: string, dir: string, opts: CallersCliOp
       matches: results.map((r): MatchJson => {
         const m: MatchJson = {
           symbol: symbolJson(r.symbol),
-          hits: r.hits.map((h) => hitJson(h, quotesFor(h, r.symbol.name, read))),
+          hits: r.hits.map((h) => hitJson(h, quotesFor(h, r.symbol, read))),
         };
         if (r.hits.length === 0) {
           m.note = looseNoteFor(direction, r.symbol.name, matches.length);
@@ -248,7 +257,7 @@ export function runCallersCommand(query: string, dir: string, opts: CallersCliOp
   for (const { symbol, hits } of results) {
     lines.push(headerOf(symbol));
     if (hits.length === 0) lines.push(looseNoteFor(direction, symbol.name, matches.length));
-    else for (const h of hits) lines.push(hitLine(direction, h, showDepth, quotesFor(h, symbol.name, read)));
+    else for (const h of hits) lines.push(hitLine(direction, h, showDepth, quotesFor(h, symbol, read)));
     lines.push("");
   }
   const body = lines.join("\n").replace(/\n+$/, "\n");
