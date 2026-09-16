@@ -13,14 +13,19 @@
  * OrcaRouter AI gateway by default (see orcarouter.ts) so its users get the
  * gateway's routing, failover, and guardrails behind a named provider instead
  * of a bare custom base URL.
+ *
+ * `opper` is the same again, pointed at the Opper gateway (see opper.ts): an
+ * EU-hosted, OpenAI-compatible gateway whose bare model ids are pools that
+ * route to a provider per request.
  */
 import type { ChatModel } from "./types.js";
 import { OpenAIChatModel } from "./openai.js";
 import { AnthropicChatModel } from "./anthropic.js";
 import { LiteLLMChatModel } from "./litellm.js";
 import { OrcaRouterChatModel } from "./orcarouter.js";
+import { OpperChatModel } from "./opper.js";
 
-export type ProviderKind = "openai" | "anthropic" | "litellm" | "orcarouter";
+export type ProviderKind = "openai" | "anthropic" | "litellm" | "orcarouter" | "opper";
 
 export interface ChatModelConfig {
   provider: ProviderKind;
@@ -51,6 +56,13 @@ export function createChatModel(cfg: ChatModelConfig): ChatModel {
       });
     case "orcarouter":
       return new OrcaRouterChatModel({
+        apiKey: cfg.apiKey,
+        model: cfg.model,
+        baseUrl: cfg.baseUrl,
+        headers: cfg.headers,
+      });
+    case "opper":
+      return new OpperChatModel({
         apiKey: cfg.apiKey,
         model: cfg.model,
         baseUrl: cfg.baseUrl,
