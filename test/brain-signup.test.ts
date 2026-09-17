@@ -90,3 +90,24 @@ test("signup url: GRAFT_BRAIN_URL points signup at staging too", () => {
     else process.env.GRAFT_BRAIN_URL = before;
   }
 });
+
+// The browser's last stop is Trail, not a local page that is about to stop
+// answering. Ending on "go back to your terminal" wasted the one moment the
+// brain is actually being built and there is something on screen worth seeing.
+test('the accepted handoff sends the browser back into Trail, at its new brain', async () => {
+  process.env.GRAFT_BRAIN_URL = 'http://localhost:5173';
+  const handoff = await startHandoff();
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:${handoff.port}${CALLBACK_PATH}?state=${encodeURIComponent(handoff.state)}&brain=abc-123&token=gbt_1.xyz`,
+      { redirect: 'manual' },
+    );
+    assert.equal(res.status, 303);
+    assert.equal(res.headers.get('location'), 'http://localhost:5173/brain/abc-123');
+    const got = await handoff.wait(1000);
+    assert.deepEqual(got, { link: { brainId: 'abc-123', token: 'gbt_1.xyz' } });
+  } finally {
+    handoff.close();
+    delete process.env.GRAFT_BRAIN_URL;
+  }
+});

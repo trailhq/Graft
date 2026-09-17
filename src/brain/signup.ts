@@ -111,8 +111,11 @@ export async function startHandoff(): Promise<Handoff> {
       return;
     }
 
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(donePage(true));
+    // 303 so the browser issues a plain GET, and Location built from
+    // GRAFT_BRAIN_URL rather than anything the query carried — the same reason
+    // the Trail side builds its callback rather than being told one.
+    res.writeHead(303, { location: brainUrl(brainId), "cache-control": "no-store" });
+    res.end();
     // No `baseUrl` stored, matching `connect`: GRAFT_BRAIN_URL is read again on
     // every use, so persisting it here would only freeze a host that the env
     // var is already free to move.
@@ -159,9 +162,27 @@ export async function startHandoff(): Promise<Handoff> {
   };
 }
 
+/** The Trail front end this machine is pointed at, without a trailing slash.
+ *
+ * Read at the moment it is needed rather than captured once, matching the rest
+ * of the brain code: GRAFT_BRAIN_URL is free to move between calls. */
+export function webBaseUrl(baseUrl?: string): string {
+  return (process.env.GRAFT_BRAIN_URL || baseUrl || DEFAULT_WEB_BASE_URL).replace(/\/+$/, "");
+}
+
+/** Where the browser is sent once the handoff has been accepted.
+ *
+ * Back into Trail, at the brain it just made. The alternative — leaving the
+ * person on a local page that says "go back to your terminal" — ends the flow
+ * on a blank throwaway served by a port that is about to close, at exactly the
+ * moment the brain starts being mined and there is something to watch. */
+export function brainUrl(brainId: string, baseUrl?: string): string {
+  return `${webBaseUrl(baseUrl)}/brain/${encodeURIComponent(brainId)}`;
+}
+
 /** Where to send the browser for a repo's brain. */
 export function signupUrl(opts: { repo: string; port: number; state: string; baseUrl?: string }): string {
-  const base = (process.env.GRAFT_BRAIN_URL || opts.baseUrl || DEFAULT_WEB_BASE_URL).replace(/\/+$/, "");
+  const base = webBaseUrl(opts.baseUrl);
   const q = new URLSearchParams({
     step: "repo",
     graft_repo: opts.repo,
