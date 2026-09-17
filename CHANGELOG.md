@@ -11,6 +11,18 @@
   working copy against the repo a brain expects, so rules are never mined from
   the wrong tree.
 
+- **Rust review hardening.** Rust module paths now handle inline-module `self`/
+  `super` consumption, auxiliary crate roots, and ambiguous or cross-language
+  cases conservatively, preserving dropped-edge behavior rather than guessing.
+
+- **Rust code graphs.** `.rs` files contribute functions, structs, enums, traits,
+  type aliases, impl-owned methods, modules, constants, and macros. Rust calls,
+  typed member calls, macro namespaces, crate/module paths, and Cargo workspace
+  package mappings resolve deterministically without requiring rust-analyzer.
+  Rust is a depth-tier language now — `.rs` no longer routes through the
+  generic tags.scm tier, and the grammar is tree-sitter-rust 0.24.0, which
+  parses `&raw const`/`&raw mut` (0.23 recovered them as syntax errors).
+
 ### Fixed
 
 - **A brain refreshes its rules from upkeep** (#343), so a single empty pull no

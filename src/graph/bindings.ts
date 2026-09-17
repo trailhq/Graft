@@ -77,6 +77,16 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     if (node.type === "anonymous_class") return "{anonymous}";
     return null;
   }
+  if (lang === "rust") {
+    // Rust mirrors extract.ts's describeRust: a macro_definition is named with its
+    // `!` so the definition and its call sites agree on one spelling.
+    if (node.type === "macro_definition") {
+      const name = node.childForFieldName("name")?.text;
+      return name ? `${name}!` : null;
+    }
+    if (RUST_DEF_TYPES.has(node.type)) return node.childForFieldName("name")?.text ?? null;
+    return null;
+  }
   const defTypes =
     lang === "python"
       ? new Set(["class_definition", "function_definition"])
@@ -260,6 +270,18 @@ const JAVA_TYPE_DECLS: ReadonlySet<string> = new Set([
   "annotation_type_declaration",
 ]);
 
+/** Rust declarations that push a scope segment — mirrors extract.ts's RUST_KINDS,
+ * minus `macro_definition`, which `defName` names with its trailing `!` instead. */
+const RUST_DEF_TYPES: ReadonlySet<string> = new Set([
+  "function_item",
+  "function_signature_item",
+  "struct_item",
+  "enum_item",
+  "trait_item",
+  "type_item",
+  "union_item",
+]);
+
 /** Pass 1 over a parsed file: collect variable->type bindings. Pure. */
 export function collectBindings(root: Parser.SyntaxNode, lang: Language): FileBindings {
   const bindings = new FileBindings();
@@ -272,6 +294,8 @@ export function collectBindings(root: Parser.SyntaxNode, lang: Language): FileBi
 /** Import aliases (`... as F`) can be declared anywhere relative to their use
  * textually, so this scans the whole tree once, ahead of the scope-aware walk. */
 function collectAliases(node: Parser.SyntaxNode, lang: Language, aliases: Map<string, string>): void {
+  // Neither Go nor Rust has an import-alias construct this pass reads.
+  if (lang === "go" || lang === "rust") return;
   if (lang === "python" && node.type === "aliased_import") {
     const nameNode = node.childForFieldName("name");
     const aliasNode = node.childForFieldName("alias");
@@ -307,9 +331,10 @@ function visit(
   else if (lang === "java") handleJava(node, scope, classScope, bindings);
   else if (lang === "swift") handleSwift(node, scope, classScope, bindings);
   else if (lang === "php") handlePhp(node, scope, bindings);
+  else if (lang === "rust") handleRust(node, scope, bindings);
   else handleTs(node, scope, classScope, bindings, aliases);
 
-  const name = defName(node, lang);
+  const name = lang === "rust" ? (rustContextName(node) ?? defName(node, lang)) : defName(node, lang);
   let childScope = scope;
   let childClassScope = classScope;
   if (name !== null) {
@@ -687,6 +712,52 @@ function javaTypeName(node: Parser.SyntaxNode | null | undefined): string | null
 function javaNewTypeName(value: Parser.SyntaxNode | null | undefined): string | null {
   if (value?.type !== "object_creation_expression") return null;
   return javaTypeName(value.childForFieldName("type"));
+}
+
+function rustContextName(node: Parser.SyntaxNode): string | null {
+  if (node.type === "impl_item") return rustTypeName(node.childForFieldName("type"));
+  if (node.type === "mod_item" && node.childForFieldName("body")) {
+    return node.childForFieldName("name")?.text ?? null;
+  }
+  return null;
+}
+
+function rustTypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "reference_type" || node.type === "generic_type") {
+    return rustTypeName(node.childForFieldName("type"));
+  }
+  if (node.type === "scoped_type_identifier" || node.type === "scoped_identifier") {
+    return node.childForFieldName("name")?.text ?? null;
+  }
+  if (node.type === "type_identifier" || node.type === "identifier") return node.text;
+  return null;
+}
+
+function rustConstructorType(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (node?.type !== "call_expression") return null;
+  let fn = node.childForFieldName("function");
+  while (fn?.type === "generic_function") fn = fn.childForFieldName("function");
+  if (fn?.type !== "scoped_identifier") return null;
+  const method = fn.childForFieldName("name")?.text ?? "";
+  if (method !== "new" && method !== "default" && method !== "from" && !method.startsWith("with_")) return null;
+  return rustTypeName(fn.childForFieldName("path"));
+}
+
+function handleRust(node: Parser.SyntaxNode, scope: string[], bindings: FileBindings): void {
+  const scopePath = scope.join(".");
+  if (node.type === "parameter") {
+    const pattern = node.childForFieldName("pattern");
+    const type = rustTypeName(node.childForFieldName("type"));
+    if (pattern?.type === "identifier" && type) bindings.set(scopePath, pattern.text, type);
+    return;
+  }
+  if (node.type !== "let_declaration") return;
+  const pattern = node.childForFieldName("pattern");
+  if (pattern?.type !== "identifier") return;
+  const type =
+    rustTypeName(node.childForFieldName("type")) ?? rustConstructorType(node.childForFieldName("value"));
+  if (type) bindings.set(scopePath, pattern.text, type);
 }
 
 function handleGo(node: Parser.SyntaxNode, scope: string[], bindings: FileBindings): void {

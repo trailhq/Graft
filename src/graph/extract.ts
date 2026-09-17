@@ -15,12 +15,24 @@ import Java from "tree-sitter-java";
 import Kotlin from "tree-sitter-kotlin";
 import Swift from "tree-sitter-swift";
 import PHP from "tree-sitter-php";
+// Deep import avoids the package's extensionless-main DEP0151 warning under ESM.
+import Rust from "tree-sitter-rust/bindings/node/index.js";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "kotlin" | "swift" | "php" | "r";
+export type Language =
+  | "typescript"
+  | "tsx"
+  | "python"
+  | "go"
+  | "java"
+  | "kotlin"
+  | "swift"
+  | "php"
+  | "r"
+  | "rust";
 
 /**
  * Extension → the tree-sitter grammar that parses it, and the label a human expects
@@ -57,6 +69,7 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   // `entryFor` lower-cases the path before matching, so this one entry covers
   // both `.R` (the conventional case in real R codebases) and `.r`.
   { ext: ".r", grammar: "r", label: "r" },
+  { ext: ".rs", grammar: "rust", label: "rust" },
 ];
 
 function entryFor(path: string): (typeof EXTENSIONS)[number] | undefined {
@@ -120,6 +133,10 @@ export interface RawEdge {
    * no such member — and ONLY then, so a name defined as both a member and a
    * free function yields the member edge alone, exactly as Swift dispatches it. */
   implicitSelf?: boolean;
+  /** The name-resolution domain an edge belongs to, when a language needs one to
+   * keep otherwise-ambiguous bare names apart (Rust: `crate::`/`self::`/`super::`
+   * paths and trait-owned names live in their own namespace — see resolve.ts). */
+  lang?: Language;
 }
 
 export interface ExtractResult {
@@ -263,6 +280,25 @@ const PHP_KINDS: Record<string, Kind> = {
   enum_declaration: "enum",
 };
 
+// Rust: `trait_item` maps to "interface" — a trait is a contract of behaviour, the
+// same reading PHP's trait_declaration gets from resolve.ts's kind filters — and
+// `macro_definition` to "function" so a macro's call sites have something to land
+// on. The name carries a trailing `!` (see describeRust), which is how a macro
+// call site spells it too.
+const RUST_KINDS: Record<string, Kind> = {
+  function_item: "function",
+  function_signature_item: "function",
+  struct_item: "struct",
+  enum_item: "enum",
+  trait_item: "interface",
+  type_item: "type",
+  union_item: "struct",
+  macro_definition: "function",
+  mod_item: "module",
+  const_item: "constant",
+  static_item: "constant",
+};
+
 const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   typescript: TS_KINDS,
   tsx: TS_KINDS,
@@ -273,6 +309,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   kotlin: KOTLIN_KINDS,
   swift: SWIFT_KINDS,
   php: PHP_KINDS,
+  rust: RUST_KINDS,
 };
 
 /**
@@ -299,6 +336,10 @@ const CALL_TYPES: Record<Language, ReadonlySet<string>> = {
     "scoped_call_expression",
   ]),
   r: new Set(["call"]),
+  // Rust calls are two shapes: an ordinary `foo()` / `T::foo()` call_expression and
+  // `foo!()` macro_invocation. Both are real edges; the stdlib/`macro_rules`
+  // builtins are filtered at the call site (see rustSkipsCall).
+  rust: new Set(["call_expression", "macro_invocation"]),
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -321,6 +362,7 @@ const GRAMMARS: Record<Language, unknown> = {
   kotlin: Kotlin,
   swift: Swift,
   php: PHP.php,
+  rust: Rust,
 };
 
 export interface WalkCtx {
@@ -354,6 +396,19 @@ export interface WalkCtx {
   // for the method's whole body, only changing when a genuinely different
   // class is entered. Null outside any class, or for a class with no parent.
   rSuperClass: string | null;
+  // Rust: inside an `impl` block, whose members become methods of the impl'd type
+  // (there is no `class` node to hang them off — see walk()'s impl_item branch).
+  rustInImpl: boolean;
+  // Rust: that impl also names a trait (`impl Draw for Circle`), which makes every
+  // member public — a trait impl cannot have private members.
+  rustTraitImpl: boolean;
+  // Rust: inside `#[cfg(test)]`, where nothing is exported to the crate's users.
+  rustCfgTest: boolean;
+  // Rust: how many inline `mod name { … }` blocks enclose the current node. A
+  // `super::`/`self::` path inside one is relative to the INLINE module, not the
+  // file, so that many path segments are consumed before the specifier means
+  // what a file-level path would mean (see rustConsumeInlineModPrefix).
+  rustInlineModDepth: number;
 }
 
 /** A definition we're about to emit, normalized across the shapes we handle. */
@@ -425,6 +480,10 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
     rR6Access: null,
     rGenerics,
     rSuperClass: null,
+    rustInImpl: false,
+    rustTraitImpl: false,
+    rustCfgTest: false,
+    rustInlineModDepth: 0,
   };
   // Every id minted this file, seeded with the file node's own id (`rel`) so a
   // top-level definition can never collide with it. Threaded as its own
@@ -433,6 +492,10 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
   // when it's actually accidental shared mutable state across the whole walk.
   const minted = new Set<string>([rel]);
   walkNamedChildren(root.namedChildren, ctx, nodes, rawEdges, minted);
+  // `impl Trait for Type` is a trait *implementation*, not a subclass relationship
+  // the walk can see: the type and the trait sit in two different top-level items.
+  // Sweep the finished node list once so the edge can point at the type node.
+  if (lang === "rust") rawEdges.push(...rustHeritageEdges(root, nodes, rel));
   // nodes[0] is the file node; the rest are its symbols. Index the module-level
   // residual on the file node so a term outside every symbol still surfaces it.
   nodes[0].body_text = fileResidual(source, nodes.slice(1));
@@ -602,7 +665,9 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
                     ? swiftExported(node)
                     : ctx.lang === "php"
                       ? phpExported(node)
-                      : tsExported(node),
+                      : ctx.lang === "rust"
+                        ? rustExported(node, ctx)
+                        : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -615,6 +680,15 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     });
     // structural containment
     edges.push({ source: ctx.parentId, relation: "contains", targetId: id, file: ctx.rel });
+    // A bodyless `mod x;` declares a module AND imports its file (`x.rs` or
+    // `x/mod.rs`) — the depth tier mints both from the same item, never one at
+    // the cost of the other. `#[path = "…"]` retargets the import somewhere we
+    // cannot follow, which rustImportSpecifiers reports by yielding nothing.
+    if (ctx.lang === "rust" && node.type === "mod_item" && !node.childForFieldName("body")) {
+      for (const spec of rustImportSpecifiers(node, ctx.scope, ctx.rustInlineModDepth)) {
+        edges.push({ source: ctx.rel, relation: "imports", specifier: spec, file: ctx.rel, lang: "rust" });
+      }
+    }
     // class heritage — in Java an interface may also `extends`, and a record/enum
     // may `implements`, so every type declaration is a heritage site, not just a class.
     const javaTypeDecl = ctx.lang === "java" && JAVA_TYPE_KINDS.has(desc.kind);
@@ -625,8 +699,12 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     if (ctx.lang === "php") edges.push(...phpAttributeReferenceEdges(node, id, ctx));
     if (ctx.lang === "java") edges.push(...javaAnnotationReferenceEdges(node, id, ctx));
 
+    // Rust: a trait body is the interface reading of a type, so its members take
+    // the trait's name as their owner — that's what lets `impl Draw for Circle`'s
+    // `draw()` resolve against `Circle::draw`'s owner-qualified index entry.
+    const rustTraitDecl = ctx.lang === "rust" && desc.kind === "interface";
     const enclosingClass =
-      desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl
+      desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl || rustTraitDecl
         ? desc.name
         : isGoMethod
           ? goReceiverType(node)
@@ -661,6 +739,16 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
               ? swiftSuperClassName(node)
               : null
           : ctx.rSuperClass,
+      // A Rust `mod` is the one definition whose children need extra lexical
+      // context: `#[cfg(test)]` suppresses exports for the whole subtree, and
+      // each inline module deepens the scope that `self::`/`super::` paths are
+      // relative to. Inherited unchanged for every other definition kind.
+      ...(ctx.lang === "rust" && node.type === "mod_item"
+        ? {
+            rustCfgTest: ctx.rustCfgTest || hasRustAttribute(node, "cfg", "test"),
+            rustInlineModDepth: ctx.rustInlineModDepth + 1,
+          }
+        : {}),
     };
     walkNamedChildren(node.namedChildren, childCtx, out, edges, minted);
     return;
@@ -698,6 +786,31 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     }
   }
 
+  // Rust `impl` blocks: the grammar gives them no name of their own, and the type
+  // they extend may be spelled several ways (`Circle`, `&Circle`, `Circle<T>`), so
+  // the owner is read off the `type` field. Members descend with the owner as their
+  // enclosing class — that is what makes them `method` nodes owned by `Circle`
+  // rather than free functions, and what `Self::new()` / `self.area()` resolve
+  // against. `rustTraitImpl` marks the members public: a trait impl has no privacy.
+  if (ctx.lang === "rust" && node.type === "impl_item") {
+    const owner = rustTypeName(node.childForFieldName("type"));
+    if (owner) {
+      const childCtx: WalkCtx = {
+        ...ctx,
+        scope: [...ctx.scope, owner],
+        enclosingClass: owner,
+        rustInImpl: true,
+        rustTraitImpl: node.childForFieldName("trait") !== null,
+      };
+      for (const child of node.namedChildren) walk(child, childCtx, out, edges, minted);
+      return;
+    }
+  }
+
+  // Rust inline `mod name { … }` is minted as a module node by describeRust
+  // (kind "module"), so the generic definition branch above handles it — cfg(test)
+  // suppression and inline-mod depth threading happen in its childCtx.
+
   // not a definition — capture calls/imports/references, then descend with the same context
   // R's `call` node is also its ONLY vehicle for library()/require()/source() —
   // there's no separate import-statement grammar construct to key off, so isImport
@@ -705,12 +818,26 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
   // captured as a (harmlessly unresolvable, but wrong) `calls` edge instead.
   const callTypes = CALL_TYPES[ctx.lang];
   if (isImport(node, ctx.lang)) {
-    const spec = importSpecifier(node, ctx.lang);
-    if (spec) edges.push({ source: ctx.rel, relation: "imports", specifier: spec, file: ctx.rel });
+    // Rust `use` re-exports and aliases expand to several specifiers per
+    // declaration (`use a::{b, c as d};`), so the import branch is a list.
+    const specs =
+      ctx.lang === "rust"
+        ? rustImportSpecifiers(node, ctx.scope, ctx.rustInlineModDepth)
+        : [importSpecifier(node, ctx.lang)];
+    for (const spec of specs) {
+      if (!spec) continue;
+      edges.push({
+        source: ctx.rel,
+        relation: "imports",
+        specifier: spec,
+        file: ctx.rel,
+        ...(ctx.lang === "rust" ? { lang: ctx.lang } : {}),
+      });
+    }
     // Imported identifiers are declarations, not uses. The import-binding pass
     // above already recorded them, so do not descend and emit false references.
     return;
-  } else if (callTypes.has(node.type)) {
+  } else if (callTypes.has(node.type) && !rustSkipsCall(node, ctx.lang)) {
     // R6Class(...) / a Phase-5 mixin list(...) is already consumed by its
     // enclosing binary_operator as the class definition (see describeR) — the
     // walk still reaches this SAME call node again, recursing generically to
@@ -720,7 +847,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     const consumedCallee = ctx.lang === "r" && node.type === "call" ? rCalleeName(node) : null;
     const isConsumedRClassCall =
       consumedCallee === "R6Class" || (consumedCallee === "list" && rIsMixinContainer(node));
-    const callee = isConsumedRClassCall ? null : calleeName(node, ctx.lang);
+    const callee = isConsumedRClassCall ? null : calleeName(node, ctx.lang, ctx.rustInlineModDepth);
     if (callee) {
       const callEdge: RawEdge = {
         source: ctx.parentId,
@@ -729,6 +856,8 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         viaMember: callee.viaMember,
         file: ctx.rel,
         ...(callee.kinds ? { kinds: callee.kinds } : {}),
+        ...(callee.specifier ? { specifier: callee.specifier } : {}),
+        ...(ctx.lang === "rust" ? { lang: ctx.lang } : {}),
       };
       // Overloading languages: the call site's argument count, to pick the right
       // overload (see RawEdge.argCount).
@@ -765,7 +894,9 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
           implicitSelf: true,
         });
       } else {
-        const recvType = resolveRecvType(callee.receiver, ctx);
+        // Rust reads the receiver type straight off the callee (`Circle::area`,
+        // `Self::new`) before falling back to the file's variable bindings.
+        const recvType = callee.recvType ?? resolveRecvType(callee.receiver, ctx);
         edges.push(recvType ? { ...callEdge, recvType } : callEdge);
       }
     }
@@ -780,7 +911,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     }
     return;
   } else if (
-    node.type === "identifier" &&
+    (node.type === "identifier" || (ctx.lang === "rust" && node.type === "type_identifier")) &&
     !isDirectCallee(node, callTypes) &&
     !isDeclarationName(node)
   ) {
@@ -792,6 +923,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         name: imported.name,
         specifier: imported.specifier,
         file: ctx.rel,
+        ...(ctx.lang === "rust" ? { lang: ctx.lang } : {}),
       });
     }
   }
@@ -872,6 +1004,34 @@ function collectImportedSymbols(
     return out;
   }
   if (lang === "php") return collectPhpImportedSymbols(root);
+  // Rust: only UpperCamelCase names are recorded. A lower-case `use` binding is a
+  // module or a function, and Rust's module paths are resolved separately (see
+  // rustImportSpecifiers) — treating those as symbol references would make every
+  // `use std::fmt;` look like a use of a symbol named `fmt`.
+  if (lang === "rust") {
+    const out = new Map<string, { name: string; specifier: string }>();
+    const visit = (node: Parser.SyntaxNode): void => {
+      if (node.type === "use_declaration") {
+        const argument = node.childForFieldName("argument");
+        if (!argument) return;
+        // Same prefix consumption as rustImportSpecifiers: a `use` inside an
+        // inline module resolves `self::`/`super::` against the inline scope,
+        // which never forms its own module file.
+        const depth = rustInlineModDepth(node);
+        for (const leaf of rustUseLeaves(argument)) {
+          const specifier = rustConsumeInlineModPrefix(leaf.specifier, depth);
+          if (!specifier) continue;
+          if (leaf.name && leaf.local && /^[A-Z]/.test(leaf.name) && /^[A-Z]/.test(leaf.local)) {
+            out.set(leaf.local, { name: leaf.name, specifier });
+          }
+        }
+        return;
+      }
+      for (const child of node.namedChildren) visit(child);
+    };
+    visit(root);
+    return out;
+  }
   return new Map();
 }
 
@@ -1107,6 +1267,7 @@ function isDeclarationName(node: Parser.SyntaxNode): boolean {
  * TS arrow-consts. */
 function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "go") return describeGo(node, ctx);
+  if (ctx.lang === "rust") return describeRust(node, ctx);
   if (ctx.lang === "r") return describeR(node, ctx);
   if (ctx.lang === "java") return describeJava(node, ctx);
   if (ctx.lang === "kotlin") return describeKotlin(node, ctx);
@@ -2183,7 +2344,18 @@ function javaTypeParameterNames(decl: Parser.SyntaxNode): ReadonlySet<string> {
 function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
-): { name: string; viaMember: boolean; receiver?: string; kinds?: Kind[] } | null {
+  inlineModDepth = 0,
+): {
+  name: string;
+  viaMember: boolean;
+  receiver?: string;
+  kinds?: Kind[];
+  recvType?: string;
+  specifier?: string;
+} | null {
+  // Rust: the callee shapes are unlike any other language's between them —
+  // macro_name!(), field_expression receivers, Self::/Type::/module:: paths.
+  if (lang === "rust") return rustCalleeName(node, inlineModDepth);
   // Java first: `method_invocation` has NO `function` field (it splits the callee
   // into `object` + `name`), so the shared lookup below would return null for every
   // Java call site and the language would extract nodes with no call edges at all.
@@ -2484,6 +2656,11 @@ if (lang === "kotlin") return node.type === "import_header";
   // PHP: one edge per imported symbol — the clause leaf inside a (possibly
   // grouped) `use A\B, C\D;` / `use A\{B, C};` declaration.
   if (lang === "php") return node.type === "namespace_use_clause";
+  // Rust: `use` declarations. A bodyless `mod foo;` also imports its module file
+  // (`foo.rs` / `foo/mod.rs`), but describeRust mints every named `mod` as a
+  // module node first, so that import edge is emitted in the definition branch
+  // (same node, both facts) and never reaches this check.
+  if (lang === "rust") return node.type === "use_declaration";
   return node.type === "import_statement" || node.type === "import_from_statement";
 }
 
@@ -2558,4 +2735,265 @@ function tsExported(node: Parser.SyntaxNode): boolean {
     p = p.parent;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Rust: shared helpers for the depth-tier extractor above.
+// ---------------------------------------------------------------------------
+
+interface RustUseLeaf {
+  specifier: string;
+  name?: string;
+  local?: string;
+}
+
+function rustUseLeaves(node: Parser.SyntaxNode, prefix = ""): RustUseLeaf[] {
+  if (node.type === "use_list") return node.namedChildren.flatMap((child) => rustUseLeaves(child, prefix));
+  if (node.type === "scoped_use_list") {
+    const path = node.childForFieldName("path")?.text;
+    const list = node.namedChildren.find((child) => child.type === "use_list");
+    return path && list ? rustUseLeaves(list, rustJoinPath(prefix, path)) : [];
+  }
+  if (node.type === "use_as_clause") {
+    const path = node.childForFieldName("path");
+    const local = node.childForFieldName("alias")?.text;
+    const name = path ? rustPathLastName(path) : null;
+    return path && local && name
+      ? [{ specifier: rustJoinPath(prefix, path.text), name, local }]
+      : [];
+  }
+  if (node.type === "use_wildcard" || node.type === "self") {
+    return [{ specifier: rustJoinPath(prefix, node.text) }];
+  }
+  if (node.type === "identifier" || node.type === "scoped_identifier") {
+    const name = rustPathLastName(node);
+    return name
+      ? [{ specifier: rustJoinPath(prefix, node.text), name, local: name }]
+      : [];
+  }
+  return [];
+}
+
+function rustJoinPath(prefix: string, path: string): string {
+  return prefix ? `${prefix}::${path}` : path;
+}
+
+function rustPathLastName(node: Parser.SyntaxNode): string | null {
+  return node.childForFieldName("name")?.text ?? (node.type === "identifier" ? node.text : null);
+}
+
+
+function describeRust(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
+  const mapped = ctx.kinds[node.type];
+  if (!mapped) return null;
+  const rawName = node.childForFieldName("name")?.text;
+  if (!rawName) return null;
+  const name = node.type === "macro_definition" ? `${rawName}!` : rawName;
+  const directImplMember =
+    ctx.rustInImpl && ctx.enclosingKind !== "function" && ctx.enclosingKind !== "method";
+  const kind =
+    mapped === "function" &&
+    node.type !== "macro_definition" &&
+    (directImplMember || ctx.enclosingKind === "interface")
+      ? "method"
+      : mapped;
+  // A macro's "body" is a token_tree, not a `body` field — the signature must
+  // stop before it (`macro_rules! log { ()`), never swallow the expansion.
+  const body =
+    node.type === "macro_definition"
+      ? node.descendantsOfType("token_tree")[0]
+      : node.childForFieldName("body");
+  const value = node.type === "const_item" || node.type === "static_item" ? node.childForFieldName("value") : null;
+  const headerEnd = body ? body.startIndex : value ? value.startIndex : node.type === "mod_item" ? node.childForFieldName("name")?.endIndex ?? node.endIndex : node.endIndex;
+  return { name, kind, headerEnd, hashNode: node };
+}
+
+function rustTypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "generic_type" || node.type === "reference_type") {
+    return rustTypeName(node.childForFieldName("type"));
+  }
+  if (node.type === "scoped_type_identifier") {
+    return node.childForFieldName("name")?.text ?? null;
+  }
+  if (node.type === "type_identifier" || node.type === "identifier") return node.text;
+  return null;
+}
+
+function rustHeritageEdges(root: Parser.SyntaxNode, nodes: NodeV1[], rel: string): RawEdge[] {
+  const impls: Array<{ owner: string; trait: string }> = [];
+  const visit = (node: Parser.SyntaxNode): void => {
+    if (node.type === "impl_item") {
+      const owner = rustTypeName(node.childForFieldName("type"));
+      const trait = rustTypeName(node.childForFieldName("trait"));
+      if (owner && trait) impls.push({ owner, trait });
+    }
+    for (const child of node.namedChildren) visit(child);
+  };
+  visit(root);
+  const typeKinds = new Set<Kind>(["class", "struct", "interface", "type", "enum"]);
+  return impls.flatMap(({ owner, trait }) => {
+    const target = nodes.find((node) => node.name === owner && typeKinds.has(node.kind));
+    return target
+      ? [{ source: target.id, relation: "extends", name: trait, file: rel, lang: "rust" as const }]
+      : [];
+  });
+}
+
+
+function rustCalleeName(
+  node: Parser.SyntaxNode,
+  inlineModDepth: number,
+): { name: string; viaMember: boolean; receiver?: string; recvType?: string; specifier?: string } | null {
+  if (node.type === "macro_invocation") {
+    // `log_it!()` names a macro, but `crate::macros::local_log!()` is a scoped
+    // path — the bang namespace keys off the LEAF name, never the whole path.
+    const macro = node.childForFieldName("macro");
+    const name = macro ? rustPathLastName(macro) : null;
+    return name ? { name: `${name}!`, viaMember: false } : null;
+  }
+  let fn = node.childForFieldName("function");
+  while (fn?.type === "generic_function") fn = fn.childForFieldName("function");
+  if (fn?.type === "identifier") return { name: fn.text, viaMember: false };
+  if (fn?.type === "field_expression") {
+    const field = fn.childForFieldName("field");
+    if (field?.type !== "field_identifier") return null;
+    const value = fn.childForFieldName("value");
+    const receiver = value?.type === "identifier" || value?.type === "self" ? value.text : undefined;
+    return { name: field.text, viaMember: true, receiver };
+  }
+  if (fn?.type !== "scoped_identifier") return null;
+  const name = fn.childForFieldName("name")?.text;
+  const path = fn.childForFieldName("path");
+  if (!name || !path) return null;
+  if (path.type === "identifier" && path.text === "Self") {
+    return { name, viaMember: true, receiver: "self" };
+  }
+  if (path.type === "identifier" && /^[A-Z]/.test(path.text)) {
+    return { name, viaMember: true, recvType: path.text };
+  }
+  // Inside an inline module the leading `super::`/`self::` hops are relative to
+  // the INLINE scope, which lives in this same file — consumed there, the rest
+  // of the path is an ordinary module specifier (or none at all, when the whole
+  // path was hops and the call is bare once the inline scope is resolved away).
+  const specifier = rustConsumeInlineModPrefix(path.text, inlineModDepth);
+  return specifier
+    ? { name, viaMember: false, specifier }
+    : { name, viaMember: false };
+}
+
+
+/** How many inline `mod name { … }` blocks enclose `node`, read off the syntax
+ * tree itself (imports are also collected from contexts with no WalkCtx — see
+ * collectImportedSymbols — so the depth cannot live only on the walk context). */
+function rustInlineModDepth(node: Parser.SyntaxNode): number {
+  let depth = 0;
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (parent.type === "mod_item" && parent.childForFieldName("body")) depth++;
+  }
+  return depth;
+}
+
+/**
+ * What a `self::`/`super::`-rooted path means once the enclosing INLINE modules
+ * are resolved away — they live in this same file, so each one absorbs one hop:
+ *
+ *     depth 1, "super::helper"     -> null      (super reaches the inline mod's
+ *                                               parent, which is this file's module)
+ *     depth 1, "super::super::x"   -> "super::x"
+ *     any depth, "crate::x"        -> unchanged (crate is absolute)
+ *
+ * Null means the path resolves INSIDE the file's own subtree — a bare name
+ * after consumption, or a `self::`-rooted path (self of an inline mod is the
+ * inline mod itself, whose contents never form a separate module file).
+ */
+function rustConsumeInlineModPrefix(specifier: string, depth: number): string | null {
+  if (depth === 0) return specifier;
+  const segments = specifier.split("::");
+  if (segments[0] === "self") return null;
+  let supers = 0;
+  while (segments[supers] === "super") supers++;
+  if (supers === 0) return specifier;
+  if (supers <= depth) return null;
+  return segments.slice(depth).join("::");
+}
+
+function rustImportSpecifiers(node: Parser.SyntaxNode, scope: string[], inlineModDepth: number): string[] {
+  if (node.type === "mod_item") {
+    // `#[path = "…"]` sends the module file outside the crate's module tree,
+    // which we cannot follow — no import edge rather than a wrong one.
+    if (hasRustAttribute(node, "path")) return [];
+    const name = node.childForFieldName("name")?.text;
+    // `self::` roots the path at the DECLARING module's directory: a top-level
+    // `mod x;` means `<owning dir>/x.rs`, and a mod nested in an inline module
+    // spells out the whole inline scope (`self::tests::x`).
+    return name ? [`self::${[...scope, name].join("::")}`] : [];
+  }
+  const argument = node.childForFieldName("argument");
+  if (!argument) return [];
+  return rustUseLeaves(argument)
+    .map((leaf) => rustConsumeInlineModPrefix(leaf.specifier, inlineModDepth))
+    .filter((specifier): specifier is string => specifier !== null);
+}
+
+
+const RUST_BUILTIN_MACROS = new Set([
+  "println", "print", "eprintln", "eprint", "format", "format_args", "write", "writeln", "vec", "panic",
+  "assert", "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq", "debug_assert_ne", "todo",
+  "unimplemented", "unreachable", "matches", "dbg", "include", "include_str", "include_bytes", "concat",
+  "stringify", "env", "option_env", "cfg", "line", "file", "column", "compile_error", "module_path",
+  "thread_local", "macro_rules",
+]);
+
+function rustSkipsCall(node: Parser.SyntaxNode, lang: Language): boolean {
+  if (lang !== "rust" || node.type !== "macro_invocation") return false;
+  // The LEAF name decides (`std::println!` is the same builtin as `println!`),
+  // matching how rustCalleeName names the edge.
+  const macro = node.childForFieldName("macro");
+  const name = macro ? rustPathLastName(macro) : null;
+  return name !== null && RUST_BUILTIN_MACROS.has(name);
+}
+
+function hasRustAttribute(node: Parser.SyntaxNode, name: string, argument?: string): boolean {
+  let sibling = node.previousNamedSibling;
+  while (sibling?.type === "attribute_item") {
+    const attribute = sibling.namedChildren.find((child) => child.type === "attribute");
+    const identifiers = attribute?.descendantsOfType("identifier") ?? [];
+    // The argument is compared as TEXT, not by identifier membership:
+    // `#[cfg(test)]` and `#[cfg(not(test))]` descend to the same identifier set,
+    // and only the former is "inside cfg(test)". Whitespace is folded away so a
+    // multi-line attribute still reads as one token tree.
+    const tokenTree = attribute?.namedChildren.find((child) => child.type === "token_tree");
+    const argumentMatches = !argument || tokenTree?.text.replace(/\s+/g, "") === `(${argument})`;
+    if (identifiers[0]?.text === name && argumentMatches) {
+      return true;
+    }
+    sibling = sibling.previousNamedSibling;
+  }
+  return false;
+}
+
+function rustExported(node: Parser.SyntaxNode, ctx: WalkCtx): boolean {
+  if (ctx.rustCfgTest) return false;
+  if (node.type === "macro_definition") return hasRustAttribute(node, "macro_export");
+  if (ctx.enclosingKind === "function" || ctx.enclosingKind === "method") return false;
+  // Items declared inside a function body are local (never exported), but the
+  // innermost enclosing DEFINITION stops being the function once an inline `mod`
+  // sits between them — the module's own walk context says "module". Walk the
+  // syntax as well, so nesting cannot launder `pub` into an export.
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (parent.type === "function_item" || parent.type === "function_signature_item") return false;
+  }
+  if (ctx.rustInImpl && ctx.rustTraitImpl) return true;
+  if (ctx.enclosingKind === "interface") {
+    let parent = node.parent;
+    while (parent && parent.type !== "trait_item") parent = parent.parent;
+    return parent ? rustHasPublicVisibility(parent) : false;
+  }
+  return rustHasPublicVisibility(node);
+}
+
+function rustHasPublicVisibility(node: Parser.SyntaxNode): boolean {
+  const visibility = node.namedChildren.find((child) => child.type === "visibility_modifier");
+  return visibility !== undefined && !visibility.namedChildren.some((child) => child.type === "self");
 }
