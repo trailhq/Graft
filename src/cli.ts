@@ -1251,6 +1251,13 @@ const brain = program
 async function signUpForBrain(repo: string, slug: string): Promise<BrainLink | null> {
   const handoff = await startHandoff();
   const url = signupUrl({ repo: slug, port: handoff.port, state: handoff.state });
+  const startedAt = Date.now();
+
+  // Queued before the link is printed rather than after the outcome, because
+  // the outcome is the one thing a terminal handoff can lose: a user who reads
+  // the URL and walks away kills the process, and only an event already on disk
+  // survives that. This is the denominator; `brain_signup_settled` is not.
+  track("brain_signup_opened", {}, { repo });
 
   // Printed before the browser opens, and printed whether or not it opens: on a
   // remote shell nothing can open, and on a desktop the window sometimes lands
@@ -1262,6 +1269,10 @@ async function signUpForBrain(repo: string, slug: string): Promise<BrainLink | n
   // minutes for a browser that will never come is worse than saying so now.
   if (!process.stderr.isTTY) {
     console.error("· not a terminal — open that link, then run `graft brain connect <brainId>:<token>` here");
+    // Its own outcome, not a timeout: nothing here could have opened a browser,
+    // so folding the two together would read as people abandoning signup when
+    // it is only a remote shell doing what it has to.
+    track("brain_signup_settled", { outcome: "no_tty", duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
     handoff.close();
     return null;
   }
@@ -1272,10 +1283,13 @@ async function signUpForBrain(repo: string, slug: string): Promise<BrainLink | n
   const got = await handoff.wait();
   if ("error" in got) {
     console.error(`✗ ${got.error}`);
+    // The category, never the sentence: `got.error` names the repo and the link.
+    track("brain_signup_settled", { outcome: got.reason, duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
     return null;
   }
   writeLink(repo, got.link);
   console.error(`✓ brain connected to ${slug}`);
+  track("brain_signup_settled", { outcome: "linked", duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
   return got.link;
 }
 

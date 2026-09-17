@@ -40,8 +40,17 @@ export const HANDOFF_TIMEOUT_MS = 5 * 60 * 1000;
 /** The one path the listener answers on. */
 export const CALLBACK_PATH = "/graft/callback";
 
-/** What the browser sends back, or why it could not be accepted. */
-export type HandoffResult = { link: BrainLink } | { error: string };
+/**
+ * What the browser sends back, or why it could not be accepted.
+ *
+ * `error` is the sentence printed to the user and `reason` is the same fact as a
+ * category. They are separate because the sentence names the repo and the link,
+ * so it can never be the thing telemetry reports — and matching on its text to
+ * recover the category would put a user-facing string in a position where
+ * rewording it silently changes what gets counted.
+ */
+export type HandoffFailure = "timed_out" | "bad_callback";
+export type HandoffResult = { link: BrainLink } | { error: string; reason: HandoffFailure };
 
 export interface Handoff {
   /** The loopback port Trail must redirect to. */
@@ -107,7 +116,7 @@ export async function startHandoff(): Promise<Handoff> {
     if (!brainId || !token) {
       res.writeHead(400, { "content-type": "text/html; charset=utf-8" });
       res.end(donePage(false));
-      settle({ error: "the browser came back without a brain id and token" });
+      settle({ error: "the browser came back without a brain id and token", reason: "bad_callback" });
       return;
     }
 
@@ -146,7 +155,7 @@ export async function startHandoff(): Promise<Handoff> {
       let timer: NodeJS.Timeout | undefined;
       const timeout = new Promise<HandoffResult>((resolve) => {
         timer = setTimeout(
-          () => resolve({ error: "timed out waiting for the browser — run `graft brain push` again, or use the link above" }),
+          () => resolve({ error: "timed out waiting for the browser — run `graft brain push` again, or use the link above", reason: "timed_out" }),
           timeoutMs,
         );
         // The timer must not hold the process open once the browser has answered.

@@ -51,6 +51,14 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
   build_failed: new Set<string>(['stage', 'code']),
   /** One query, from any surface. The DAU backbone and the dead-command detector. */
   query: new Set<string>(['command', 'surface', 'hit']),
+  /** `graft brain push` in a repo with no brain, sending the user to Trail to
+   *  make one. Queued the moment the link is printed, so a signup somebody
+   *  walked away from is still counted — the settle below never fires for those,
+   *  and abandonment is exactly the thing a terminal handoff loses silently. */
+  brain_signup_opened: new Set<string>(),
+  /** That handoff reaching an end. `outcome` is a closed set, so the reason a
+   *  signup failed travels as a category and never as the error's own words. */
+  brain_signup_settled: new Set<string>(['outcome', 'duration_bucket']),
   /** One closed agent session, summarised. `graft_reads` vs `source_reads` is
    *  the single number that says whether an agent prefers graft to grep; the two
    *  `*_turns` buckets are the follow-up question — of the turns that used graft,
@@ -97,6 +105,19 @@ export type TrackedCommand = (typeof TRACKED_COMMANDS)[number];
 export function isTrackedCommand(name: string): name is TrackedCommand {
   return (TRACKED_COMMANDS as readonly string[]).includes(name);
 }
+
+/**
+ * How a `graft brain push` signup ended.
+ *
+ * Four categories and nothing else, because the alternative — the error string
+ * the CLI already prints — carries a repo slug and a URL. `timed_out` and
+ * `no_tty` are deliberately apart: one is a person who opened the browser and
+ * did not finish, the other is a machine that was never able to open one, and
+ * treating them alike would read as a product problem where there is only a
+ * remote shell.
+ */
+export const BRAIN_SIGNUP_OUTCOMES = ['linked', 'timed_out', 'no_tty', 'bad_callback'] as const;
+export type BrainSignupOutcome = (typeof BRAIN_SIGNUP_OUTCOMES)[number];
 
 /** Where a failing build died. Coarse on purpose: enough to route a bug, not
  *  enough to describe anyone's repo. */
