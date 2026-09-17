@@ -14,7 +14,7 @@ import { dirname } from 'node:path';
 export interface ConfigWrite {
   id: string;
   path: string;
-  action: 'created' | 'updated' | 'unchanged' | 'skipped-unparseable';
+  action: 'created' | 'updated' | 'unchanged' | 'deleted' | 'skipped-unparseable';
 }
 
 /**
