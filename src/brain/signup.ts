@@ -181,12 +181,19 @@ export function webBaseUrl(baseUrl?: string): string {
 
 /** Where the browser is sent once the handoff has been accepted.
  *
- * Back into Trail, at the brain it just made. The alternative — leaving the
- * person on a local page that says "go back to your terminal" — ends the flow
- * on a blank throwaway served by a port that is about to close, at exactly the
- * moment the brain starts being mined and there is something to watch. */
+ * Back into Trail, at the screen that shows the brain being built. The
+ * alternative — leaving the person on a local page that says "go back to your
+ * terminal" — ends the flow on a blank throwaway served by a port that is about
+ * to close, at exactly the moment there is something to watch.
+ *
+ * NOT `/brain/<id>`, which is where this pointed first. That route redirects to
+ * the brain's graph, and the redirect fires the instant the row exists — which
+ * is minutes before it has any rules in it. Every terminal signup therefore
+ * landed on an empty visualisation of a brain that was, at that moment, being
+ * built perfectly well. The build screen is the same wait the browser-first
+ * flow shows, and it leads to the graph once there is a graph. */
 export function brainUrl(brainId: string, baseUrl?: string): string {
-  return `${webBaseUrl(baseUrl)}/brain/${encodeURIComponent(brainId)}`;
+  return `${webBaseUrl(baseUrl)}/get-started?step=build&brain=${encodeURIComponent(brainId)}`;
 }
 
 /** Where to send the browser for a repo's brain. */

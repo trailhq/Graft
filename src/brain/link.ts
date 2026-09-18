@@ -14,6 +14,8 @@
  */
 import { readBuildConfig, patchBuildConfig, cacheDir, readJson, writeJsonAtomic } from '../util/state.js';
 import { join } from 'node:path';
+import { ensureGitignored, LINK_NOTE } from '../context/node-file.js';
+import { BUILD_CONFIG_DIR } from '../util/state.js';
 
 /** Default API host. Overridden by GRAFT_BRAIN_URL, for staging and self-hosted. */
 const DEFAULT_BRAIN_BASE_URL = 'https://agents.nanonets.com';
@@ -83,9 +85,17 @@ export function readLink(dir: string): BrainLink | null {
   return stored;
 }
 
-/** Persist the link for repo `dir`, merging into any existing build config. */
+/** Persist the link for repo `dir`, merging into any existing build config.
+ *
+ * The write is what creates `.graft/config.json`, and that file holds the read
+ * token — which is exactly why this is also where it gets ignored. The comment
+ * on {@link BrainLink} has claimed `.graft/` was "git-ignored" since the day it
+ * was written, and nothing ever made it true: `ensureGitignored` only ever ran
+ * for the graph cache. Every repository anyone ran `graft brain connect` in was
+ * therefore one `git add -A` away from publishing a credential. */
 export function writeLink(dir: string, link: BrainLink): void {
   patchBuildConfig(dir, { brain: link });
+  ensureGitignored(dir, join(dir, BUILD_CONFIG_DIR), LINK_NOTE);
 }
 
 /** Forget the link for repo `dir`. Leaves the cached rules for `uninstall` to remove. */

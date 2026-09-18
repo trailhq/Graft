@@ -94,7 +94,12 @@ test("signup url: GRAFT_BRAIN_URL points signup at staging too", () => {
 // The browser's last stop is Trail, not a local page that is about to stop
 // answering. Ending on "go back to your terminal" wasted the one moment the
 // brain is actually being built and there is something on screen worth seeing.
-test('the accepted handoff sends the browser back into Trail, at its new brain', async () => {
+//
+// And specifically the BUILD screen, not `/brain/<id>`, which is where this went
+// first: that route redirects to the brain's graph the instant the row exists,
+// which is minutes before it holds a single rule. So every terminal signup was
+// landing on an empty visualisation of a brain that was building perfectly well.
+test('the accepted handoff sends the browser to the build screen, not an empty graph', async () => {
   process.env.GRAFT_BRAIN_URL = 'http://localhost:5173';
   const handoff = await startHandoff();
   try {
@@ -103,7 +108,7 @@ test('the accepted handoff sends the browser back into Trail, at its new brain',
       { redirect: 'manual' },
     );
     assert.equal(res.status, 303);
-    assert.equal(res.headers.get('location'), 'http://localhost:5173/brain/abc-123');
+    assert.equal(res.headers.get('location'), 'http://localhost:5173/get-started?step=build&brain=abc-123');
     const got = await handoff.wait(1000);
     assert.deepEqual(got, { link: { brainId: 'abc-123', token: 'gbt_1.xyz' } });
   } finally {
