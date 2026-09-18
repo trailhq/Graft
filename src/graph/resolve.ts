@@ -178,6 +178,19 @@ export function resolveEdges(
     // ids can carry a dedup ordinal (A3's `Cache~2`).
     const ownName = byId.get(e.source)?.name;
     if (!ownName) continue;
+    const sourceKind = byId.get(e.source)?.kind;
+    // C# uses the first base-list entry for a possible base class, so a class
+    // implementing only interfaces can arrive here as an `extends` raw edge.
+    // Do not feed a resolved interface into the class-parent chain; interfaces
+    // are contracts, not base classes.
+    if (
+      languageOf(e.file) === "csharp" &&
+      sourceKind !== "interface" &&
+      e.relation === "extends" &&
+      resolveName(e.name, e.file, ["interface"], perFileName, globalName)
+    ) {
+      continue;
+    }
     push(classParents, ownName, e.name);
   }
 
@@ -224,7 +237,17 @@ export function resolveEdges(
       const kinds: Kind[] = e.relation === "implements" ? ["interface", "trait"] : ["class", "interface"];
       const hit = resolveName(e.name!, e.file, kinds, perFileName, globalName);
       // an unresolved base is usually an external/imported type — keep the name.
-      add(e.source, hit?.id ?? e.name!, e.relation, hit?.confidence ?? "inferred");
+      let relation = e.relation;
+      if (languageOf(e.file) === "csharp") {
+        const sourceKind = byId.get(e.source)?.kind;
+        // The C# grammar has no class-vs-interface distinction in base_list.
+        // Once a target is resolved, its graph kind supplies the missing
+        // semantic information. Interface declarations always extend; classes
+        // and structs implement a resolved interface.
+        if (sourceKind === "interface") relation = "extends";
+        else if (hit && byId.get(hit.id)?.kind === "interface") relation = "implements";
+      }
+      add(e.source, hit?.id ?? e.name!, relation, hit?.confidence ?? "inferred");
     } else if (e.relation === "references" && e.name) {
       if (e.specifier) {
         // A named import gives both halves needed for sound resolution: the module
