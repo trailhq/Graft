@@ -17,6 +17,7 @@ import { cursorHookTargets } from './cursor-hooks.js';
 import { antigravitySkillTargets } from './antigravity.js';
 import { claudeTargets } from '../claude/init.js';
 import { claudeGlobalTargets } from './claude-global.js';
+import { piOmpTargets } from './pi-omp.js';
 
 /** Where a write lands. 'global' = outside the repo, affects every project. */
 export type WriteScope = 'repo' | 'global';
@@ -85,6 +86,7 @@ export function planInit(repo: string, opts: { home?: string; ids?: string[] } =
         ...(host.id === 'agents' ? hookTargets(home) : []),
         ...(host.id === 'cursor' ? cursorHookTargets(repo) : []),
         ...(host.id === 'antigravity' ? antigravitySkillTargets(home) : []),
+        ...(host.id === 'pi' || host.id === 'omp' ? piOmpTargets(repo, home) : []),
       ],
     })),
   ];
