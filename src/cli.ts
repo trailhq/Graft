@@ -104,7 +104,12 @@ program
   .option("--provider <name>", "LLM wire format: openai | anthropic | litellm | orcarouter (env GRAFT_PROVIDER)")
   .option("--model <id>", "model id for the LLM pass (env GRAFT_MODEL)")
   .option("--api-key <key>", "provider API key (env GRAFT_API_KEY)")
-  .option("--base-url <url>", "OpenAI-compatible endpoint URL (env GRAFT_BASE_URL)");
+  .option("--base-url <url>", "OpenAI-compatible endpoint URL (env GRAFT_BASE_URL)")
+  .option(
+    "--reasoning-effort <level>",
+    "reasoning_effort sent on every call (env GRAFT_REASONING_EFFORT); use \"none\" for a local "
+      + "thinking model that would otherwise spend the whole token budget reasoning and return an empty message",
+  );
 
 interface GlobalOpts {
   dir?: string;
@@ -112,6 +117,7 @@ interface GlobalOpts {
   model?: string;
   apiKey?: string;
   baseUrl?: string;
+  reasoningEffort?: string;
 }
 
 /** Config drawn from the global CLI flags (env + defaults fill the rest). */
@@ -123,6 +129,7 @@ function cliConfig(): EngineConfig {
     model: o.model,
     apiKey: o.apiKey,
     baseUrl: o.baseUrl,
+    reasoningEffort: o.reasoningEffort,
   };
 }
 
