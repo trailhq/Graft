@@ -56,6 +56,7 @@ export interface ResolvedConfig {
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const ORCAROUTER_BASE_URL = "https://api.orcarouter.ai/v1";
+const OPPER_BASE_URL = "https://api.opper.ai/v3/compat";
 
 /** Per-provider default model. */
 export const DEFAULT_MODELS: Record<ProviderKind, string> = {
@@ -65,6 +66,9 @@ export const DEFAULT_MODELS: Record<ProviderKind, string> = {
   litellm: "openai/gpt-4o-mini",
   // Provider-prefixed so the OrcaRouter gateway routes it; override with GRAFT_MODEL.
   orcarouter: "openai/gpt-4o-mini",
+  // A bare Opper pool name: the gateway picks the provider per request. Use
+  // `vendor/model` (e.g. `anthropic/claude-sonnet-4-6`) to pin one route.
+  opper: "claude-sonnet-4-6",
 };
 
 export const DEFAULTS = {
@@ -79,7 +83,10 @@ export function resolveConfig(config: EngineConfig = {}): ResolvedConfig {
 
   const explicitKey = config.apiKey ?? env.GRAFT_API_KEY;
   const legacyKey = env.OPENROUTER_API_KEY;
-  const apiKey = explicitKey ?? legacyKey ?? env.ORCAROUTER_API_KEY;
+  // OPPER_API_KEY is honored only for the opper provider, so a key that other
+  // tools already keep in the environment is never sent to a different endpoint.
+  const opperKey = provider === "opper" ? env.OPPER_API_KEY : undefined;
+  const apiKey = explicitKey ?? opperKey ?? legacyKey ?? env.ORCAROUTER_API_KEY;
   const usedLegacyEnv = !explicitKey && !!legacyKey;
 
   const model =
@@ -95,6 +102,8 @@ export function resolveConfig(config: EngineConfig = {}): ResolvedConfig {
   if (!baseUrl && provider === "openai" && usedLegacyEnv) baseUrl = OPENROUTER_BASE_URL;
   // The orcarouter provider points at the gateway unless a base URL is given.
   if (!baseUrl && provider === "orcarouter") baseUrl = ORCAROUTER_BASE_URL;
+  // Likewise for opper (OPPER_BASE_URL lets a deployment pin a regional endpoint).
+  if (!baseUrl && provider === "opper") baseUrl = env.OPPER_BASE_URL ?? OPPER_BASE_URL;
 
   const headers =
     provider === "openai" && baseUrl?.includes("openrouter.ai")
