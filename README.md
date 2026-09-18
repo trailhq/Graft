@@ -208,6 +208,11 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
   functions, S3/S4/R6 classes and methods, roxygen `@export`,
   `library()`/`source()` imports).
 
+  Kotlin's native parser is an optional install so a platform without a compatible
+  native build can still install and use Graft. If it is unavailable, a build that
+  encounters `.kt` or `.kts` files prints one warning and skips only those files;
+  every other supported language remains indexed.
+
 - **Broad** — symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,

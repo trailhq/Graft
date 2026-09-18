@@ -20,7 +20,7 @@
 import { resolve } from "node:path";
 import { relPosix } from "../util/paths.js";
 import { contextDirFor } from "../context/node-file.js";
-import { extractFile, languageOf } from "./extract.js";
+import { extractFile, kotlinParserUnavailableMessage, languageOf } from "./extract.js";
 import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
 import { containerLangOf, extractContainer, warmContainerGrammars } from "./container.js";
 import { listSourceFiles } from "./build.js";
@@ -87,6 +87,9 @@ export async function checkGraph(
   const fpOnlyDirs = readFingerprint(outDir)?.onlyDirs;
   const onlyDirs = fpOnlyDirs && fpOnlyDirs.length > 0 ? new Set(fpOnlyDirs) : undefined;
   const sourceFiles = listSourceFiles(root, outDir, undefined, onlyDirs);
+  const kotlinUnavailable = sourceFiles.some((file) => languageOf(file) === "kotlin")
+    ? kotlinParserUnavailableMessage()
+    : null;
   await warmGenericGrammars(
     new Set(sourceFiles.map((f) => genericLangOf(f)?.name).filter((n): n is string => !!n)),
   );
@@ -104,6 +107,7 @@ export async function checkGraph(
     // `removed` forever, and the `graft build` the check tells you to run can never
     // repair it.
     const lang = languageOf(file);
+    if (lang === "kotlin" && kotlinUnavailable) continue;
     const container = lang ? null : containerLangOf(file);
     const generic = lang || container ? null : genericLangOf(file);
     let source: string | null;
@@ -138,6 +142,9 @@ export async function checkGraph(
   const committedById = new Map(committed.nodes.map((n) => [n.id, n]));
   result.nodes = committedById.size;
   for (const [id, node] of committedById) {
+    // Do not call a graph stale merely because an optional parser isn't installed
+    // in this environment. The next build will give the actionable diagnostic.
+    if (kotlinUnavailable && languageOf(node.path) === "kotlin") continue;
     const now = current.get(id);
     if (now === undefined) result.removed.push(id);
     else if (now !== node.body_hash) result.changed.push(id);
