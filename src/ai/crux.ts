@@ -134,15 +134,40 @@ function userContent(input: FileCruxInput): string {
   return `FILE: ${input.path}\n\n${numberLines(input.source)}\n\nTARGETS (${n} — return all ${n}, one entry per id):\n${targets}`;
 }
 
+/**
+ * The prompt lists targets as `- id=<id> | <kind> | lines L<a>-L<b>` and asks for
+ * the id "verbatim". Some models (Grok, #327; deepseek, #259) copy the whole
+ * displayed line, or the `id=` prefix, into the returned `id`; enrich then looks
+ * the result up by the bare node id, misses, and reports a complete summary as
+ * `empty-parsed`. Strip the echoed decoration so the summary lands on its node.
+ *
+ * With `expectedIds` (the ids we asked for) the peel only applies when it lands
+ * on one of them. An id we did not request keeps its raw text even if it happens
+ * to contain ` | `, so a genuine miss is still reported as a miss.
+ */
+export function normalizeTargetId(raw: string, expectedIds?: ReadonlySet<string>): string {
+  const id = raw.trim();
+  if (expectedIds?.has(id)) return id;
+  let peeled = id;
+  const sep = peeled.indexOf(" | ");
+  if (sep !== -1) peeled = peeled.slice(0, sep).trimEnd();
+  if (peeled.startsWith("id=")) peeled = peeled.slice(3).trim();
+  if (expectedIds && !expectedIds.has(peeled)) return id;
+  return peeled;
+}
+
 /** Normalize the tool's parsed argument object into a {@link NodeCrux} list. */
-function parseResults(obj: { symbols?: unknown } | undefined): NodeCrux[] {
+function parseResults(
+  obj: { symbols?: unknown } | undefined,
+  expectedIds: ReadonlySet<string>,
+): NodeCrux[] {
   if (!obj || !Array.isArray(obj.symbols)) return [];
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : 0);
   return obj.symbols
     .map((s) => s as Record<string, unknown>)
     .filter((s) => typeof s.id === "string")
     .map((s) => ({
-      id: s.id as string,
+      id: normalizeTargetId(s.id as string, expectedIds),
       summary: typeof s.summary === "string" ? s.summary.trim() : "",
       crux_start: num(s.crux_start),
       crux_end: num(s.crux_end),
@@ -196,7 +221,10 @@ export class ChatCruxSummarizer implements CruxSummarizer {
         { role: "user", content: userContent(input) },
       ],
     });
-    const parsed = parseResults(argsFromResponse(res));
+    const parsed = parseResults(
+      argsFromResponse(res),
+      new Set(input.nodes.map((n) => n.id)),
+    );
     this.lastMiss = classifyCruxMiss(res, parsed);
     return parsed;
   }
