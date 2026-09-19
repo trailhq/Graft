@@ -20,7 +20,7 @@
 import { resolve } from "node:path";
 import { relPosix } from "../util/paths.js";
 import { contextDirFor } from "../context/node-file.js";
-import { extractFile, languageOf } from "./extract.js";
+import { extractFile, languageOf, wasmFallbackLangs } from "./extract.js";
 import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
 import { containerLangOf, extractContainer, warmContainerGrammars } from "./container.js";
 import { listSourceFiles } from "./build.js";
@@ -87,8 +87,18 @@ export async function checkGraph(
   const fpOnlyDirs = readFingerprint(outDir)?.onlyDirs;
   const onlyDirs = fpOnlyDirs && fpOnlyDirs.length > 0 ? new Set(fpOnlyDirs) : undefined;
   const sourceFiles = listSourceFiles(root, outDir, undefined, onlyDirs);
+  const fallback = new Set(wasmFallbackLangs());
   await warmGenericGrammars(
-    new Set(sourceFiles.map((f) => genericLangOf(f)?.name).filter((n): n is string => !!n)),
+    new Set(
+      sourceFiles.flatMap((f) => {
+        const names: string[] = [];
+        const generic = genericLangOf(f)?.name;
+        if (generic) names.push(generic);
+        const lang = languageOf(f);
+        if (lang && fallback.has(lang)) names.push(lang);
+        return names;
+      }),
+    ),
   );
   // Container-tier grammars need the same warmup as the generic ones, for the same
   // reason: extraction below is synchronous. Missing this is what made `graft
