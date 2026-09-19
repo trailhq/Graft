@@ -31,10 +31,26 @@ const REPO_HELPERS = '${CLAUDE_PROJECT_DIR:-.}/.claude/helpers';
 function hookCmd(arg: string, helpers: string = REPO_HELPERS): string {
   return `node "${helpers}/graft-hooks.cjs" ${arg}`;
 }
+
+/**
+ * Hook `timeout` values Claude Code writes into settings.json.
+ *
+ * Claude Code documents this field as **seconds** (default 600). 0.16.0 wrote
+ * 8000 / 10000 / 15000 intending milliseconds; a stalled hook then blocked the
+ * session for hours. These numbers are the same budgets as before, in the unit
+ * the host actually reads. `hooks.ts` converts back to milliseconds when it
+ * caps the `graft ask` child just under the installed hook.
+ */
+const POST_EDIT_TIMEOUT_S = 10;
+const TOOL_SAVINGS_TIMEOUT_S = 8;
+const PROMPT_TIMEOUT_S = 15;
+const SESSION_TIMEOUT_S = 8;
+const STOP_TIMEOUT_S = 8;
+
 function graftBlocks(helpers?: string): Record<string, Json[]> {
   return {
     PostToolUse: [
-      { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: hookCmd('post-edit', helpers), timeout: 10000 }] },
+      { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: hookCmd('post-edit', helpers), timeout: POST_EDIT_TIMEOUT_S }] },
       // Score the usage mix and sum token savings. A graft retrieval (CLI `graft …`
       // via Bash, or the `graft_*` MCP tools) prints a `[graft] tokens saved ≈ N`
       // footer this hook sums into the session total; the same hook classifies
@@ -42,7 +58,7 @@ function graftBlocks(helpers?: string): Record<string, Json[]> {
       // `graft stats` and the `session_summary` graft-vs-grep ratio. Broad matcher,
       // but the handler no-ops instantly unless there is something to record, so an
       // unrelated Bash or a plain Read costs only a stdin read.
-      { matcher: 'Bash|mcp__graft__|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCmd('tool-savings', helpers), timeout: 8000 }] },
+      { matcher: 'Bash|mcp__graft__|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCmd('tool-savings', helpers), timeout: TOOL_SAVINGS_TIMEOUT_S }] },
     ],
     // Longer budget than the other hooks: its `graft ask` is a real query, and a
     // query now brings the graph up to date first (graph/refresh.ts) — usually
@@ -52,11 +68,12 @@ function graftBlocks(helpers?: string): Record<string, Json[]> {
     // this bump (8s) keeps a child that fits inside 8s. Changing the number here is
     // therefore safe on its own — but it only reaches an existing repo when someone
     // re-runs `graft init`, since that is the only caller of this function.
-    UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd('prompt', helpers), timeout: 15000 }] }],
-    SessionStart: [{ hooks: [{ type: 'command', command: hookCmd('session-start', helpers), timeout: 8000 }] }],
-    Stop: [{ hooks: [{ type: 'command', command: hookCmd('stop', helpers), timeout: 8000 }] }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd('prompt', helpers), timeout: PROMPT_TIMEOUT_S }] }],
+    SessionStart: [{ hooks: [{ type: 'command', command: hookCmd('session-start', helpers), timeout: SESSION_TIMEOUT_S }] }],
+    Stop: [{ hooks: [{ type: 'command', command: hookCmd('stop', helpers), timeout: STOP_TIMEOUT_S }] }],
   };
 }
+
 /**
  * Is this allowlist entry one graft wrote?
  *
@@ -135,10 +152,11 @@ export function mergeGraftSettings(
     merged.hooks[event] = [...foreign, ...blocks];
   }
 
-  // Drop graft's own prior regex before re-adding, so a change to FOOTER replaces
-  // the old pattern instead of stacking beside it. The user's regexes are kept.
-  const priorFooter = Array.isArray(merged.footerLinksRegexes) ? merged.footerLinksRegexes : [];
-  merged.footerLinksRegexes = [...priorFooter.filter((r: unknown) => !isGraftFooterRegex(r)), FOOTER];
+  // Claude Code honors `footerLinksRegexes` only in user/managed settings, not in
+  // a project file. Drop graft's own pattern so a SessionStart refresh doesn't
+  // keep rewriting an inert key into `.claude/settings.json`. The user's regexes
+  // stay — same shape as statusLine: we don't clear what we didn't put there.
+  dropGraftFooter(merged);
 
   // headless/subagent runs hard-deny Bash by default; without an allowlist entry
   // `graft ask`'s own Bash calls (and the skill it installs) can't run out-of-box.
@@ -153,16 +171,16 @@ export function mergeGraftSettings(
 }
 
 /**
- * The hook blocks alone, merged into a settings file, with the shims addressed by
- * absolute path — `~/.claude/settings.json`, where a write reaches every project on
- * the machine (see hosts/claude-global.ts for why that copy has to exist).
+ * The hook blocks (and the footer regex Claude Code actually honors), merged into
+ * a settings file with the shims addressed by absolute path — `~/.claude/settings.json`,
+ * where a write reaches every project on the machine (see hosts/claude-global.ts
+ * for why that copy has to exist).
  *
- * Hooks only, deliberately. `mergeGraftSettings` also claims the statusline, the
- * footer regex and a Bash allowlist, and each of those is a reasonable thing to
- * accept for a repo you ran `graft init` in and an unreasonable thing to impose on
- * every repo you ever open — a statusline especially, since a session allows exactly
- * one and taking it globally would silently outrank the user's own. The hooks are the
- * piece that has to be global, because they are what a worktree loses.
+ * Statusline and Bash allowlist stay repo-only: a session allows exactly one
+ * statusline, and taking it globally would silently outrank the user's own.
+ * `footerLinksRegexes` is the other way around — Claude Code ignores it in
+ * project settings, so the user file is the only place the graft card badge can
+ * appear. User regexes are kept; graft's own pattern is replaced, not stacked.
  *
  * Same idempotent shape as the repo merge: graft's prior entries are dropped before
  * the current set is added, so re-running converges instead of stacking.
@@ -175,5 +193,20 @@ export function mergeGraftHooks(existing: Json, helpers: string): { merged: Json
     const foreign = prior.filter((e: Json) => !isGraftEntry(e));
     merged.hooks[event] = [...foreign, ...blocks];
   }
+  applyGraftFooter(merged);
   return { merged };
+}
+
+/** Drop graft's footer pattern; keep everyone else's. No-op when the key is absent. */
+function dropGraftFooter(merged: Json): void {
+  if (!Array.isArray(merged.footerLinksRegexes)) return;
+  const kept = merged.footerLinksRegexes.filter((r: unknown) => !isGraftFooterRegex(r));
+  if (kept.length === 0) delete merged.footerLinksRegexes;
+  else merged.footerLinksRegexes = kept;
+}
+
+/** Replace graft's prior footer pattern, then append the current one. User regexes stay. */
+function applyGraftFooter(merged: Json): void {
+  const prior = Array.isArray(merged.footerLinksRegexes) ? merged.footerLinksRegexes : [];
+  merged.footerLinksRegexes = [...prior.filter((r: unknown) => !isGraftFooterRegex(r)), FOOTER];
 }
