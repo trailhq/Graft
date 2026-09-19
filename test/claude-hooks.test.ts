@@ -98,6 +98,13 @@ test('runSync clears dirty/syncing, recomputes stats, releases lock', () => {
   assert.equal(acquireLock(d), true, 'lock released, so reacquire succeeds');
 });
 
+test('realBuild execFileSync options include windowsHide (#393)', async () => {
+  const { execOptsForHiddenBuild } = await import('../src/claude/sync-run.js');
+  assert.equal(execOptsForHiddenBuild('.').windowsHide, true);
+  const src = readFileSync(new URL('../src/claude/sync-run.ts', import.meta.url), 'utf8');
+  assert.match(src, /execFileSync\(process\.execPath, args, execOptsForHiddenBuild\(dir\)\)/);
+});
+
 test("runSync's default build passes --dir <resolved> to graft build when GRAFT_DIR is set", () => {
   const d = mkdtempSync(join(tmpdir(), 'graft-sync-dir-'));
   mkdirSync(join(d, 'elsewhere', '.graph'), { recursive: true });
