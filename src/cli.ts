@@ -983,7 +983,7 @@ program
     // guessing (pre-0.8 this silently wired every agent the machine had ever
     // installed — see --yes to get that back).
     const home = homedir();
-    const plan = planInit(repo, { home });
+    const plan = planInit(repo, { home, mcp: opts.mcp, hooks: opts.hooks, global: opts.global });
     const detectedIds = plan.filter((p) => p.detected).map((p) => p.id);
     const noAgents = (opts as { agents?: unknown }).agents === false;
 
@@ -1033,7 +1033,7 @@ program
     if (opts.dryRun) {
       console.error(formatPlan(plan, ids, repo, home));
       for (const child of children)
-        console.error(`\n— ${child}/ (workspace child)\n` + formatPlan(planInit(join(repo, child), { home }), ids, join(repo, child), home));
+        console.error(`\n— ${child}/ (workspace child)\n` + formatPlan(planInit(join(repo, child), { home, mcp: opts.mcp, hooks: opts.hooks, global: opts.global }), ids, join(repo, child), home));
       return;
     }
     if (ids.length === 0) {
@@ -1146,7 +1146,12 @@ function wireTarget(
       for (const m of r.mcp) console.error(`✓ mcp ${m.id}: ${m.path} (${m.action})`);
       for (const h of r.hooks) console.error(`✓ hook ${h.id}: ${h.path} (${h.action})`);
       // Only worth saying when there was actually something out-of-repo to skip.
-      if (opts.global === false && selectedWrites(plan, ids).some((w) => w.scope === "global"))
+      // `plan` already reflects --no-global, so ask the unsuppressed plan whether
+      // there was anything out-of-repo to skip.
+      if (
+        opts.global === false &&
+        selectedWrites(planInit(repo, { home, mcp: opts.mcp, hooks: opts.hooks }), ids).some((w) => w.scope === "global")
+      )
         console.error("· skipped out-of-repo writes (--no-global)");
     }
 
