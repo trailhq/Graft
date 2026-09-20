@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Prevent telemetry helpers from repeatedly starting new copies when a sandbox
+  blocks writes to the telemetry state. Internal flush commands skip startup
+  upkeep, and background flushes require a saved timestamp before spawning.
+
 ## 0.18.0
 
 ### Added
