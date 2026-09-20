@@ -42,11 +42,25 @@ export interface ContainerLang {
   inner: Language;
 }
 
-/** The container registry. Svelte and Astro are the same shape and would be a
- * row each, but they are left out until someone has a repo to verify them
- * against — a wrong `body` node type would produce silently misplaced spans. */
+/** The container registry.
+ *
+ * Every row here must satisfy one invariant, the one `extractContainer` relies
+ * on: the `body` node starts on the row of the block's OPENING DELIMITER, so
+ * its slice begins with that line's newline and `body.startPosition.row` is the
+ * shift. Svelte's `script_element`/`raw_text` is Vue's shape exactly. Astro's
+ * `frontmatter_js_block` holds the same property for a different reason — it
+ * starts on the opening `---` rather than after it — which is why it can use
+ * the same shift and not a `+1`. Both are pinned by fixtures in
+ * `test/container-extract.test.ts` whose true line numbers are known.
+ *
+ * Astro's row indexes the `---` frontmatter only, not the `<script>` tags that
+ * may also appear in its template: the frontmatter is where the imports, the
+ * `Props` interface and the module-level code live, and it is the block whose
+ * edges make a component resolve into the rest of the graph. */
 export const CONTAINER_LANGS: readonly ContainerLang[] = [
   { name: "vue", exts: [".vue"], wasm: "vue", block: "script_element", body: "raw_text", inner: "typescript" },
+  { name: "svelte", exts: [".svelte"], wasm: "svelte", block: "script_element", body: "raw_text", inner: "typescript" },
+  { name: "astro", exts: [".astro"], wasm: "astro", block: "frontmatter", body: "frontmatter_js_block", inner: "typescript" },
 ];
 
 const byExt = new Map<string, ContainerLang>();

@@ -30,6 +30,8 @@ import { checkGraph } from "../src/graph/check.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 
 const VUE = containerLangOf("Any.vue")!;
+const SVELTE = containerLangOf("Any.svelte")!;
+const ASTRO = containerLangOf("Any.astro")!;
 
 /** Line N of the fixture is `lines[N - 1]` — that is the whole point. */
 function sfc(lines: string[]): string {
@@ -288,5 +290,180 @@ test("container: a clean build of a .vue file checks as in sync", async () => {
   assert.deepEqual(check.removed, [], "a tier the build wrote must not read as removed");
   assert.deepEqual(check.added, []);
   assert.deepEqual(check.changed, []);
+  assert.equal(check.ok, true, "a clean build checks OK");
+});
+
+/**
+ * Svelte and Astro, added once there was a repo to verify them against: a
+ * 155-component Astro site, where all 86 extracted symbols landed on the right
+ * line and 58 previously-invisible edges from components into `src/lib`
+ * resolved.
+ *
+ * Svelte is Vue's shape exactly — `script_element` wrapping `raw_text` — so the
+ * offset risk is identical and the tests below mirror the Vue ones.
+ *
+ * Astro is the same tier for a different reason, and the difference is worth
+ * stating because it is what makes the shared `shift` correct. Astro
+ * frontmatter is always the first thing in the file, so `startPosition.row` is
+ * structurally 0 and no test can make it otherwise. What can still go wrong is
+ * the off-by-one at the delimiter: `frontmatter_js_block` starts ON the opening
+ * `---` and its slice therefore begins with that line's newline, exactly as
+ * Vue's `raw_text` begins with the tag line's newline. Pick the outer
+ * `frontmatter` node instead and every symbol moves up a line. The fixtures
+ * below put symbols several lines into the block so either direction fails.
+ */
+
+test("container: registry claims .svelte and .astro and reports them as supported", () => {
+  assert.equal(containerLangOf("src/lib/Card.svelte")?.name, "svelte");
+  assert.equal(containerLangOf("src/components/Card.astro")?.name, "astro");
+  assert.equal(containerLangOf("src/components/Card.ASTRO")?.name, "astro", "extension match is case-insensitive");
+
+  for (const ext of [".svelte", ".astro"]) {
+    assert.ok(containerExtensions().includes(ext));
+    assert.ok(supportedExtensions().includes(ext), `${ext} must be in the -e supported set`);
+  }
+});
+
+test("container: svelte spans point at the .svelte line, not the script line", async () => {
+  await warmContainerGrammars(["svelte"]);
+  assert.ok(isContainerWarm("svelte"), "svelte grammar must be available in tree-sitter-wasm");
+
+  const lines = [
+    "<h1>markup first</h1>",                   // 1
+    "",                                        // 2
+    '<script lang="ts">',                      // 3
+    '  import { tick } from "svelte";',        // 4
+    "",                                        // 5
+    "  export function shout(s: string) {",    // 6
+    "    return s.toUpperCase();",             // 7
+    "  }",                                     // 8
+    "</script>",                               // 9
+  ];
+
+  // Line 6 in the file, line 4 inside the script block.
+  assert.equal(spanOf(extractContainer("Card.svelte", sfc(lines), SVELTE).nodes, "shout"), "L6-L8");
+});
+
+test("container: astro spans clear the frontmatter delimiter", async () => {
+  await warmContainerGrammars(["astro"]);
+  assert.ok(isContainerWarm("astro"), "astro grammar must be available in tree-sitter-wasm");
+
+  const lines = [
+    "---",                                     //  1
+    'import Card from "./Card.astro";',        //  2
+    "",                                        //  3
+    "interface Props {",                       //  4
+    "  title: string;",                        //  5
+    "}",                                       //  6
+    "",                                        //  7
+    "export function shout(s: string) {",      //  8
+    "  return s.toUpperCase();",               //  9
+    "}",                                       // 10
+    "---",                                     // 11
+    "<h1>{shout(Astro.props.title)}</h1>",     // 12
+  ];
+
+  const { nodes } = extractContainer("Page.astro", sfc(lines), ASTRO);
+
+  // Taking the outer `frontmatter` node as the body would put these at L7/L3 —
+  // one line up, plausible, and wrong.
+  assert.equal(spanOf(nodes, "shout"), "L8-L10");
+  assert.equal(spanOf(nodes, "Props"), "L4-L6", "the props interface is the component's API surface");
+});
+
+test("container: an astro file with no frontmatter degrades to a file node", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  for (const [label, lines] of [
+    ["markup only", ["<h1>static</h1>", "<p>no frontmatter at all</p>"]],
+    ["empty frontmatter", ["---", "---", "<h1>hi</h1>"]],
+  ] as const) {
+    const { nodes, rawEdges } = extractContainer("Static.astro", sfc([...lines]), ASTRO);
+    assert.equal(nodes.length, 1, `${label}: file node only`);
+    assert.equal(nodes[0].kind, "file");
+    assert.equal(rawEdges.length, 0, `${label}: no edges`);
+  }
+});
+
+test("container: the astro file node describes the whole component", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                             // 1
+    "const x = 1;",                    // 2
+    "---",                             // 3
+    "<h1>{x}</h1>",                    // 4
+    "<style>h1{color:red}</style>",    // 5
+  ];
+  const source = sfc(lines);
+  const file = extractContainer("Card.astro", source, ASTRO).nodes[0];
+
+  assert.equal(file.kind, "file");
+  assert.equal(file.span, "L1-L6", "spans the whole component, markup and style included");
+  assert.equal(file.chars, source.length);
+  assert.equal(file.origin, "ast");
+});
+
+test("container: an .astro component resolves into a .ts module end to end", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-container-astro-"));
+  mkdirSync(join(dir, "src"), { recursive: true });
+
+  writeFileSync(
+    join(dir, "src", "tone.ts"),
+    "export function pickTone(name: string) {\n  return name.trim();\n}\n",
+  );
+  writeFileSync(
+    join(dir, "src", "Card.astro"),
+    sfc([
+      "---",                                      // 1
+      'import { pickTone } from "./tone";',       // 2
+      "",                                         // 3
+      "export function label() {",                // 4
+      "  return pickTone('warm');",               // 5
+      "}",                                        // 6
+      "---",                                      // 7
+      "<p>{label()}</p>",                         // 8
+    ]),
+  );
+
+  const outDir = join(dir, "graft");
+  await buildGraph(dir, outDir, { reuse: false });
+  const graph = readGraph(wiringPath(outDir));
+
+  const label = graph.nodes.find((n) => n.name === "label" && n.path.endsWith("Card.astro"));
+  assert.ok(label, "the .astro symbol is in the built graph");
+  assert.equal(label.span, "L4-L6");
+
+  // The reason to index frontmatter at all: without this edge, `graft callers
+  // pickTone` silently under-reports every component that uses it.
+  const pickTone = graph.nodes.find((n) => n.name === "pickTone");
+  assert.ok(pickTone, "the .ts target is in the graph");
+  assert.ok(
+    graph.edges.some((e) => e.source === label.id && e.target === pickTone.id && e.relation === "calls"),
+    "the component's call into the .ts module resolved",
+  );
+});
+
+test("container: a clean build of .svelte and .astro files checks as in sync", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-container-check-2-"));
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(
+    join(dir, "src", "Hello.svelte"),
+    sfc(["<h1>{msg}</h1>", "<script>", "  const msg = 'hi';", "  function greet() { return msg; }", "</script>"]),
+  );
+  writeFileSync(
+    join(dir, "src", "Hello.astro"),
+    sfc(["---", "export function greet() { return 'hi'; }", "---", "<h1>{greet()}</h1>"]),
+  );
+
+  const outDir = join(dir, "graft");
+  await buildGraph(dir, outDir, { reuse: false });
+  const built = readGraph(wiringPath(outDir));
+  for (const ext of [".svelte", ".astro"]) {
+    assert.ok(built.nodes.some((n) => n.path.endsWith(ext)), `precondition: the build extracted the ${ext} file`);
+  }
+
+  const check = await checkGraph(dir, { contextDir: outDir });
+  assert.deepEqual(check.removed, [], "a tier the build wrote must not read as removed");
   assert.equal(check.ok, true, "a clean build checks OK");
 });

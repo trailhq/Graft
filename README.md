@@ -213,14 +213,22 @@ compiler-grade layer — all `$0` and deterministic (no model, no key):
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
   OCaml, Zig, Dart, Clojure, Nix, Lua**.
 
+- **Component formats** — single-file components whose code lives in a wrapped
+  block. The wrapper grammar locates the block and the code inside it goes to
+  the full-fidelity extractor above, so a component resolves into the rest of
+  the graph like any other module: **Vue** (`<script>`), **Svelte**
+  (`<script>`), **Astro** (`---` frontmatter). Markup and styles are not
+  indexed; spans still point at the real line in the component file.
+
 - **Compiler-grade edges (opt-in)** — `graft build --lsp` adds precise
   `lsp_resolved` call edges (member calls the static pass can't type) when a
   language server is on your `PATH`: **rust-analyzer** (Rust), **clangd** (C/C++),
   **gopls** (Go), **pyright** (Python), **typescript-language-server** (TS/JS).
   It's best-effort — with no server installed the graph is unchanged.
 
-Twenty-three languages in total. A file whose language isn't listed is skipped, not
-indexed. Adding a broad-tier language is a small contribution — see
+Twenty-three languages and three component formats in total. A file whose
+language isn't listed is skipped, not indexed. Adding a broad-tier language is a
+small contribution — see
 [CREDITS.md](CREDITS.md) for the folks who added the current set.
 
 ---

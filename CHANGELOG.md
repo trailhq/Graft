@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Svelte and Astro join the container tier**: `.svelte` and `.astro` are now
+  indexed like `.vue` — the wrapper grammar locates the embedded block and the
+  code inside goes to the depth-tier extractor, so a component's imports and
+  calls resolve into the rest of the graph. Verified against a 155-component
+  Astro site: all 86 extracted symbols landed on the right line, and 58 edges
+  from components into `src/lib` that were previously invisible now resolve.
+  This closes the under-reporting where `graft callers <sym>` on a module
+  imported by components silently missed every component that used it.
+
 ## 0.18.0
 
 ### Added
