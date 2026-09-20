@@ -27,7 +27,7 @@ import { readFileSync, writeFileSync, existsSync, rmSync, rmdirSync, statSync, r
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { HOSTS } from './registry.js';
-import { START, END } from './sections.js';
+import { ALL_MARKERS, type Markers } from './sections.js';
 import { mcpTargets, stripTomlSection } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
 import { antigravitySkillTargets } from './antigravity.js';
@@ -130,19 +130,27 @@ function pruneEmptyDirs(dir: string): void {
  * blank line, so a file that had prose either side of the block reads exactly
  * as it did before graft appended to it.
  */
-function stripSection(path: string, apply: boolean): RetractAction {
+function stripSection(path: string, apply: boolean, markers: Markers[] = ALL_MARKERS): RetractAction {
   if (!existsSync(path)) return 'absent';
   const text = readFileSync(path, 'utf8');
-  if (!text.includes(START)) return 'absent';
+  // Every region graft may own, not just the instruction block. A file can hold
+  // both the instructions and a brain's rules, and leaving one behind would
+  // strand rules in a repo the user has uninstalled graft from.
+  if (!markers.some((m) => text.includes(m.start))) return 'absent';
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
   const lines = text.split(/\r\n|\n/);
   const out: string[] = [];
-  let inside = false;
+  let closing: string | null = null;
   let found = false;
   for (const line of lines) {
     const t = line.trim();
-    if (!inside && t === START) { inside = true; found = true; continue; }
-    if (inside) { if (t === END) inside = false; continue; }
+    if (closing === null) {
+      const open = markers.find((m) => m.start === t);
+      if (open) { closing = open.end; found = true; continue; }
+    } else {
+      if (t === closing) closing = null;
+      continue;
+    }
     out.push(line);
   }
   if (!found) return 'absent';

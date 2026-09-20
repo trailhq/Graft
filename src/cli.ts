@@ -17,6 +17,13 @@ import { buildGraphIfMissing, runInit } from "./claude/init.js";
 import { statuslineWanted } from "./claude/settings-merge.js";
 import { runHostsInit } from "./hosts/init.js";
 import { hostIds } from "./hosts/registry.js";
+import { parseBrainArg, connectBrain, pullBrain, brainStatus } from "./brain/connect.js";
+import { rulesForPointers } from "./brain/attach.js";
+import { clearLink, type BrainLink } from "./brain/link.js";
+import { buildLocalDigest, fetchExpectedRepo, pushDigest, repoSlugFromGit, sameRepo } from "./brain/push.js";
+import { readLink, writeLink } from "./brain/link.js";
+import { watchBuild } from "./brain/watch.js";
+import { openBrowser, signupUrl, startHandoff } from "./brain/signup.js";
 import { contextDirFor } from "./context/node-file.js";
 import { loadGraphCached } from "./graph/load.js";
 import { ensureFreshChildren, ensureFreshGraph, refreshNote } from "./graph/refresh.js";
@@ -203,7 +210,7 @@ function parseTabs(raw: string | undefined): VizTab[] | undefined {
  * not editorialize on stderr at startup (`mcp` runs its own upkeep at boot, and
  * `_update-check` IS the fetch).
  */
-const UPKEEP_SKIP = new Set(["version", "upgrade", "_update-check", "mcp"]);
+const UPKEEP_SKIP = new Set(["version", "upgrade", "_update-check", "_brain-refresh", "mcp"]);
 
 /**
  * Every other command: top up the cached registry answer in the background and,
@@ -237,6 +244,21 @@ program.hook("postAction", (_parent, action) => {
 });
 
 // Hidden from --help: only ever spawned detached by maybeRefreshInBackground.
+program
+  .command("_brain-refresh", { hidden: true })
+  .description("internal: re-pull the attached brain's rules and rewrite the agent files")
+  .argument("[dir]", "target repo directory", ".")
+  .action(async (dir: string) => {
+    // Spawned detached by upkeep, so nothing here is user-visible and nothing
+    // may throw: a failure means the cached rules keep serving, which is the
+    // correct outcome for a brain that is momentarily unreachable.
+    try {
+      await pullBrain(resolve(dir), { home: homedir() });
+    } catch {
+      /* the next session tries again */
+    }
+  });
+
 program
   .command("_update-check", { hidden: true })
   .description("internal: refresh the cached latest-version answer")
@@ -926,10 +948,23 @@ program
   .option("--dry-run", "print every file init would touch, then exit without writing")
   .option("-y, --yes", "skip the picker and wire every detected agent (the pre-0.8 default)")
   .option("--no-global", "skip writes outside this repo (the ~/.codex/ config + hooks)")
-  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean }) => {
+  .option("--brain <handoff>", "attach a Trail brain: <brainId>:<token> (or a bare brain id with GRAFT_BRAIN_TOKEN set)")
+  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; brain?: string }) => {
     if (opts.listAgents) {
       for (const id of [...hostIds(), "claude"]) console.log(id);
       return;
+    }
+    // Parsed before anything is written: a mistyped handoff should cost the user
+    // an error, not a half-wired repo they have to `graft uninstall` out of.
+    let brainLink: BrainLink | undefined;
+    if (opts.brain) {
+      const parsed = parseBrainArg(opts.brain);
+      if ("error" in parsed) {
+        console.error(`✗ --brain: ${parsed.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      brainLink = parsed;
     }
     const repo = resolve(dir);
     const explicit = Array.isArray(opts.agents) ? opts.agents : undefined;
@@ -1015,6 +1050,18 @@ program
     for (const target of targets) {
       if (target !== repo) console.error(`\n— ${relative(repo, target)}/`);
       wireTarget(target, ids, { home, cliPath, plan, opts, wantClaude });
+    }
+
+    // The brain comes last, after the graph exists: its rules are anchored to
+    // symbols, and `graft brain status` can only report how many of them resolve
+    // once there is a graph to resolve them against.
+    if (brainLink) {
+      const res = await connectBrain(repo, brainLink, { home, ids });
+      if (res.warning) console.error(`⚠ brain: ${res.warning}`);
+      else console.error(`✓ brain: pulled ${res.ruleCount} rule(s) from ${brainLink.brainId}`);
+      for (const w of res.writes) console.error(`✓ brain rules: ${w.path} (${w.action})`);
+      if (res.ruleCount > 0 && res.writes.length === 0)
+        console.error("· no instruction file to write rules into — graft ask still carries them");
     }
 
     // One epilogue for the whole run. A workspace parent holds no nodes of its
@@ -1188,6 +1235,267 @@ program
         ? `\n⚠ ${bad.length} file(s) could not be parsed and were left as-is — see above.`
         : "\n✓ graft fully removed. `graft init` re-wires from scratch.",
     );
+  });
+
+const brain = program
+  .command("brain")
+  .description("The Trail brain attached to this repo: the rules mined from its own history");
+
+/**
+ * Get this repo a brain from the terminal, by sending the user through signup
+ * in their browser and catching the handoff on loopback.
+ *
+ * Returns the link, already saved, or null when the user should be left alone —
+ * every failure prints its own reason first, because the caller only needs to
+ * know whether to carry on.
+ */
+async function signUpForBrain(repo: string, slug: string): Promise<BrainLink | null> {
+  const handoff = await startHandoff();
+  const url = signupUrl({ repo: slug, port: handoff.port, state: handoff.state });
+  const startedAt = Date.now();
+
+  // Queued before the link is printed rather than after the outcome, because
+  // the outcome is the one thing a terminal handoff can lose: a user who reads
+  // the URL and walks away kills the process, and only an event already on disk
+  // survives that. This is the denominator; `brain_signup_settled` is not.
+  track("brain_signup_opened", {}, { repo });
+
+  // Printed before the browser opens, and printed whether or not it opens: on a
+  // remote shell nothing can open, and on a desktop the window sometimes lands
+  // behind the terminal. The URL is the thing that always works.
+  console.error(`· ${slug} has no brain yet. Opening your browser to make one:`);
+  console.error(`  ${url}`);
+
+  // A non-interactive shell has nobody to click anything, so waiting five
+  // minutes for a browser that will never come is worse than saying so now.
+  if (!process.stderr.isTTY) {
+    console.error("· not a terminal — open that link, then run `graft brain connect <brainId>:<token>` here");
+    // Its own outcome, not a timeout: nothing here could have opened a browser,
+    // so folding the two together would read as people abandoning signup when
+    // it is only a remote shell doing what it has to.
+    track("brain_signup_settled", { outcome: "no_tty", duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
+    handoff.close();
+    return null;
+  }
+
+  openBrowser(url);
+  console.error("· waiting for you to finish signing up…");
+
+  const got = await handoff.wait();
+  if ("error" in got) {
+    console.error(`✗ ${got.error}`);
+    // The category, never the sentence: `got.error` names the repo and the link.
+    track("brain_signup_settled", { outcome: got.reason, duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
+    return null;
+  }
+  writeLink(repo, got.link);
+  console.error(`✓ brain connected to ${slug}`);
+  track("brain_signup_settled", { outcome: "linked", duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
+  return got.link;
+}
+
+brain
+  .command("connect")
+  .description("Attach a brain to this repo and pull its rules")
+  .argument("<handoff>", "<brainId>:<token>, or a bare brain id with GRAFT_BRAIN_TOKEN set")
+  .argument("[dir]", "target repo directory", ".")
+  .action(async (handoff: string, dir: string) => {
+    const parsed = parseBrainArg(handoff);
+    if ("error" in parsed) {
+      console.error(`✗ ${parsed.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    const repo = resolve(dir);
+    const res = await connectBrain(repo, parsed, { home: homedir() });
+    if (res.warning) {
+      console.error(`⚠ ${res.warning}`);
+      return;
+    }
+    if (res.ruleCount === 0) {
+      // The normal case on the local route: the brain exists but nothing has
+      // read the repo yet. Saying "0 rules" without saying why reads as a
+      // failure, and the next step is the whole point.
+      console.error("✓ attached this repo to the brain — it has no rules yet");
+      console.error("· run `graft brain push` to read this repository into it");
+      return;
+    }
+    console.error(`✓ pulled ${res.ruleCount} rule(s) from ${parsed.brainId}`);
+    for (const w of res.writes) console.error(`✓ ${w.path} (${w.action})`);
+  });
+
+brain
+  .command("pull")
+  .description("Re-pull the attached brain's rules and rewrite the agent instruction files")
+  .argument("[dir]", "target repo directory", ".")
+  .action(async (dir: string) => {
+    const repo = resolve(dir);
+    const res = await pullBrain(repo, { home: homedir() });
+    if (!res) {
+      console.error("· no brain attached — run `graft brain connect <brainId>:<token>`");
+      return;
+    }
+    if (res.warning) {
+      console.error(`⚠ ${res.warning}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.error(`✓ pulled ${res.ruleCount} rule(s)`);
+    for (const w of res.writes) console.error(`✓ ${w.path} (${w.action})`);
+  });
+
+brain
+  .command("push")
+  .description("Read THIS repo on your machine and build its brain — no GitHub App, works on private repos")
+  .argument("[dir]", "target repo directory", ".")
+  .option("--no-approve", "leave the mined rules as drafts for review")
+  .option("--no-watch", "return as soon as the push is sent, without following the build")
+  .action(async (dir: string, opts: { approve?: boolean; watch?: boolean }) => {
+    const repo = resolve(dir);
+    // Resolved before the link, because an unlinked repo now signs up for a
+    // brain and Trail creates that brain FOR a named repository. Without a slug
+    // there is nothing to name it after — and the digest builder would fail on
+    // the same missing remote a moment later regardless.
+    const here = repoSlugFromGit(repo);
+    let link = readLink(repo);
+    if (!link) {
+      if (!here) {
+        console.error("✗ this directory has no GitHub `origin` remote — graft can only push a GitHub repository today");
+        process.exitCode = 1;
+        return;
+      }
+      const signedUp = await signUpForBrain(repo, `${here.owner}/${here.name}`);
+      if (!signedUp) {
+        process.exitCode = 1;
+        return;
+      }
+      link = signedUp;
+    }
+    // What the website said this brain is for. Checked BEFORE any reading, so
+    // standing in the wrong checkout costs a message rather than a brain full
+    // of another repository's rules — a mistake that is silent afterwards,
+    // because the rules look perfectly plausible, just not about your code.
+    const expected = await fetchExpectedRepo(link);
+    if (expected && here && !sameRepo(expected.slug, `${here.owner}/${here.name}`)) {
+      console.error(`✗ this brain is for ${expected.slug}, but you are in ${here.owner}/${here.name}`);
+      console.error(`  cd into ${expected.slug} and run this again, or attach a different brain here.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    // The graph is what symbol anchors are resolved against, so a rule mined
+    // here can later go stale on its own. Without one the ingest still works;
+    // its rules simply govern the repo rather than a symbol in it.
+    const graph = loadGraphCached(contextDirFor(repo, program.opts<GlobalOpts>().dir));
+    if (!graph) console.error("· no graph yet — run `graft build` first so rules can be anchored to symbols");
+
+    const label = expected?.slug ?? (here ? `${here.owner}/${here.name}` : "this repository");
+    console.error(`· reading ${label} — commit messages, pull-request discussion and the docs in the tree.`);
+    console.error("  No file contents leave this machine.");
+    const built = await buildLocalDigest(repo, graph, { autoApprove: opts.approve !== false });
+    if ("error" in built) {
+      console.error(`✗ ${built.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    const d = built.digest;
+    if (built.warning) console.error(`⚠ ${built.warning}`);
+    console.error(
+      `· ${d.commits.length} commits, ${d.threads.length} discussions, ${d.symbols.length} symbols, ${d.sources.length} stated sources`,
+    );
+
+    const sent = await pushDigest(link, d);
+    if ("error" in sent) {
+      console.error(`✗ ${sent.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    const brainLabel = expected?.brainName ? `“${expected.brainName}”` : link.brainId;
+    console.error(`✓ sent ${d.owner}/${d.name} to ${brainLabel}`);
+
+    // Held rather than handed back. Everything above this line succeeded even
+    // in the runs that end badly: the push lands, and then the miner fails —
+    // which is where roughly a third of production's repo brains die. Returning
+    // the prompt here is what made that invisible from this side, on CI and
+    // over SSH permanently so. `--no-watch` is for a caller that genuinely
+    // wants fire-and-forget, and it prints the old two lines instead.
+    if (opts.watch === false) {
+      console.error("· it is being mined into rules now — a few minutes. Watch it finish in your browser.");
+      console.error("  The rules reach this repo on their own; nothing else to run.");
+      return;
+    }
+
+    console.error("· building the brain — Ctrl-C detaches, it keeps going without you");
+    const outcome = await watchBuild(link);
+    if (outcome === "completed") {
+      console.error("✓ the brain is built — its rules reach this repo on their own; nothing else to run");
+      return;
+    }
+    if (outcome === "failed") {
+      // A non-zero exit, unlike every other ending here: this is the one case
+      // where the work did not produce a brain, and a CI step that ran the push
+      // should hear about it the way it hears about any other failure.
+      console.error("  Nothing was lost — the brain is still there. Run `graft brain push` again to retry the read.");
+      process.exitCode = 1;
+      return;
+    }
+    if (outcome === "unreachable") {
+      console.error("· could not reach Trail to follow the build — it is still running. Watch it finish in your browser.");
+      return;
+    }
+    console.error("· still building after 15 minutes — it has not failed, it is just long. Watch it finish in your browser.");
+  });
+
+brain
+  .command("status")
+  .description("Show the attached brain, how many rules are cached, and how many still match the code")
+  .argument("[dir]", "target repo directory", ".")
+  .option("--json", "machine-readable output")
+  .action((dir: string, opts: { json?: boolean }) => {
+    const repo = resolve(dir);
+    const { link, rules, fetchedAt } = brainStatus(repo);
+    // Resolve every cached rule against the CURRENT graph, so the count of stale
+    // rules is the real one rather than what was true at pull time. This is the
+    // number worth surfacing: it says how far the codebase has drifted from what
+    // the team decided.
+    const graph = loadGraphCached(contextDirFor(repo, program.opts<GlobalOpts>().dir));
+    const applied = rulesForPointers(
+      (graph?.nodes ?? []).map((n) => `${n.path}:${n.span}`),
+      rules,
+      graph,
+    );
+    if (opts.json) {
+      console.log(JSON.stringify({ brainId: link?.brainId ?? null, cached: rules.length, fetchedAt, anchored: applied.length, stale: applied.filter((a) => a.stale).length }, null, 2));
+      return;
+    }
+    if (!link) {
+      console.error("· no brain attached — run `graft brain connect <brainId>:<token>`");
+      return;
+    }
+    console.error(`brain ${link.brainId}`);
+    console.error(`  ${rules.length} rule(s) cached${fetchedAt ? `, pulled ${new Date(fetchedAt).toISOString()}` : ""}`);
+    if (!graph) {
+      console.error("  no graph yet — run `graft build` to see which rules still match the code");
+      return;
+    }
+    const stale = applied.filter((a) => a.stale);
+    console.error(`  ${applied.length} anchored to symbols in this repo`);
+    console.error(
+      stale.length
+        ? `  ${stale.length} describe code that has changed since:`
+        : "  none describe code that has changed since",
+    );
+    for (const a of stale.slice(0, 10)) console.error(`    - ${a.rule}\n      ${a.pointer}`);
+  });
+
+brain
+  .command("disconnect")
+  .description("Forget the attached brain (its rules stay in the instruction files until the next init)")
+  .argument("[dir]", "target repo directory", ".")
+  .action((dir: string) => {
+    const repo = resolve(dir);
+    clearLink(resolve(dir));
+    console.error(`✓ detached the brain from ${repo}`);
   });
 
 program.parseAsync().catch((err) => {

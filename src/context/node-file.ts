@@ -120,7 +120,13 @@ export function contextDirFor(root: string, override?: string): string {
  * expressed as a repo-relative ignore). Best-effort: an unwritable `.gitignore`
  * must never abort a build, so write failures are swallowed.
  */
-export function ensureGitignored(root: string, contextDir: string): void {
+const GRAPH_CACHE_NOTE = "graft's local graph cache — regenerable, not committed (run `graft build`).";
+
+/** Why `.graft/` is ignored, which is a different reason: not that it is cheap
+ *  to regenerate, but that it holds a token. */
+export const LINK_NOTE = "graft's brain link — holds a read token, never commit it.";
+
+export function ensureGitignored(root: string, contextDir: string, note = GRAPH_CACHE_NOTE): void {
   if (envTruthy("GRAFT_NO_GITIGNORE")) return;
   const rel = relPosix(root, contextDir);
   if (rel === "" || rel.startsWith("..")) return; // dir is at/above the repo root — nothing sane to ignore
@@ -141,7 +147,7 @@ export function ensureGitignored(root: string, contextDir: string): void {
   });
   if (present) return;
   const gap = current === "" ? "" : current.endsWith("\n") ? "\n" : "\n\n";
-  const block = `${gap}# graft's local graph cache — regenerable, not committed (run \`graft build\`).\n${entry}\n`;
+  const block = `${gap}# ${note}\n${entry}\n`;
   try { writeFileSync(path, current + block); } catch { /* best-effort — build already succeeded */ }
 }
 

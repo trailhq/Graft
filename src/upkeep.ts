@@ -32,6 +32,7 @@ import { readJson, writeJsonAtomic, cacheDir } from './util/state.js';
 import { HOSTS } from './hosts/registry.js';
 import { START } from './hosts/sections.js';
 import { getNpmViewVersion, readCurrentVersion } from './cli-meta.js';
+import { cacheIsStale, markRulesChecked, readLink, readRulesCache } from './brain/link.js';
 import { graftCliPath } from './claude/paths.js';
 
 /**
@@ -140,6 +141,41 @@ export function maybeRefreshInBackground(home?: string, now = Date.now()): boole
     return true;
   } catch {
     return false; // no spawn (sandbox, ENOMEM) — the nudge just uses the old cache
+  }
+}
+
+/**
+ * Refresh the attached brain's rules in a detached child, when they are stale.
+ *
+ * The same shape as the update check above, and for the same reason: this runs
+ * inside session-start hooks and MCP boot, where waiting on the network is a
+ * stalled first turn. So nothing here blocks — the child does the fetch and
+ * this call returns immediately.
+ *
+ * Without it a brain is pulled exactly once, at `graft brain connect`, and
+ * never again. That was survivable when connecting happened after the brain
+ * finished building; it is not survivable now that onboarding connects DURING
+ * the build, because the one pull returns an empty rulebook and nothing would
+ * ever go back for the real one.
+ *
+ * The attempt is stamped before spawning, so a brain that is still building
+ * costs one request per TTL window rather than one per command.
+ */
+export function maybeRefreshBrainRules(repo: string, now = Date.now()): boolean {
+  try {
+    if (!readLink(repo)) return false;
+    const cache = readRulesCache(repo);
+    if (!cacheIsStale(cache, now)) return false;
+    markRulesChecked(repo, now);
+    const child = spawn(process.execPath, [graftCliPath(), '_brain-refresh', repo], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false; // no spawn, or an unreadable repo — the cached rules still serve
   }
 }
 

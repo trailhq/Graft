@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.18.0
+
+### Added
+
+- **Trail Brain integration** (#322): graft can build a *brain* from a repo and
+  carry its rules into every `ask` — a two-way link, so retrieval is shaped by
+  the team context a brain accumulates, not the code graph alone.
+- **A brain verifies the checkout before it mines** (#344): graft checks the
+  working copy against the repo a brain expects, so rules are never mined from
+  the wrong tree.
+
+### Fixed
+
+- **A brain refreshes its rules from upkeep** (#343), so a single empty pull no
+  longer leaves it stuck without rules.
+
 ## 0.17.0
 
 ### Added

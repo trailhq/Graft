@@ -11,6 +11,7 @@ import { graftCliPath } from './claude/paths.js';
 import {
   formatUpdateNudge,
   formatWiringRefresh,
+  maybeRefreshBrainRules,
   maybeRefreshInBackground,
   readUpdateCache,
   reconcileWiring,
@@ -66,6 +67,11 @@ export function runUpkeep(
     const refreshLine = formatWiringRefresh(refreshed);
     if (refreshLine) lines.push(refreshLine);
   } catch { /* fail-soft: wiring refresh is never worth breaking a session for */ }
+  try {
+    // Rules the attached brain has gained since the last pull. Detached, so it
+    // never delays the session it runs in.
+    if (opts.background !== false) maybeRefreshBrainRules(repo);
+  } catch { /* same */ }
   try {
     if (opts.background !== false) maybeRefreshInBackground(opts.home);
     const nudge = formatUpdateNudge(current, readUpdateCache(opts.home)?.latest);

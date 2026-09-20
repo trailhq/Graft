@@ -102,6 +102,11 @@ export interface BuildConfig {
    * checkout someone parked in the tree. Absent/false keeps the historical
    * boundary. */
   followNestedRepos?: boolean;
+  /** The Trail brain this repo's rules come from: the brain id and the token to
+   * read it with. Persisted here — in the git-ignored `.graft/` — rather than in
+   * `~/.graft/`, because a brain belongs to one repository and two checkouts on
+   * one machine must not share one. `undefined` clears it. */
+  brain?: { brainId: string; token: string; baseUrl?: string };
 }
 
 /** Local, Git-ignored repository configuration. Kept outside generated
