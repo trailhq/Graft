@@ -9,7 +9,8 @@
     "context",
     "codebase",
     "llm",
-    "graft"
+    "graft",
+    "pi-package"
   ],
   "license": "MIT",
   "repository": {
@@ -101,5 +102,10 @@
     "tree-sitter-swift": {
       "tree-sitter": "$tree-sitter"
     }
+  },
+  "pi": {
+    "extensions": [
+      "./dist/pi/extension.js"
+    ]
   }
 }
