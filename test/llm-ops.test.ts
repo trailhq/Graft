@@ -68,6 +68,35 @@ test("ChatCruxSummarizer forces record_symbols and normalizes numbers", async ()
   assert.deepEqual(out, [{ id: "sym1", summary: "does x", crux_start: 3, crux_end: 5 }]);
 });
 
+test("ChatCruxSummarizer recovers the id when the model echoes the whole target row", async () => {
+  // DeepSeek copies `- id=<id> | <kind> | lines …` into `id` verbatim; without
+  // normalization every summary misses its node and the file is dropped (#235).
+  const m = new FakeChatModel({
+    toolCalls: [
+      {
+        id: "1",
+        name: "record_symbols",
+        args: {
+          symbols: [
+            {
+              id: "a.ts#Auth.login | method | lines L1-L5 | function login()",
+              summary: "does x",
+              crux_start: 0,
+              crux_end: 0,
+            },
+          ],
+        },
+      },
+    ],
+  });
+  const out = await new ChatCruxSummarizer(m).describeFile({
+    path: "a.ts",
+    source: "l1\nl2\nl3\nl4\nl5\n",
+    nodes: [{ id: "a.ts#Auth.login", kind: "method", signature: "function login()", startLine: 1, endLine: 5 }],
+  });
+  assert.deepEqual(out, [{ id: "a.ts#Auth.login", summary: "does x", crux_start: 0, crux_end: 0 }]);
+});
+
 test("structured ops degrade gracefully when the model returns no tool call", async () => {
   const empty = new FakeChatModel({ toolCalls: [] });
   const { err } = await withCapturedError(async () => {
