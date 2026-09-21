@@ -30,6 +30,11 @@ import { checkGraph } from "../src/graph/check.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 
 const VUE = containerLangOf("Any.vue")!;
+const ASTRO = containerLangOf("Any.astro")!;
+
+/** Same contract as `sfc`, named for the Astro fixtures so the two fixture
+ * shapes are not confused when a test fails. */
+const astro = sfc;
 
 /** Line N of the fixture is `lines[N - 1]` — that is the whole point. */
 function sfc(lines: string[]): string {
@@ -289,4 +294,127 @@ test("container: a clean build of a .vue file checks as in sync", async () => {
   assert.deepEqual(check.added, []);
   assert.deepEqual(check.changed, []);
   assert.equal(check.ok, true, "a clean build checks OK");
+});
+
+/* ---------------------------------------------------------------------------
+ * Astro. Same tier, different fence: the embedded block is the `---`
+ * frontmatter (`frontmatter` → `frontmatter_js_block`) rather than a
+ * `<script>` element, and it holds TypeScript.
+ *
+ * Frontmatter usually opens on line 1, which makes the offset 0 — the case a
+ * naive implementation passes. The tests below therefore lead with a fixture
+ * whose fence is pushed down the file, because that is the one that fails when
+ * the shift is dropped.
+ * ------------------------------------------------------------------------- */
+
+test("container: registry claims .astro and reports it as supported", () => {
+  assert.equal(containerLangOf("src/pages/index.astro")?.name, "astro");
+  assert.equal(containerLangOf("src/pages/Index.ASTRO")?.name, "astro", "extension match is case-insensitive");
+  assert.ok(containerExtensions().includes(".astro"));
+  assert.ok(supportedExtensions().includes(".astro"), ".astro must be in the -e supported set");
+});
+
+test("container: spans point at the .astro line, not the frontmatter line", async () => {
+  await warmContainerGrammars(["astro"]);
+  assert.ok(isContainerWarm("astro"), "astro grammar must be available in tree-sitter-wasms");
+
+  const lines = [
+    "<!-- a comment above the fence pushes it down the file -->", //  1
+    "---",                                                        //  2
+    'import Card from "../components/Card.astro";',               //  3
+    "",                                                           //  4
+    "const rows = await load();",                                 //  5
+    "",                                                           //  6
+    "export function shout(what: string) {",                      //  7
+    "  return what.toUpperCase();",                               //  8
+    "}",                                                          //  9
+    "---",                                                        // 10
+    "<main>",                                                     // 11
+    "  <Card rows={rows} />",                                     // 12
+    "</main>",                                                    // 13
+  ];
+
+  const { nodes } = extractContainer("pages/index.astro", astro(lines), ASTRO);
+
+  // Line 7 in the file; line 6 inside the frontmatter block. Getting 6 here
+  // would be the exact failure this tier exists to avoid.
+  assert.equal(spanOf(nodes, "shout"), "L7-L9");
+});
+
+test("container: a fence at the top of the file still lands right", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                          // 1
+    "export function first() {}",   // 2
+    "---",                          // 3
+    "<b />",                        // 4
+  ];
+
+  // Offset 0 — the shape almost every real .astro file has, and the one a fix
+  // for the previous test could break.
+  assert.equal(spanOf(extractContainer("A.astro", astro(lines), ASTRO).nodes, "first"), "L2-L2");
+});
+
+test("container: multi-byte characters inside the frontmatter do not shift the spans", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  // Cyrillic and an emoji above the symbol: if the slice were taken by byte
+  // offset against a UTF-16 string, the block would be cut in the wrong place
+  // and the symbol would move or vanish.
+  const lines = [
+    "---",                                        // 1
+    'const title = "Поход в горы 🥾";',           // 2
+    'const note = "Регламент участия";',          // 3
+    "export function label() {",                  // 4
+    "  return title;",                            // 5
+    "}",                                          // 6
+    "---",                                        // 7
+    "<h1>{title}</h1>",                           // 8
+  ];
+
+  assert.equal(spanOf(extractContainer("Ru.astro", astro(lines), ASTRO).nodes, "label"), "L4-L6");
+});
+
+test("container: the file node describes the .astro, not the frontmatter block", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  const lines = [
+    "---",                            // 1
+    "const x = 1;",                   // 2
+    "---",                            // 3
+    "<main>",                         // 4
+    "  <p>{x}</p>",                   // 5
+    "</main>",                        // 6
+    "<style>.a{color:red}</style>",   // 7
+  ];
+  const source = astro(lines);
+
+  const { nodes } = extractContainer("Card.astro", source, ASTRO);
+  const file = nodes[0];
+
+  assert.equal(file.kind, "file");
+  assert.equal(file.id, "Card.astro");
+  assert.equal(file.span, "L1-L8", "spans the whole component, markup and style included");
+  assert.equal(file.chars, source.length);
+  assert.equal(file.origin, "ast");
+});
+
+test("container: an .astro with no usable frontmatter degrades to a file node", async () => {
+  await warmContainerGrammars(["astro"]);
+
+  for (const [label, lines] of [
+    ["no frontmatter at all", ["<main>", "  <p>static</p>", "</main>"]],
+    ["empty frontmatter", ["---", "---", "<p />"]],
+    // The known limit of this row: client `<script>` blocks are nested in the
+    // markup, and `blocks()` only walks the root's named children. Pinned so
+    // the behaviour is a decision rather than a surprise — note it degrades to
+    // "not indexed", never to a wrong line.
+    ["client script only", ["<main>", "  <script>", "    function boot() {}", "  </script>", "</main>"]],
+  ] as const) {
+    const { nodes, rawEdges } = extractContainer("Empty.astro", astro([...lines]), ASTRO);
+    assert.equal(nodes.length, 1, `${label}: file node only`);
+    assert.equal(nodes[0].kind, "file");
+    assert.equal(rawEdges.length, 0, `${label}: no edges`);
+  }
 });
