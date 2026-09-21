@@ -7,6 +7,9 @@
  * shell (`<template>` / `<script>` / `<style>`) and hands back the script body as
  * one opaque `raw_text` node, so the cards would come out empty.
  *
+ * Astro's `---` frontmatter is the same shape with a different fence: the
+ * grammar hands back one `frontmatter_js_block` holding TypeScript.
+ *
  * So the container grammar is used only to answer "where does the embedded
  * language start and end", and the block itself goes to the DEPTH-tier extractor
  * (extract.ts). A `.vue` file therefore gets the same quality of extraction as a
@@ -26,27 +29,69 @@ import { loadWasmLanguage, parseWasm, type TsNode } from "./generic.js";
 import { contentHash } from "../util/id.js";
 import type { NodeV1 } from "./types.js";
 
-/** A container language: the wrapper grammar, the node that holds the embedded
+/** One shape of embedded block inside a container file. A language may carry
+ * several: an Astro page keeps its server code in `---` frontmatter and its
+ * client code in `<script>`, which are different node types in the same tree. */
+export interface EmbeddedBlock {
+  /** Wrapper node that represents one embedded block (Vue's `script_element`,
+   * Astro's `frontmatter`). */
+  block: string;
+  /** Child of `block` holding the raw embedded source (Vue's `raw_text`,
+   * Astro's `frontmatter_js_block`). */
+  body: string;
+  /** Search the whole tree instead of the root's named children. Opt-in per
+   * shape, not a change to how every container is walked: Astro's client
+   * `<script>` sits inside the markup — three levels down in a layout — while
+   * a Vue SFC's is always top-level, and letting the Vue row descend would
+   * newly index a `<script>` written inside a `<template>`. */
+  nested?: boolean;
+  /** Last chance to reject a block by its wrapper node, before its body is
+   * handed to the depth-tier extractor. */
+  accept?: (block: TsNode) => boolean;
+}
+
+/** A container language: the wrapper grammar, the nodes that hold the embedded
  * source, and which depth-tier extractor to hand that source to. */
 export interface ContainerLang {
   name: string;
   exts: string[];
   /** wasm basename in tree-sitter-wasms/out/tree-sitter-<wasm>.wasm */
   wasm: string;
-  /** Wrapper node that represents one embedded block (e.g. Vue's script_element). */
-  block: string;
-  /** Child of `block` holding the raw embedded source (e.g. Vue's raw_text). */
-  body: string;
+  /** Every embedded shape, in no particular order — the blocks themselves are
+   * returned in document order regardless of which shape found them. */
+  embeds: readonly EmbeddedBlock[];
   /** Depth-tier grammar for the embedded language. TypeScript is a superset of
    * JavaScript, so it parses both `<script>` and `<script lang="ts">`. */
   inner: Language;
 }
 
-/** The container registry. Svelte and Astro are the same shape and would be a
- * row each, but they are left out until someone has a repo to verify them
- * against — a wrong `body` node type would produce silently misplaced spans. */
+/** The container registry. Svelte is the same shape and would be a row too, but
+ * it is left out until someone has a repo to verify it against — a wrong `body`
+ * node type would produce silently misplaced spans.
+ *
+ * **Astro carries two shapes.** The `---` fence holds the imports and the
+ * server-side code; the client code lives in `<script>` tags nested inside the
+ * markup, which is why that row is `nested` — in a real layout they sit three
+ * levels down, and a page can hold one 900-line block that is the whole of its
+ * behaviour. Both feed the same TypeScript extractor and are returned in
+ * document order, so a name defined in both gets two nodes rather than one
+ * shadowing the other. */
 export const CONTAINER_LANGS: readonly ContainerLang[] = [
-  { name: "vue", exts: [".vue"], wasm: "vue", block: "script_element", body: "raw_text", inner: "typescript" },
+  { name: "vue", exts: [".vue"], wasm: "vue", embeds: [{ block: "script_element", body: "raw_text" }], inner: "typescript" },
+  // `frontmatter_js_block` starts on the opening `---` row, exactly as Vue's
+  // `raw_text` starts on its tag row, so the existing shift arithmetic applies
+  // unchanged: slice line 1 is the tail of the fence line, and slice line N
+  // lands on file line N + startPosition.row. Pinned by the tests below.
+  {
+    name: "astro",
+    exts: [".astro"],
+    wasm: "astro",
+    embeds: [
+      { block: "frontmatter", body: "frontmatter_js_block" },
+      { block: "script_element", body: "raw_text", nested: true, accept: isJavaScriptScript },
+    ],
+    inner: "typescript",
+  },
 ];
 
 const byExt = new Map<string, ContainerLang>();
@@ -120,25 +165,126 @@ function containerFileNode(rel: string, source: string, residual: string): NodeV
   };
 }
 
-/** Every embedded block in document order, as [bodyNode] — an SFC may legally
- * carry two (`<script>` for options/exports plus `<script setup>`), and each
- * needs its own offset. */
-function blocks(root: TsNode, lang: ContainerLang): TsNode[] {
-  const out: TsNode[] = [];
-  const n = root.namedChildCount ?? 0;
-  for (let i = 0; i < n; i++) {
-    const child = root.namedChild?.(i);
-    if (!child || child.type !== lang.block) continue;
-    const kids = child.namedChildCount ?? 0;
-    for (let j = 0; j < kids; j++) {
-      const body = child.namedChild?.(j);
-      // An empty `<script></script>` has no body child at all — skipped here, so
-      // the file still gets its file node and nothing else, which is the same
-      // shape as a file whose grammar is missing.
-      if (body && body.type === lang.body) out.push(body);
+/** `<script>` types that mean JavaScript. A tag with no `type` is JS by the
+ * HTML spec; `application/ld+json`, `importmap` and `speculationrules` are DATA
+ * wearing a script tag. The depth-tier extractor would happily parse a JSON-LD
+ * body — `{"@type": "Organization"}` is a syntactically fine TypeScript block —
+ * and mint nodes out of a structured-data blob no reader thinks of as code.
+ *
+ * An unreadable type (`type={dynamic}`) is treated as not-JavaScript: the cost
+ * is one un-indexed block, and the alternative is guessing at content we cannot
+ * see. */
+const JS_SCRIPT_TYPES = new Set([
+  "module",
+  "text/javascript",
+  "application/javascript",
+  "text/ecmascript",
+  "application/ecmascript",
+  "text/typescript",
+  "application/typescript",
+  "text/jsx",
+  "text/babel",
+]);
+
+/** Read one attribute's value off a `start_tag`: the empty string when the
+ * attribute is absent or carries no value, and null only when it is present but
+ * NOT A LITERAL (`type={expr}`) — the two cases mean different things to the
+ * caller. Quoted and bare values differ by one nesting level, so both shapes
+ * are walked rather than assumed. */
+function attrValue(tag: TsNode, name: string): string | null {
+  const kids = tag.namedChildCount ?? 0;
+  for (let i = 0; i < kids; i++) {
+    const attr = tag.namedChild?.(i);
+    if (!attr || attr.type !== "attribute") continue;
+    const parts = attr.namedChildCount ?? 0;
+    let matched = false;
+    for (let j = 0; j < parts; j++) {
+      const part = attr.namedChild?.(j);
+      if (!part) continue;
+      if (part.type === "attribute_name") {
+        matched = part.text.toLowerCase() === name;
+        if (!matched) break;
+        continue;
+      }
+      if (!matched) continue;
+      if (part.type === "attribute_value") return part.text;
+      if (part.type === "quoted_attribute_value") {
+        const inner = part.namedChild?.(0);
+        return inner?.type === "attribute_value" ? inner.text : "";
+      }
+      // An interpolated value (`type={expr}`) — present but not readable.
+      return null;
+    }
+    // A bare `type` with no value at all. HTML reads that as the empty string,
+    // and an empty `type` is a classic script — so it is JavaScript, not an
+    // unreadable value.
+    if (matched) return "";
+  }
+  return "";
+}
+
+/** True when a `<script>` element holds JavaScript rather than embedded data. */
+export function isJavaScriptScript(script: TsNode): boolean {
+  const tag = script.namedChild?.(0);
+  if (!tag) return false;
+  const type = attrValue(tag, "type");
+  if (type === null) return false; // present but not a literal
+  if (type === "") return true; // absent, or valueless: JS by default
+  return JS_SCRIPT_TYPES.has(type.trim().toLowerCase());
+}
+
+/** Every node of `type` in the tree, pre-order. Used only for `nested` shapes;
+ * a top-level shape stays a single pass over the root's children so the walk
+ * cost is unchanged for `.vue`. */
+function descendants(root: TsNode, type: string): TsNode[] {
+  const found: TsNode[] = [];
+  const stack: TsNode[] = [root];
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (node !== root && node.type === type) found.push(node);
+    const kids = node.namedChildCount ?? 0;
+    for (let i = kids - 1; i >= 0; i--) {
+      const child = node.namedChild?.(i);
+      if (child) stack.push(child);
     }
   }
-  return out;
+  return found;
+}
+
+/** Every embedded block in DOCUMENT ORDER, as [bodyNode] — an SFC may legally
+ * carry two (`<script>` for options/exports plus `<script setup>`), an Astro
+ * page carries a fence plus any number of `<script>` tags, and each needs its
+ * own offset.
+ *
+ * Document order is not cosmetic: `extractContainer` mints ids in the order it
+ * receives blocks, so a duplicate name's `~2` suffix would otherwise depend on
+ * the order the shapes happen to be listed in the registry. */
+function blocks(root: TsNode, lang: ContainerLang): TsNode[] {
+  const found: TsNode[] = [];
+  for (const embed of lang.embeds) {
+    const hosts: TsNode[] = [];
+    if (embed.nested) {
+      hosts.push(...descendants(root, embed.block));
+    } else {
+      const n = root.namedChildCount ?? 0;
+      for (let i = 0; i < n; i++) {
+        const child = root.namedChild?.(i);
+        if (child && child.type === embed.block) hosts.push(child);
+      }
+    }
+    for (const host of hosts) {
+      if (embed.accept && !embed.accept(host)) continue;
+      const kids = host.namedChildCount ?? 0;
+      for (let j = 0; j < kids; j++) {
+        const body = host.namedChild?.(j);
+        // An empty `<script></script>` has no body child at all — skipped here, so
+        // the file still gets its file node and nothing else, which is the same
+        // shape as a file whose grammar is missing.
+        if (body && body.type === embed.body) found.push(body);
+      }
+    }
+  }
+  return found.sort((a, b) => a.startIndex - b.startIndex);
 }
 
 /**
