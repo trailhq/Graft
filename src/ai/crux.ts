@@ -134,6 +134,21 @@ function userContent(input: FileCruxInput): string {
   return `FILE: ${input.path}\n\n${numberLines(input.source)}\n\nTARGETS (${n} — return all ${n}, one entry per id):\n${targets}`;
 }
 
+/**
+ * Recover the bare target id from whatever the model echoed back.
+ *
+ * The user turn labels each target as `- id=<id> | <kind> | lines L<a>-L<b>`,
+ * and the system prompt asks for `<id>` verbatim. Models that segment this
+ * line poorly (DeepSeek, both its OpenAI- and Anthropic-compatible endpoints)
+ * copy the whole row into `id` — `<id> | <kind> | lines …` — so every summary
+ * misses its node and the file is dropped as a quality miss (#235). Node ids
+ * never contain ` | `, so keeping the first segment recovers the id and leaves
+ * a faithfully-copied id untouched.
+ */
+function normalizeId(raw: string): string {
+  return raw.split(" | ")[0].trim();
+}
+
 /** Normalize the tool's parsed argument object into a {@link NodeCrux} list. */
 function parseResults(obj: { symbols?: unknown } | undefined): NodeCrux[] {
   if (!obj || !Array.isArray(obj.symbols)) return [];
@@ -142,7 +157,7 @@ function parseResults(obj: { symbols?: unknown } | undefined): NodeCrux[] {
     .map((s) => s as Record<string, unknown>)
     .filter((s) => typeof s.id === "string")
     .map((s) => ({
-      id: s.id as string,
+      id: normalizeId(s.id as string),
       summary: typeof s.summary === "string" ? s.summary.trim() : "",
       crux_start: num(s.crux_start),
       crux_end: num(s.crux_end),
