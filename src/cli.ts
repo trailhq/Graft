@@ -1431,6 +1431,16 @@ brain
       console.error("✓ the brain is built — its rules reach this repo on their own; nothing else to run");
       return;
     }
+    // The ordinary ending for anything but a small repository. The history is
+    // mined in slices, and the prompt comes back on the first of them: mining is
+    // the part that fails and it has now succeeded, and the rest is filing,
+    // which is minutes of reliable work nobody gains by watching. The rules
+    // already in the brain are already being served.
+    if (outcome === "building") {
+      console.error("✓ the brain has its first rules — they reach this repo on their own; nothing else to run");
+      console.error("  The rest of the history is still being read. Watch it fill in your browser.");
+      return;
+    }
     if (outcome === "failed") {
       // A non-zero exit, unlike every other ending here: this is the one case
       // where the work did not produce a brain, and a CI step that ran the push

@@ -14,6 +14,15 @@
  * shows, off the same row. Ctrl-C detaches without cancelling anything, because
  * the work is server-side and killing a watcher must never look like killing
  * the build.
+ *
+ * What it holds the line UNTIL changed with slicing. The history is now mined in
+ * several calls rather than one, and the first of them returns in about ten
+ * seconds; filing all of the rules into the graph takes minutes more. Mining is
+ * where the failures are — the thing this watcher exists to report — and filing
+ * is long, dull and reliable, so the line is held through the first and handed
+ * back before the second. Holding a terminal through five minutes of successful
+ * filing buys nobody anything, and on a CI runner it is five minutes of a job
+ * sitting idle.
  */
 import type { BrainLink } from "./link.js";
 import { baseUrlFor } from "./link.js";
@@ -47,10 +56,27 @@ export interface RepoState {
   ruleCount: number;
   commitCount: number;
   threadCount: number;
+  /** Rules in the graph right now, from the job still running. The row's own
+   *  `ruleCount` is only written when that job finishes, so mid-build it is
+   *  zero however many rules are already there.
+   *
+   *  Optional because an older Trail does not send it, and a graft pointed at
+   *  one must fall back to waiting for the finished row rather than reading a
+   *  missing field as "no rules". */
+  filedSoFar?: number;
+  /** Rules the miner has handed over so far. Grows with every slice of the
+   *  history that comes back, so it is a floor and never a total. */
+  foundSoFar?: number;
 }
 
 export interface BuildView {
   stages: Stage[];
+  /**
+   * True once rules are in the graph — which is when this watcher has nothing
+   * left to report, not when the job ends. The rest of the slices keep mining
+   * and filing after the prompt comes back.
+   */
+  ready: boolean;
   done: boolean;
   /** The server's own words, when it failed. */
   error: string | null;
@@ -71,12 +97,17 @@ export function stagesFrom(repo: RepoState | null): BuildView {
   const threads = num(repo?.threadCount);
   const rules = num(repo?.ruleCount);
 
+  const filedSoFar = num(repo?.filedSoFar);
+  const foundSoFar = num(repo?.foundSoFar);
+
   const reached = !!repo && repo.status !== "pending";
   const readIt = commits > 0 || threads > 0;
+  // Rules that exist, whether the job has finished writing its count or not.
+  const hasRules = filedSoFar > 0 || rules > 0;
   const filed = rules > 0;
   const failed = repo?.status === "failed";
 
-  const failedAt: StageId | null = !failed ? null : !reached || !readIt ? "reach" : !filed ? "mine" : "file";
+  const failedAt: StageId | null = !failed ? null : !reached || !readIt ? "reach" : !hasRules ? "mine" : "file";
 
   const order = STAGES.map((s) => s.id);
   const state = (id: StageId): StageState => {
@@ -88,9 +119,12 @@ export function stagesFrom(repo: RepoState | null): BuildView {
       case "read":
         return readIt ? "done" : reached ? "doing" : "waiting";
       case "mine":
-        return filed ? "done" : readIt ? "doing" : "waiting";
+        // Done on the first slice's rules. The remaining slices are still being
+        // mined at this point, behind the prompt this watcher is about to
+        // return — which is the whole change.
+        return hasRules ? "done" : readIt ? "doing" : "waiting";
       case "file":
-        return filed ? "done" : readIt ? "doing" : "waiting";
+        return filed ? "done" : hasRules ? "doing" : readIt ? "waiting" : "waiting";
     }
   };
 
@@ -98,12 +132,17 @@ export function stagesFrom(repo: RepoState | null): BuildView {
     if (id === "read" && (commits || threads)) {
       return [commits ? `${commits} commits` : null, threads ? `${threads} discussions` : null].filter(Boolean).join(", ");
     }
+    // "so far" because the count grows with each slice that lands. Printing it
+    // as a total would promise history that has not been read yet.
+    if (id === "mine" && foundSoFar) return `${foundSoFar} rules so far`;
     if (id === "file" && rules) return `${rules} rules`;
+    if (id === "file" && filedSoFar) return `${filedSoFar} rules so far`;
     return undefined;
   };
 
   return {
     stages: STAGES.map((s) => ({ id: s.id, label: s.label, state: state(s.id), detail: detail(s.id) })),
+    ready: hasRules && !failed,
     done: repo?.status === "completed" && filed,
     error: failed ? (repo?.errorMessage?.trim() || "the read stopped before it finished") : null,
   };
@@ -125,6 +164,10 @@ export async function fetchRepoState(link: BrainLink, fetchImpl: typeof fetch = 
     if (!res.ok) return null;
     const body = (await res.json()) as {
       repo?: { status?: string; error_message?: string; rule_count?: number; commit_count?: number; thread_count?: number } | null;
+      // Absent on an older API, which is why every read of it defaults to zero:
+      // a graft that cannot see the in-flight counts falls back to waiting for
+      // the finished row, exactly as it did before.
+      build?: { found_so_far?: number; filed_so_far?: number } | null;
     };
     if (!body.repo) return null;
     return {
@@ -133,6 +176,8 @@ export async function fetchRepoState(link: BrainLink, fetchImpl: typeof fetch = 
       ruleCount: num(body.repo.rule_count),
       commitCount: num(body.repo.commit_count),
       threadCount: num(body.repo.thread_count),
+      filedSoFar: num(body.build?.filed_so_far),
+      foundSoFar: num(body.build?.found_so_far),
     };
   } catch {
     return null;
@@ -166,15 +211,28 @@ export interface WatchOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-export type WatchOutcome = "completed" | "failed" | "timed_out" | "unreachable";
+/**
+ * How the watch ended.
+ *
+ * `building` is the ordinary success: rules are in the brain and the rest of the
+ * history is still being read behind the prompt. `completed` is the same thing
+ * after the whole job has finished, which only happens for a repository small
+ * enough to be mined in one slice.
+ */
+export type WatchOutcome = "completed" | "building" | "failed" | "timed_out" | "unreachable";
 
 /**
- * Hold until the brain is built, printing each stage as it settles.
+ * Hold until the brain has rules, printing each stage as it settles.
  *
- * Fifteen minutes by default: a large repository's mining is minutes of work,
- * and a watcher that gives up before the build does would report a healthy
- * build as a timeout — the exact confusion this is meant to remove. Giving up
- * says so and says the work continues, because it does.
+ * Returns on the first rules rather than on the finished job: mining is what
+ * fails and it is done by then, and filing the rest is minutes of work nobody
+ * needs to watch. The caller prints where to see the rest.
+ *
+ * Fifteen minutes by default. That is far more than the mining now takes, and it
+ * stays generous on purpose: a watcher that gives up before the build does would
+ * report a healthy build as a timeout, which is the exact confusion this is
+ * meant to remove. Giving up says so and says the work continues, because it
+ * does.
  */
 export async function watchBuild(link: BrainLink, opts: WatchOptions = {}): Promise<WatchOutcome> {
   const timeoutMs = opts.timeoutMs ?? 15 * 60 * 1000;
@@ -200,6 +258,10 @@ export async function watchBuild(link: BrainLink, opts: WatchOptions = {}): Prom
         return "failed";
       }
       if (view.done) return "completed";
+      // The ordinary ending now. The job is still filing the rules the miner
+      // has handed over, and still mining the older slices of the history, and
+      // neither is worth a terminal sitting on it.
+      if (view.ready) return "building";
     }
     if (Date.now() - startedAt >= timeoutMs) return everRead ? "timed_out" : "unreachable";
     await sleep(pollMs);
