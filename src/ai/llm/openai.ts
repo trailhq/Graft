@@ -25,6 +25,16 @@ export interface OpenAIChatModelOptions {
   label?: string;
   /** Extra default headers (e.g. OpenRouter's `X-Title`). */
   headers?: Record<string, string>;
+  /**
+   * Sent as `reasoning_effort` on every request. Set it to `"none"` for a local
+   * thinking model: qwen3.x served by Ollama spends the whole `maxTokens` budget
+   * in its reasoning channel and returns neither `content` nor `tool_calls`, so
+   * a forced-tool call comes back empty and the pass records a miss. The same
+   * value is applied REACTIVELY below when a provider rejects tools while
+   * reasoning is on; this option is the proactive form, for servers that answer
+   * 200 with an empty message instead of a 400.
+   */
+  reasoningEffort?: string;
   /** Inject a pre-built client (tests pass a stub; production omits it). */
   client?: OpenAI;
 }
@@ -134,9 +144,11 @@ export class OpenAIChatModel implements ChatModel {
   readonly label: string;
   private client: OpenAI;
   private model: string;
+  private reasoningEffort?: string;
 
   constructor(opts: OpenAIChatModelOptions) {
     this.model = opts.model;
+    this.reasoningEffort = opts.reasoningEffort;
     this.label = opts.label ?? `${PROVIDER}:${opts.model}`;
     this.client =
       opts.client ??
@@ -154,6 +166,12 @@ export class OpenAIChatModel implements ChatModel {
     const params: ChatParams = { model: this.model, messages };
     if (req.temperature !== undefined) params.temperature = req.temperature;
     if (req.maxTokens !== undefined) params.max_tokens = req.maxTokens;
+    // Assigned through an index signature rather than the typed field: `"none"`
+    // is accepted by Ollama and several gateways but is not in every `openai`
+    // SDK version's `ReasoningEffort` union, and the caller's value is free-form.
+    if (this.reasoningEffort !== undefined) {
+      (params as unknown as Record<string, unknown>).reasoning_effort = this.reasoningEffort;
+    }
 
     const fmt = req.responseFormat ?? { kind: "text" };
     if (fmt.kind === "json") {

@@ -134,6 +134,7 @@ export class Graft {
       model: this.cfg.model,
       baseUrl: this.cfg.baseUrl,
       headers: this.cfg.headers,
+      reasoningEffort: this.cfg.reasoningEffort,
     });
     return this._chatModel;
   }
