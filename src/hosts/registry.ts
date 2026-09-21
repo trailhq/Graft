@@ -121,6 +121,51 @@ export const HOSTS: HostTarget[] = [
     content: windsurfRule,
     detect: (p) => p.dirExists(join(p.home, '.codeium', 'windsurf')) || p.dirExists(join(p.repo, '.windsurf')),
   },
+  {
+    // Droid reads AGENTS.md (docs.factory.ai/harness/agents-md.md) — the same
+    // file as the 'agents' row, so selecting both runs two identical upserts
+    // and the second reports 'unchanged'. Its own row exists for detection
+    // (the ~/.factory install probe) and the MCP target (.factory/mcp.json).
+    id: 'droid',
+    name: 'Droid (Factory CLI)',
+    kind: 'section',
+    relPath: 'AGENTS.md',
+    content: instructionBody,
+    detect: (p) => p.dirExists(join(p.home, '.factory')) || p.dirExists(join(p.repo, '.factory')),
+  },
+  {
+    // Pi has no MCP support by design (its README: "No MCP" — CLI tools and
+    // skills are the extension surface), so wiring is the skill file alone:
+    // pi discovers `.pi/skills/` from the cwd upward, alongside AGENTS.md.
+    id: 'pi',
+    name: 'Pi Coding Agent',
+    kind: 'owned',
+    relPath: join('.pi', 'skills', 'graft', 'SKILL.md'),
+    content: skillTemplate,
+    detect: (p) => p.dirExists(join(p.home, '.pi')) || p.dirExists(join(p.repo, '.pi')),
+  },
+  {
+    // The vendor-neutral convention row: every agent that reads project-level
+    // STANDARD files — AGENTS.md plus the Agent-Skills `.agents/skills/`
+    // location (droid's documented compatibility scope, pi's documented skill
+    // dir, Codex-style CLIs' instruction file) — wires from this one row, and
+    // a future standard-reading tool needs no registry entry. Strictly
+    // project-scoped: machine-wide and vendor-specific config stays with each
+    // vendor's own row (the agents row's ~/.codex writes, droid's MCP).
+    // Detection: any installed agent in the standard-reading family, or a repo
+    // that already carries the `.agents/` convention.
+    id: 'project-agents',
+    name: 'Project-standard agents (AGENTS.md + .agents/skills)',
+    kind: 'section',
+    relPath: 'AGENTS.md',
+    content: instructionBody,
+    detect: (p) =>
+      p.dirExists(join(p.home, '.codex')) ||
+      p.dirExists(join(p.home, '.config', 'opencode')) ||
+      p.dirExists(join(p.home, '.factory')) ||
+      p.dirExists(join(p.home, '.pi')) ||
+      p.dirExists(join(p.repo, '.agents')),
+  },
 ];
 
 export function hostIds(): string[] {
