@@ -15,12 +15,13 @@ import Java from "tree-sitter-java";
 import Kotlin from "tree-sitter-kotlin";
 import Swift from "tree-sitter-swift";
 import PHP from "tree-sitter-php";
+import CSharp from "tree-sitter-c-sharp";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "kotlin" | "swift" | "php" | "r";
+export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "kotlin" | "swift" | "php" | "r" | "csharp";
 
 /**
  * Extension → the tree-sitter grammar that parses it, and the label a human expects
@@ -54,6 +55,7 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".kts", grammar: "kotlin", label: "kotlin" },
   { ext: ".swift", grammar: "swift", label: "swift" },
   { ext: ".php", grammar: "php", label: "php" },
+  { ext: ".cs", grammar: "csharp", label: "csharp" },
   // `entryFor` lower-cases the path before matching, so this one entry covers
   // both `.R` (the conventional case in real R codebases) and `.r`.
   { ext: ".r", grammar: "r", label: "r" },
@@ -263,6 +265,21 @@ const PHP_KINDS: Record<string, Kind> = {
   enum_declaration: "enum",
 };
 
+const CS_KINDS: Record<string, Kind> = {
+  class_declaration: "class",
+  struct_declaration: "struct",
+  interface_declaration: "interface",
+  record_declaration: "class",
+  enum_declaration: "enum",
+  method_declaration: "method",
+  constructor_declaration: "method",
+  property_declaration: "method",
+};
+
+/** C# type declarations that may carry a base list. Enums have a base type too,
+ * but it is an underlying value type rather than a graph heritage edge. */
+const CS_TYPE_KINDS: ReadonlySet<Kind> = new Set<Kind>(["class", "struct", "interface"]);
+
 const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   typescript: TS_KINDS,
   tsx: TS_KINDS,
@@ -273,6 +290,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   kotlin: KOTLIN_KINDS,
   swift: SWIFT_KINDS,
   php: PHP_KINDS,
+  csharp: CS_KINDS,
 };
 
 /**
@@ -299,6 +317,7 @@ const CALL_TYPES: Record<Language, ReadonlySet<string>> = {
     "scoped_call_expression",
   ]),
   r: new Set(["call"]),
+  csharp: new Set(["invocation_expression"]),
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -321,6 +340,7 @@ const GRAMMARS: Record<Language, unknown> = {
   kotlin: Kotlin,
   swift: Swift,
   php: PHP.php,
+  csharp: CSharp,
 };
 
 export interface WalkCtx {
@@ -602,7 +622,9 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
                     ? swiftExported(node)
                     : ctx.lang === "php"
                       ? phpExported(node)
-                      : tsExported(node),
+                      : ctx.lang === "csharp"
+                        ? csExported(node, ctx)
+                        : tsExported(node),
       origin: "ast",
       body_hash: contentHash(desc.hashNode.text),
       body_text: searchBody(desc.hashNode.text),
@@ -620,13 +642,14 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     const javaTypeDecl = ctx.lang === "java" && JAVA_TYPE_KINDS.has(desc.kind);
     const kotlinTypeDecl = ctx.lang === "kotlin" && KOTLIN_TYPE_KINDS.has(desc.kind);
     const swiftTypeDecl = ctx.lang === "swift" && SWIFT_TYPE_KINDS.has(desc.kind);
-    if (desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl)
+    const csharpTypeDecl = ctx.lang === "csharp" && CS_TYPE_KINDS.has(desc.kind);
+    if (desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl || csharpTypeDecl)
       edges.push(...heritageEdges(node, id, ctx));
     if (ctx.lang === "php") edges.push(...phpAttributeReferenceEdges(node, id, ctx));
     if (ctx.lang === "java") edges.push(...javaAnnotationReferenceEdges(node, id, ctx));
 
     const enclosingClass =
-      desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl
+      desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl || csharpTypeDecl
         ? desc.name
         : isGoMethod
           ? goReceiverType(node)
@@ -720,7 +743,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     const consumedCallee = ctx.lang === "r" && node.type === "call" ? rCalleeName(node) : null;
     const isConsumedRClassCall =
       consumedCallee === "R6Class" || (consumedCallee === "list" && rIsMixinContainer(node));
-    const callee = isConsumedRClassCall ? null : calleeName(node, ctx.lang);
+    const callee = isConsumedRClassCall ? null : calleeName(node, ctx.lang, ctx);
     if (callee) {
       const callEdge: RawEdge = {
         source: ctx.parentId,
@@ -1111,6 +1134,7 @@ function describe(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
   if (ctx.lang === "java") return describeJava(node, ctx);
   if (ctx.lang === "kotlin") return describeKotlin(node, ctx);
   if (ctx.lang === "swift") return describeSwift(node, ctx);
+  if (ctx.lang === "csharp") return describeCSharp(node, ctx);
 
   // PHP closures: `$h = function () {…}` / `fn() => …`, and bare callbacks
   // (`$routes->get('/x', function () {…})`). Captured as function nodes so a
@@ -1886,6 +1910,22 @@ function describeSwift(node: Parser.SyntaxNode, ctx: WalkCtx): DefDescriptor | n
   return null;
 }
 
+/** C# definition shapes: types, methods, constructors, and properties. Records
+ * are represented as classes so record declarations remain compatible with the
+ * graph's existing class-oriented consumers. */
+function describeCSharp(node: Parser.SyntaxNode, _ctx: WalkCtx): DefDescriptor | null {
+  const kind = CS_KINDS[node.type];
+  if (!kind) return null;
+
+  const name = node.childForFieldName("name")?.text;
+  if (!name) return null;
+
+  const body = node.childForFieldName("body") ?? node.childForFieldName("accessors");
+  const parameterList = node.type === "record_declaration" ? node.childForFieldName("parameters") : null;
+  const headerEnd = body ? body.startIndex : parameterList ? parameterList.endIndex : node.endIndex;
+  return { name, kind, headerEnd, hashNode: node };
+}
+
 /** Java visibility: `public` (or `protected`) on the declaration's own modifier list.
  * A package-private or private member is not part of the API surface. Read off the
  * `modifiers` child's tokens, ignoring annotations, which live in the same node. */
@@ -2111,6 +2151,33 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
     }
     return edges;
   }
+  if (ctx.lang === "csharp") {
+    // C# uses one base_list for inheritance and interface implementation. An
+    // interface can only extend interfaces, a struct can only implement
+    // interfaces, and a class/record uses the first entry for its optional base
+    // class. The resolver corrects the class-only-interface case once target
+    // kinds are known across files.
+    const baseList = node.namedChildren.find((c) => c.type === "base_list");
+    if (!baseList) return edges;
+    const entries = baseList.namedChildren
+      .map((entry) => ({ entry, name: csTypeName(entry) }))
+      .filter((item): item is { entry: Parser.SyntaxNode; name: string } => item.name !== null);
+    const interfaceDeclaration = node.type === "interface_declaration";
+    const structDeclaration =
+      node.type === "struct_declaration" ||
+      (node.type === "record_declaration" && /\brecord\s+struct\b/.test(node.text));
+    for (const [index, item] of entries.entries()) {
+      const relation: Relation = interfaceDeclaration
+        ? "extends"
+        : structDeclaration
+          ? "implements"
+          : index === 0
+            ? "extends"
+            : "implements";
+      edges.push({ source: classId, relation, name: item.name, file: ctx.rel });
+    }
+    return edges;
+  }
   const heritage = node.namedChildren.find((c) => c.type === "class_heritage");
   for (const clause of heritage?.namedChildren ?? []) {
     const relation: Relation | null =
@@ -2183,6 +2250,7 @@ function javaTypeParameterNames(decl: Parser.SyntaxNode): ReadonlySet<string> {
 function calleeName(
   node: Parser.SyntaxNode,
   lang: Language,
+  ctx?: WalkCtx,
 ): { name: string; viaMember: boolean; receiver?: string; kinds?: Kind[] } | null {
   // Java first: `method_invocation` has NO `function` field (it splits the callee
   // into `object` + `name`), so the shared lookup below would return null for every
@@ -2270,7 +2338,15 @@ if (lang === "kotlin") {
 
   const fn = node.childForFieldName("function");
   if (!fn) return null;
-  if (fn.type === "identifier") return { name: fn.text, viaMember: false };
+  if (fn.type === "identifier") {
+    // C# permits an instance method to omit `this.`. Inside a type, a bare
+    // invocation therefore follows the same owner-qualified path as an
+    // explicit `this.Method()` call. Outside a type it remains a free call.
+    if (lang === "csharp" && ctx?.enclosingClass) {
+      return { name: fn.text, viaMember: true, receiver: "this" };
+    }
+    return { name: fn.text, viaMember: false };
+  }
   if (lang === "python" && fn.type === "attribute") {
     const a = fn.childForFieldName("attribute") ?? fn.namedChildren.at(-1);
     return a ? { name: a.text, viaMember: true, receiver: pyReceiver(fn) } : null;
@@ -2285,6 +2361,10 @@ if (lang === "kotlin") {
   if ((lang === "typescript" || lang === "tsx") && fn.type === "member_expression") {
     const p = fn.childForFieldName("property") ?? fn.namedChildren.at(-1);
     return p ? { name: p.text, viaMember: true, receiver: tsReceiver(fn) } : null;
+  }
+  if (lang === "csharp" && fn.type === "member_access_expression") {
+    const p = fn.childForFieldName("name") ?? fn.namedChildren.at(-1);
+    return p ? { name: p.text, viaMember: true, receiver: csReceiver(fn) } : null;
   }
   if (lang === "r" && (fn.type === "extract_operator" || fn.type === "namespace_operator")) {
     const rhs = fn.childForFieldName("rhs");
@@ -2462,6 +2542,22 @@ function tsReceiver(fn: Parser.SyntaxNode): string | undefined {
   return undefined;
 }
 
+/** C# `member_access_expression` receiver text: a bare identifier, `this`, or
+ * a single `this.field` chain. Deeper/chained expressions are left untyped. */
+function csReceiver(fn: Parser.SyntaxNode): string | undefined {
+  const expression = fn.childForFieldName("expression");
+  if (expression?.type === "identifier") return expression.text;
+  if (expression?.type === "this") return "this";
+  if (expression?.type === "member_access_expression") {
+    const inner = expression.childForFieldName("expression");
+    const name = expression.childForFieldName("name");
+    if (name && (inner?.type === "this" || inner?.type === "identifier")) {
+      return `${inner.type === "this" ? "this" : inner.text}.${name.text}`;
+    }
+  }
+  return undefined;
+}
+
 /** R has no import statement at the grammar level — `library(x)`, `require(x)`,
  * and `source("f.R")` are ordinary `call` nodes, indistinguishable from any other
  * call except by their callee name. This is call-SITE pattern matching, a first
@@ -2481,6 +2577,7 @@ function isImport(node: Parser.SyntaxNode, lang: Language): boolean {
   if (lang === "java") return node.type === "import_declaration";
 if (lang === "kotlin") return node.type === "import_header";
   if (lang === "swift") return node.type === "import_declaration";
+  if (lang === "csharp") return node.type === "using_directive";
   // PHP: one edge per imported symbol — the clause leaf inside a (possibly
   // grouped) `use A\B, C\D;` / `use A\{B, C};` declaration.
   if (lang === "php") return node.type === "namespace_use_clause";
@@ -2534,6 +2631,11 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
     // frameworks stay as unresolved (but truthful) import intents.
     return node.namedChildren.find((c) => c.type === "identifier")?.text ?? null;
   }
+  if (lang === "csharp") {
+    // For `using Alias = Namespace.Type`, the final named child is the target;
+    // for ordinary/static usings it is the sole namespace/type child.
+    return node.namedChildren.at(-1)?.text ?? null;
+  }
   const str = node.namedChildren.find((c) => c.type === "string");
   if (!str) return null;
   const frag = str.namedChildren.find((c) => c.type === "string_fragment");
@@ -2558,4 +2660,33 @@ function tsExported(node: Parser.SyntaxNode): boolean {
     p = p.parent;
   }
   return false;
+}
+
+/** C# visibility: explicit public members are exported. Members declared in an
+ * interface are public even though the language forbids an accessibility modifier
+ * on the declaration. */
+function csExported(node: Parser.SyntaxNode, ctx: WalkCtx): boolean {
+  if (ctx.enclosingKind === "interface") return true;
+  return node.namedChildren.some((child) => child.type === "modifier" && child.text === "public");
+}
+
+/** Extract a bare type name from a C# type node. Type arguments, nullable/pointer
+ * wrappers, and qualification do not change the owner name used by the graph. */
+function csTypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node || node.type === "implicit_type") return null;
+  if (node.type === "identifier" || node.type === "predefined_type") return node.text;
+  if (node.type === "generic_name") return node.namedChildren[0]?.text ?? null;
+  if (node.type === "qualified_name" || node.type === "alias_qualified_name") {
+    return csTypeName(node.namedChildren.at(-1));
+  }
+  if (
+    node.type === "nullable_type" ||
+    node.type === "pointer_type" ||
+    node.type === "ref_type" ||
+    node.type === "scoped_type"
+  ) {
+    return csTypeName(node.childForFieldName("type"));
+  }
+  if (node.type === "array_type") return csTypeName(node.childForFieldName("type"));
+  return null;
 }
