@@ -38,6 +38,7 @@ import {
   runWorkspaceCheck,
   runWorkspaceGrep,
   runWorkspaceMap,
+  runWorkspaceSkeleton,
 } from "./graph/workspace-cli.js";
 import { formatInitEpilogue } from "./cli-epilogue.js";
 import { planInit, selectedWrites } from "./hosts/plan.js";
@@ -639,8 +640,12 @@ program
   .action(async (file: string, dirArg: string | undefined, opts: { json?: boolean; refresh?: boolean }) => {
     const dir = noteQuery(queryRoot(dirArg));
     await refreshBefore(dir, opts);
-    const { skeleton, formatSkeleton } = await import("./ask/ask.js");
     const globalOpts = program.opts<{ dir?: string }>();
+    if (readWorkspace(dir, globalOpts.dir)) {
+      runWorkspaceSkeleton(dir, globalOpts.dir, file, { json: opts.json });
+      return;
+    }
+    const { skeleton, formatSkeleton } = await import("./ask/ask.js");
     const r = skeleton(dir, file, { contextDir: globalOpts.dir });
     if (opts.json) console.log(JSON.stringify(r, null, 2));
     else process.stdout.write(formatSkeleton(r));

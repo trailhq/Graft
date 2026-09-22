@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { readWiring, computeStats } from './stats.js';
+import { readWiring, computeStats, computeWorkspaceStats } from './stats.js';
 import { patchStats, releaseLock, resolveContextDir } from './state.js';
 import { graftCliPath } from './paths.js';
 
@@ -19,11 +19,13 @@ function realBuild(dir: string): void {
 export function runSync(dir: string, build: (d: string) => void = realBuild): void {
   try {
     build(dir);
+    // A workspace parent's build writes the graphs into the children, not here (#433).
     const w = readWiring(dir);
-    if (!w) { patchStats(dir, { syncing: false }); return; } // build ran but output unreadable — stay dirty, retry
+    const computed = w ? computeStats(w) : computeWorkspaceStats(dir);
+    if (!computed) { patchStats(dir, { syncing: false }); return; } // build ran but output unreadable — stay dirty, retry
     patchStats(dir, {
       dirty: false, staleCount: 0, syncing: false, syncedAt: new Date().toISOString(),
-      ...computeStats(w),
+      ...computed,
     });
   } catch {
     patchStats(dir, { syncing: false }); // leave dirty=true; retry next turn

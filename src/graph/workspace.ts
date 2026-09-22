@@ -14,7 +14,7 @@
  * are combined by score (see `ask/fuse.ts`). Separate child repositories have
  * no such shared scale, which is exactly the case rank fusion is for.
  * `grep`/`map`/`check`/`callers` run per child and merge, always labeled
- * `<child>/`.
+ * `<child>/`; `skeleton` routes one file to the child that owns it.
  *
  * This module owns the pure/core pieces (the format, its readers/writers, graph
  * loading, and the federated command bodies that return renderable data). The
@@ -39,9 +39,11 @@ import { wiringPath } from "./write.js";
 import type { GraphV1 } from "./types.js";
 import {
   ask,
+  skeleton,
   type AskHit,
   type AskRankingMetadata,
   type AskResult,
+  type SkeletonResult,
 } from "../ask/ask.js";
 import {
   fileFirstRoundRobin,
@@ -692,6 +694,49 @@ export function federateCallers(
   let text = blocks.join("\n\n");
   if (cov) text += `\n\n${cov}`;
   return { text, found: true };
+}
+
+/** The exact prefix `skeleton` puts on its own ambiguity note. */
+const AMBIGUOUS = "ambiguous — matches: ";
+
+/**
+ * `graft skeleton` at the parent (#433). `<child>/path` addresses one child
+ * directly — the shape every federated pointer is printed in, so a path copied
+ * out of `ask` or `callers` output works as-is. A bare path or basename is
+ * looked up in every child and must land in exactly one. The child's own
+ * `skeleton` does the work, so the answer reads exactly as it would from inside
+ * the child; only the file gets its `<child>/` prefix.
+ */
+export function federateSkeleton(root: string, override: string | undefined, file: string): SkeletonResult {
+  const wg = loadWorkspaceGraphs(root, override);
+  const prefixed = (child: string, r: SkeletonResult): SkeletonResult => ({
+    ...r,
+    file: `${child}/${r.file}`,
+    // A within-child "ambiguous" note lists child-relative paths; keep them openable from here.
+    ...(r.note?.startsWith(AMBIGUOUS)
+      ? { note: AMBIGUOUS + r.note.slice(AMBIGUOUS.length).split(", ").map((p) => `${child}/${p}`).join(", ") }
+      : {}),
+  });
+
+  const slash = file.indexOf("/");
+  const head = slash > 0 ? file.slice(0, slash) : "";
+  if (head && wg.missing.includes(head)) {
+    return { file, entries: [], note: `${head}/ has no graph yet — run graft build` };
+  }
+  const direct = head ? wg.loaded.find((c) => c.child === head) : undefined;
+  if (direct) return prefixed(direct.child, skeleton(join(root, direct.child), file.slice(slash + 1)));
+
+  const hits = wg.loaded
+    .map(({ child }) => ({ child, r: skeleton(join(root, child), file) }))
+    .filter(({ r }) => r.entries.length > 0 || r.note?.startsWith(AMBIGUOUS));
+  if (hits.length === 1) return prefixed(hits[0].child, hits[0].r);
+  if (hits.length > 1) {
+    const paths = hits.map(({ child, r }) => `${child}/${r.file}`).sort();
+    return { file, entries: [], note: `${AMBIGUOUS}${paths.join(", ")}` };
+  }
+  const cov = coverageNote(wg);
+  const base = `no definitions indexed for this file in any of the ${wg.loaded.length} workspace repo(s)`;
+  return { file, entries: [], note: cov ? `${base}\n${cov}` : base };
 }
 
 /**

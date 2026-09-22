@@ -98,6 +98,31 @@ test('runSync clears dirty/syncing, recomputes stats, releases lock', () => {
   assert.equal(acquireLock(d), true, 'lock released, so reacquire succeeds');
 });
 
+test('runSync at a workspace parent takes its counts from the children (#433)', () => {
+  // The parent's build writes the graphs into <child>/graft/, never here — so
+  // readWiring(parent) is null and, before this, the sync left dirty set forever
+  // and the bar stuck on "not built" although the build had succeeded.
+  const p = mkdtempSync(join(tmpdir(), 'graft-sync-ws-'));
+  mkdirSync(join(p, 'graft'), { recursive: true });
+  writeFileSync(join(p, 'graft', 'workspace.json'), JSON.stringify({ version: 1, children: ['api', 'web'] }));
+  for (const [child, n] of [['api', 3], ['web', 4]] as const) {
+    mkdirSync(join(p, child, 'graft', '.graph'), { recursive: true });
+    writeFileSync(join(p, child, 'graft', '.graph', 'wiring.json'),
+      JSON.stringify({ meta: { nodeCount: n, edgeCount: n - 1, languages: ['typescript'] }, nodes: [], edges: [] }));
+  }
+  writeStats(p, { ...emptyStats(), dirty: true, syncing: true, staleCount: 1 });
+  acquireLock(p);
+  runSync(p, () => { /* the children are already built above */ });
+  const s = readStats(p)!;
+  assert.equal(s.dirty, false, 'the sync completed, so the parent is no longer dirty');
+  assert.equal(s.syncing, false);
+  assert.equal(s.staleCount, 0);
+  assert.equal(s.nodeCount, 7, 'summed over the children');
+  assert.equal(s.edgeCount, 5);
+  assert.ok(s.syncedAt);
+  assert.equal(acquireLock(p), true, 'lock released');
+});
+
 test("runSync's default build passes --dir <resolved> to graft build when GRAFT_DIR is set", () => {
   const d = mkdtempSync(join(tmpdir(), 'graft-sync-dir-'));
   mkdirSync(join(d, 'elsewhere', '.graph'), { recursive: true });

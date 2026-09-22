@@ -340,3 +340,36 @@ test('an old name dispatches for real, not just in the alias map', async () => {
   assert.equal(check.isError, false);
   assert.ok(!check.text.startsWith('[graft] refreshed'), 'old check name still skips the refresh');
 });
+
+/** A parent with two git children, built through the CLI so the parent gets
+ * workspace.json and each child its own graft/ — the #433 shape. */
+function builtWorkspace(): string {
+  const p = mkdtempSync(join(tmpdir(), 'graft-mcptools-ws-'));
+  for (const [child, file, src] of [
+    ['api', 'src/a.ts', 'export function alphaHandler(): number {\n  return 1;\n}\n'],
+    ['web', 'src/b.ts', 'export function betaHandler(): number {\n  return 2;\n}\n'],
+  ] as const) {
+    mkdirSync(join(p, child, '.git'), { recursive: true });
+    mkdirSync(join(p, child, 'src'), { recursive: true });
+    writeFileSync(join(p, child, file), src);
+  }
+  execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'build', p], { stdio: 'pipe' });
+  return p;
+}
+
+test('graft_file_api at a workspace root routes the file to the child that owns it (#433)', async () => {
+  const p = builtWorkspace();
+  const direct = await callTool(p, 'graft_file_api', { file: 'api/src/a.ts' });
+  assert.equal(direct.isError, false, direct.text);
+  assert.match(direct.text, /graft skeleton — api\/src\/a\.ts/);
+  assert.match(direct.text, /alphaHandler/);
+
+  const bare = await callTool(p, 'graft_file_api', { file: 'b.ts' });
+  assert.equal(bare.isError, false, bare.text);
+  assert.match(bare.text, /graft skeleton — web\/src\/b\.ts/);
+  assert.match(bare.text, /betaHandler/);
+
+  const miss = await callTool(p, 'graft_file_api', { file: 'nope.ts' });
+  assert.equal(miss.isError, true);
+  assert.match(miss.text, /no definitions indexed for this file in any of the 2 workspace repo/);
+});

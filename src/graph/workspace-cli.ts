@@ -9,7 +9,7 @@ import { Graft } from "../engine.js";
 import { contextDirFor, ensureGitignored } from "../context/node-file.js";
 import { patchBuildConfig, type BuildConfig } from "../util/state.js";
 import type { EngineConfig } from "../ai/providers.js";
-import { formatAsk } from "../ask/ask.js";
+import { formatAsk, formatSkeleton } from "../ask/ask.js";
 import type { Direction } from "./traverse.js";
 import {
   federateAsk,
@@ -17,6 +17,7 @@ import {
   federateCheck,
   federateGrep,
   federateMap,
+  federateSkeleton,
   formatGrepResult,
   migrationNote,
   splitWorkspace,
@@ -121,6 +122,17 @@ export function runWorkspaceMap(
   opts: { maxDirs?: number },
 ): void {
   process.stdout.write(federateMap(root, override, { maxDirs: opts.maxDirs }));
+}
+
+export function runWorkspaceSkeleton(
+  root: string,
+  override: string | undefined,
+  file: string,
+  opts: { json?: boolean },
+): void {
+  const r = federateSkeleton(root, override, file);
+  if (opts.json) console.log(JSON.stringify(r, null, 2));
+  else process.stdout.write(formatSkeleton(r));
 }
 
 export async function runWorkspaceCheck(root: string, override?: string): Promise<void> {
