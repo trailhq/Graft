@@ -46,12 +46,20 @@ test("events: a pull request that changed its diff becomes a job", () => {
   assert.equal(fork.job.owner, "NanoNets", "the comment belongs on the BASE repo, not the contributor's copy");
 });
 
+test("events: a merged pull request is still reviewed, so the link survives the merge", () => {
+  // The graph is read most often after the fact, on a PR that already landed.
+  // Skipping closed PRs left every merged comment pointing at a page that could
+  // never be regenerated.
+  const merged = reviewJobFor("pull_request", delivery({ action: "synchronize" }, { state: "closed" }));
+  assert.ok("job" in merged, `a closed PR must still produce a job, got ${JSON.stringify(merged)}`);
+  assert.equal(merged.job.number, 180);
+});
+
 test("events: noise is skipped with a reason", () => {
   const skipped = [
     reviewJobFor("pull_request", delivery({ action: "labeled" })),
     reviewJobFor("pull_request", delivery({ action: "edited" })),
     reviewJobFor("pull_request", delivery({}, { draft: true })),
-    reviewJobFor("pull_request", delivery({}, { state: "closed" })),
     reviewJobFor("issue_comment", delivery()),
     reviewJobFor("ping", {}),
     reviewJobFor("pull_request", delivery({ installation: undefined })),

@@ -40,6 +40,20 @@ const { server, queue } = createApp({
   publicUrl: required("GRAFT_PUBLIC_URL"),
   port,
   concurrency: Number(process.env.GRAFT_CONCURRENCY ?? 2),
+  // Optional, unlike the four above, and deliberately so: point it at a mounted
+  // volume and the pages already linked from pull requests survive a restart;
+  // leave it unset and they do not. Neither is worth refusing to boot over — a
+  // server that will not start reviews nothing at all, which is strictly worse
+  // than one whose old links go stale.
+  pageDir: process.env.GRAFT_PAGE_DIR,
+  // Optional for the same reason as pageDir: unset simply disables
+  // `POST /brain/build`, and a deployment that only reviews pull requests wants
+  // exactly that. The route is the one place the app writes to the platform, so
+  // it stays off until someone deliberately turns it on.
+  brainBuildSecret: process.env.GRAFT_BRAIN_BUILD_SECRET,
+  brainBaseUrl: process.env.GRAFT_BRAIN_URL,
+  publicToken: process.env.GRAFT_PUBLIC_GITHUB_TOKEN || process.env.GITHUB_TOKEN,
+  publicOwner: process.env.GRAFT_PUBLIC_INSTALLATION_OWNER,
 });
 
 /**

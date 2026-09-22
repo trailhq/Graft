@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hasSavingsTally, lastAssistantTurn } from '../src/claude/tally.js';
+import { hasSavingsTally, lastAssistantTurn, lastTurnBilling } from '../src/claude/tally.js';
 import { main } from '../src/claude/hooks.js';
 import { readSession, writeSession } from '../src/claude/state.js';
 
@@ -165,4 +165,88 @@ test('a pre-existing session file with none of these fields still parses', async
   const s = readSession(d, 's1');
   assert.equal(s.savedTokens, 1000, 'the existing counter is preserved');
   assert.equal(s.graftTurns, 1);
+});
+
+/** An assistant entry carrying usage, as Claude Code writes it: one API
+ * response is split across several lines that all repeat the same `message.id`
+ * and the same `usage`. */
+function billed(
+  uuid: string,
+  msgId: string,
+  part: unknown,
+  usage: { input: number; cacheCreate: number; cacheRead: number },
+  model = 'claude-opus-5',
+): string {
+  return JSON.stringify({
+    type: 'assistant',
+    uuid,
+    message: {
+      role: 'assistant',
+      id: msgId,
+      model,
+      content: [part],
+      usage: {
+        input_tokens: usage.input,
+        cache_creation_input_tokens: usage.cacheCreate,
+        cache_read_input_tokens: usage.cacheRead,
+        output_tokens: 100,
+      },
+    },
+  });
+}
+
+test('lastTurnBilling: one API response split across lines is billed once', () => {
+  // The trap this exists for: Claude Code writes a thinking block and a tool_use
+  // block of the SAME response as two entries, each repeating the same usage.
+  // Summing lines would bill this turn twice and halve every dollar figure.
+  const usage = { input: 10, cacheCreate: 1_000, cacheRead: 100_000 };
+  const p = transcript([
+    userPrompt('a question'),
+    billed('a1', 'msg_1', { type: 'thinking', thinking: '...' }, usage),
+    billed('a2', 'msg_1', { type: 'tool_use', name: 'Bash', input: {} }, usage),
+  ]);
+  const b = lastTurnBilling(p)!;
+  assert.equal(b.uuid, 'a2');
+  assert.equal(b.tokens, 101_010, 'the response is counted once, not twice');
+  // 10 fresh + 1,000 written at 1.25x + 100,000 read at 0.1x, at $5/Mtok.
+  assert.equal(b.costMicros, Math.round((10 + 1_250 + 10_000) * 5));
+});
+
+test('lastTurnBilling: distinct responses in one turn are summed', () => {
+  const p = transcript([
+    userPrompt('a question'),
+    billed('a1', 'msg_1', { type: 'text', text: 'first' }, { input: 100, cacheCreate: 0, cacheRead: 0 }),
+    billed('a2', 'msg_2', { type: 'text', text: 'second' }, { input: 200, cacheCreate: 0, cacheRead: 0 }),
+  ]);
+  const b = lastTurnBilling(p)!;
+  assert.equal(b.tokens, 300);
+});
+
+test('lastTurnBilling: the previous turn is not billed again', () => {
+  const p = transcript([
+    userPrompt('older question'),
+    billed('a1', 'msg_1', { type: 'text', text: 'old' }, { input: 9_999, cacheCreate: 0, cacheRead: 0 }),
+    userPrompt('current question'),
+    billed('a2', 'msg_2', { type: 'text', text: 'new' }, { input: 100, cacheCreate: 0, cacheRead: 0 }),
+  ]);
+  assert.equal(lastTurnBilling(p)!.tokens, 100);
+});
+
+test('lastTurnBilling: an unpriced model is left out of the rate entirely', () => {
+  // Not zero-cost — absent. Keeping its tokens in the denominator with no cost
+  // in the numerator would drag the blended rate toward zero and quietly
+  // under-report every saving after it.
+  const p = transcript([
+    userPrompt('a question'),
+    billed('a1', 'msg_1', { type: 'text', text: 'x' }, { input: 500, cacheCreate: 0, cacheRead: 0 }, 'some-future-model'),
+    billed('a2', 'msg_2', { type: 'text', text: 'y' }, { input: 100, cacheCreate: 0, cacheRead: 0 }),
+  ]);
+  assert.equal(lastTurnBilling(p)!.tokens, 100);
+});
+
+test('lastTurnBilling: null when there is nothing to bill', () => {
+  assert.equal(lastTurnBilling(undefined), null, 'a host whose Stop hook names no transcript');
+  assert.equal(lastTurnBilling('/no/such/file.jsonl'), null, 'unreadable');
+  const noUsage = transcript([userPrompt('q'), assistant('a1', 'a reply with no usage recorded')]);
+  assert.equal(lastTurnBilling(noUsage), null, 'entries carrying no usage');
 });

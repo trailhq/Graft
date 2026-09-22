@@ -14,12 +14,10 @@
  */
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { walkDir } from "../ingest/fs.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
-import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
-import { CODE_EXTENSIONS } from "./build.js";
+import { CODE_EXTENSIONS, listContextFiles } from "./build.js";
 import { contextDirFor, readManifest, readNodes } from "./node-file.js";
 
 export interface CheckResult {
@@ -58,15 +56,11 @@ export function checkContext(dir: string, opts: CheckOptions = {}): CheckResult 
   }
 
   // Current code files on disk (same persisted directory/submodule choices
-  // `init` used), so this freshness check never disagrees with buildContext
-  // about what "current" means.
+  // `init` used, including the `--only-dir` whitelist from the fingerprint),
+  // so this freshness check never disagrees with buildContext about what
+  // "current" means.
   const current = new Map<string, string>(); // rel → hash
-  for (const file of walkDir(root, readIncludeDirs(root), {
-    followSubmodules: readFollowSubmodules(root),
-    followNestedRepos: readFollowNestedRepos(root),
-  })) {
-    if (file.startsWith(outDir)) continue;
-    if (!exts.some((e) => file.toLowerCase().endsWith(e))) continue;
+  for (const file of listContextFiles(root, outDir, exts)) {
     try {
       const source = readSourceFile(file);
       if (source === null) continue; // unsupported encoding (e.g. UTF-16BE) → treat as removed below

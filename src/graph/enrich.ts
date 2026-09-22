@@ -19,7 +19,7 @@
  * once, to cut `crux.code` verbatim from the source. `crux.span` is a pointer
  * only and is never used to re-slice.
  */
-import type { CruxSummarizer, NodeCrux, NodeRef } from "../ai/crux.js";
+import { formatCruxMiss, type CruxMissKind, type CruxSummarizer, type NodeCrux, type NodeRef } from "../ai/crux.js";
 import { LlmFailureGate } from "../ai/failure.js";
 import type { Crux, NodeV1 } from "./types.js";
 
@@ -65,9 +65,9 @@ export interface EnrichStats {
   failedFiles: number;
   /** Files never attempted, because {@link EnrichStats.fatal} stopped the pass. */
   skippedFiles: number;
-  /** Set when the pass gave up early: quota/auth rejection, or a run of failures
-   * that says the provider is not going to start working. The reason is written
-   * for a human — it is what `graft build --deep` exits non-zero with. */
+  /** Set when the pass gave up early: quota/auth rejection, or a run of
+   * provider failures. Content-quality misses (#235) count in `failedFiles` but
+   * do not set this. The reason is what `graft build --deep` exits non-zero with. */
   fatal?: string;
 }
 
@@ -168,11 +168,11 @@ export async function enrichGraph(
       return { id: n.id, kind: n.kind, signature: n.signature, startLine, endLine };
     });
 
-    const { results, error } = await collectFileCrux(summarizer, path, source, refs);
+    const { results, error, quality } = await collectFileCrux(summarizer, path, source, refs);
     let fileError = error;
     if (fileError) {
       stats.errors.push(`${path}: ${fileError}`);
-      gate.record(fileError);
+      gate.record(fileError, { quality });
     }
 
     let applied = 0;
@@ -197,9 +197,9 @@ export async function enrichGraph(
     if (!fileError && refs.length > 0 && applied === 0) {
       // collectFileCrux already labels a total miss; this catches "got entries
       // but every summary was blank" so the CLI's #127 degraded-exit path fires.
-      fileError = "model returned no usable symbol summaries";
+      fileError = cruxMissMessage(summarizer, "empty-parsed");
       stats.errors.push(`${path}: ${fileError}`);
-      gate.record(fileError);
+      gate.record(fileError, { quality: true });
     } else if (!fileError) {
       gate.succeeded();
     }
@@ -240,6 +240,11 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+function cruxMissMessage(summarizer: CruxSummarizer, fallback: CruxMissKind): string {
+  const miss = summarizer.lastMiss;
+  return formatCruxMiss(miss?.kind ?? fallback, miss?.finishReason ?? null);
+}
+
 /**
  * Describe every requested definition in a file, re-asking for any the model
  * omits (it sometimes drops entries from a batch). Returns whatever it collected
@@ -250,7 +255,7 @@ async function collectFileCrux(
   path: string,
   source: string,
   refs: NodeRef[],
-): Promise<{ results: Map<string, NodeCrux>; error?: string }> {
+): Promise<{ results: Map<string, NodeCrux>; error?: string; quality?: boolean }> {
   const results = new Map<string, NodeCrux>();
   let missing = refs;
   let error: string | undefined;
@@ -267,9 +272,9 @@ async function collectFileCrux(
   // A total miss used to return `{ results: ∅ }` with no error — enrich left
   // every node `pending`, the CLI exited 0, and `graft check` told the user to
   // re-run `--deep` forever (#172). Surface it as a failure like a thrown error.
+  // Content-quality, not quota: count the file, keep going (#235).
   if (!error && refs.length > 0 && results.size === 0) {
-    error =
-      "model returned no symbol summaries (empty tool response — the provider may ignore forced tool_choice)";
+    return { results, error: cruxMissMessage(summarizer, "empty-toolCalls"), quality: true };
   }
   return { results, error };
 }

@@ -17,7 +17,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import matter from "gray-matter";
 import { contextDirFor } from "../context/node-file.js";
-import { withSavings, savingsFor, SAVINGS_TURN_NUDGE, type Savings } from "../context/savings.js";
+import { withSavings, savingsFor, savingsTurnNudge, type Savings } from "../context/savings.js";
 import { loadGraphCached, loadAskIndexCached } from "../graph/load.js";
 import {
   assertPrefixIndexed,
@@ -48,6 +48,8 @@ import {
 } from "./graphrank.js";
 import { readSourceFile } from "../util/source.js";
 import { counts, tokenize, type AskIndex, type AskIndexDoc } from "./index-file.js";
+import { rulesForPointers, formatRules, type AppliedRule } from "../brain/attach.js";
+import { readLink, readRulesCache } from "../brain/link.js";
 
 export interface AskHit {
   kind: "concept" | "symbol" | "caller" | "callee";
@@ -131,6 +133,11 @@ export interface AskResult {
   scopes?: { federated: string[]; alsoMatched: { scope: string; bestId: string }[] };
   /** @internal Opt-in latent file groups plus the exact pre-file-ranking list. */
   ranking?: AskRankingMetadata;
+  /** Rules from the attached Trail brain that govern the symbols in `hits`.
+   * Absent when the repo has no brain linked, or when none of its rules touch
+   * this answer. Populated in `--source` mode only, alongside `saved`: a pack
+   * the agent does not read the code from has nothing for a rule to sit beside. */
+  rules?: AppliedRule[];
 }
 
 /** First real prose line of a node body (skips headings, markers, blanks). */
@@ -1383,8 +1390,27 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
     // The pack is truly substitutive only in retriever mode (spans inlined), so
     // the "vs reading whole files" estimate is only honest here.
     result.saved = baselineFor(result.hits, corpus.graph);
+    // What the team decided about the code this pack just inlined. Read from the
+    // local cache only — `ask` is on the agent's hot path and must never wait on
+    // the network; `graft brain pull` and `init` are what refresh it.
+    const applied = attachBrainRules(root, result.hits, corpus.graph);
+    if (applied.length) result.rules = applied;
   }
   return result;
+}
+
+/** Rules for this answer's symbols, or [] when the repo has no brain linked,
+ * the cache is missing, or nothing overlaps. Never throws: a broken link must
+ * degrade to the code-only answer graft gave before a brain existed. */
+function attachBrainRules(root: string, hits: AskHit[], graph: GraphV1 | null): AppliedRule[] {
+  try {
+    if (!readLink(root)) return [];
+    const cache = readRulesCache(root);
+    if (!cache?.rules?.length) return [];
+    return rulesForPointers(hits.map((h) => h.pointer), cache.rules, graph);
+  } catch {
+    return [];
+  }
 }
 
 // ── Skeleton view ────────────────────────────────────────────────────────────
@@ -1500,6 +1526,9 @@ export function formatAsk(r: AskResult): string {
     });
     lines.push(...scopeFooterLines(r));
   }
+  // Before `body` is joined, so the rules text is counted in the savings line
+  // below rather than claimed as free.
+  if (r.rules?.length) lines.push(...formatRules(r.rules));
   const body = lines.join("\n").trimEnd();
   const savings = askSavingsLine(r, body);
   return (savings ? `${savings}\n\n${body}` : body) + escalationNudge(r) + "\n";
@@ -1535,7 +1564,7 @@ function askSavingsLine(r: AskResult, body: string): string {
     `[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%) — this pack ≈ ` +
     `${pack.toLocaleString()} tok vs reading the ${r.saved.files} source file(s) whole ≈ ` +
     `${base.toLocaleString()} tok. Estimate (baseline = those files read in full).` +
-    SAVINGS_TURN_NUDGE
+    savingsTurnNudge(saved)
   );
 }
 

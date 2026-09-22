@@ -8,8 +8,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { nearestGraftRoot, hasGraftIndex } from "../src/graph/root.js";
 import { tmpRepo } from "./helpers.js";
 
@@ -71,4 +71,17 @@ test("an explicit --dir override short-circuits the walk", () => {
   // handed, so every ancestor would look equally indexed — the walk can only
   // mislead here.
   assert.deepEqual(nearestGraftRoot(deep, join(repo, "graft")), { root: deep, levels: 0 });
+});
+
+test("a symlink to a built repo is a graft root at the symlink path, not the physical target (#143)", () => {
+  // Query-root walking is not the place we unwrap a build input. existsSync
+  // follows the link, so the index is visible, but the returned root stays the
+  // caller-facing path — the same stability walkDir keeps for emitted files.
+  const repo = builtRepo(tmpRepo("root-symlink-real"));
+  const link = join(tmpRepo("root-symlink-wrap"), "via-link");
+  symlinkSync(repo, link, process.platform === "win32" ? "junction" : "dir");
+
+  assert.ok(hasGraftIndex(link), "the wiring files are visible through the symlink");
+  assert.deepEqual(nearestGraftRoot(link), { root: resolve(link), levels: 0 });
+  assert.notEqual(resolve(link), repo);
 });

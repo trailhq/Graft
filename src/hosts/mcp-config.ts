@@ -12,12 +12,10 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { PlannedWrite } from './plan.js';
+import { readJsonObject, type ConfigWrite } from './config-write.js';
 
-export interface McpWrite {
-  id: string;
-  path: string;
-  action: 'created' | 'updated' | 'unchanged' | 'skipped-unparseable';
-}
+/** MCP registration reports the same write-result record every installer does. */
+export type McpWrite = ConfigWrite;
 
 /** A planned MCP write, plus the detail needed to actually perform it. */
 export interface McpTarget extends PlannedWrite {
@@ -78,15 +76,9 @@ function dirExists(p: string): boolean {
 }
 
 export function mergeJsonKey(id: string, path: string, topKey: string, entry: object): McpWrite {
-  let root: Record<string, any> = {};
-  const existed = existsSync(path);
-  if (existed) {
-    try {
-      root = JSON.parse(readFileSync(path, 'utf8'));
-    } catch {
-      return { id, path, action: 'skipped-unparseable' };
-    }
-  }
+  const loaded = readJsonObject(path);
+  if (loaded === 'unparseable') return { id, path, action: 'skipped-unparseable' };
+  const { root, existed } = loaded;
   const bucket = (root[topKey] ??= {});
   if (typeof bucket !== 'object' || bucket === null || Array.isArray(bucket)) {
     return { id, path, action: 'skipped-unparseable' };

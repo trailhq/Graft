@@ -206,7 +206,7 @@ test('planRetract is pure — it reports without touching anything', () => {
 
 test('a full init is fully retractable, and retraction is idempotent', () => {
   const d = fresh();
-  runInit(d, { build: false });
+  runInit(d, { build: false, home: fresh() });
   runHostsInit(d, { agents: ['cursor', 'agents'], home: d, global: false });
 
   const first = changed(runRetract(d, { apply: true, global: false }));

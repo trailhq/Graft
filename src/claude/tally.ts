@@ -5,7 +5,7 @@
  * `[graft] tokens saved ≈ N` footer the PostToolUse accumulator swept up. That
  * number is real whether or not anyone sees it. This module measures the other
  * half: whether the reply the user read closed with the one-line tally that
- * SKILL.md and `SAVINGS_TURN_NUDGE` (context/savings.ts) both ask for. A turn
+ * SKILL.md and `savingsTurnNudge` (context/savings.ts) both ask for. A turn
  * that saved 20k tokens in silence is a turn where the product did its job and
  * got no credit for it, and the two are indistinguishable in the numbers we
  * ship today.
@@ -21,6 +21,7 @@
  * hook that read the whole file would get slower every turn for no extra signal.
  */
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import { turnInputCostMicros, turnInputTokens } from '../context/price.js';
 
 /**
  * How much of the transcript's end to read. Comfortably larger than any single
@@ -51,6 +52,17 @@ export interface AssistantTurn {
   uuid: string;
   /** Every text block the agent emitted since the last user prompt, joined. */
   text: string;
+}
+
+/** What the last turn's input tokens cost, alongside how many there were. The
+ * pair is what a blended rate is made of; neither half means much alone. */
+export interface TurnBilling {
+  /** `uuid` of the last assistant entry, so a repeated Stop can't bill a turn twice. */
+  uuid: string;
+  /** Micro-dollars this turn's input tokens cost, cache multipliers applied. */
+  costMicros: number;
+  /** Input tokens billed this turn, cached and fresh alike. */
+  tokens: number;
 }
 
 /** Read the last {@link TAIL_BYTES} of a file as utf8, dropping the leading
@@ -128,4 +140,65 @@ export function lastAssistantTurn(transcriptPath: unknown): AssistantTurn | null
   }
   if (uuid === null || parts.length === 0) return null;
   return { uuid, text: parts.join('\n') };
+}
+
+/**
+ * What the turn the transcript ends on cost in input tokens — the measured
+ * half of the dollar figure the statusline and the turn nudge report.
+ *
+ * Costed per API response, not per turn, so a turn that switched models is
+ * priced correctly rather than labelled with whichever model happened to go
+ * last. Responses are deduped by `message.id`: one response is written to the
+ * transcript as several entries (a `thinking` block and a `tool_use` block land
+ * on their own lines) and every one of them repeats the same `usage`, so
+ * summing the lines would bill the turn two or three times over.
+ *
+ * Null when there is nothing to bill — no transcript path (a host whose Stop
+ * hook names none), an unreadable file, a turn whose entries carry no `usage`,
+ * or a model with no price in {@link inputUsdPerMtok}. As everywhere in this
+ * file, null means "not observed", never "zero".
+ */
+export function lastTurnBilling(transcriptPath: unknown): TurnBilling | null {
+  if (typeof transcriptPath !== 'string' || !transcriptPath) return null;
+  const tail = readTail(transcriptPath);
+  if (!tail) return null;
+
+  const entries: any[] = [];
+  for (const line of tail.split('\n')) {
+    if (!line.trim()) continue;
+    try { entries.push(JSON.parse(line)); } catch { /* clipped or partial line */ }
+  }
+
+  const seen = new Set<string>();
+  let uuid: string | null = null;
+  let costMicros = 0;
+  let tokens = 0;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e?.isSidechain) continue;
+    if (isUserPrompt(e)) break;
+    if (e?.type !== 'assistant') continue;
+    if (uuid === null && typeof e?.uuid === 'string') uuid = e.uuid;
+    const msg = e?.message;
+    const id = msg?.id;
+    if (typeof id !== 'string' || seen.has(id)) continue;
+    const usage = msg?.usage;
+    if (!usage) continue;
+    seen.add(id);
+    const turn = {
+      model: String(msg?.model ?? ''),
+      input: Number(usage.input_tokens) || 0,
+      cacheCreate: Number(usage.cache_creation_input_tokens) || 0,
+      cacheRead: Number(usage.cache_read_input_tokens) || 0,
+    };
+    const micros = turnInputCostMicros(turn);
+    // An unpriced model contributes neither cost nor tokens: leaving its tokens
+    // in the denominator alone would drag the blended rate toward zero and
+    // quietly under-report every saving after it.
+    if (micros === null) continue;
+    costMicros += micros;
+    tokens += turnInputTokens(turn);
+  }
+  if (uuid === null || tokens === 0) return null;
+  return { uuid, costMicros, tokens };
 }

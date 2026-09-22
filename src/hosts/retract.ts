@@ -27,10 +27,11 @@ import { readFileSync, writeFileSync, existsSync, rmSync, rmdirSync, statSync, r
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { HOSTS } from './registry.js';
-import { START, END } from './sections.js';
+import { ALL_MARKERS, type Markers } from './sections.js';
 import { mcpTargets, stripTomlSection } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
 import { antigravitySkillTargets } from './antigravity.js';
+import { claudeGlobalTargets } from './claude-global.js';
 import { claudeTargets } from '../claude/init.js';
 import { isGraftAllowEntry, isGraftFooterRegex } from '../claude/settings-merge.js';
 import type { WriteScope } from './plan.js';
@@ -129,19 +130,27 @@ function pruneEmptyDirs(dir: string): void {
  * blank line, so a file that had prose either side of the block reads exactly
  * as it did before graft appended to it.
  */
-function stripSection(path: string, apply: boolean): RetractAction {
+function stripSection(path: string, apply: boolean, markers: Markers[] = ALL_MARKERS): RetractAction {
   if (!existsSync(path)) return 'absent';
   const text = readFileSync(path, 'utf8');
-  if (!text.includes(START)) return 'absent';
+  // Every region graft may own, not just the instruction block. A file can hold
+  // both the instructions and a brain's rules, and leaving one behind would
+  // strand rules in a repo the user has uninstalled graft from.
+  if (!markers.some((m) => text.includes(m.start))) return 'absent';
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
   const lines = text.split(/\r\n|\n/);
   const out: string[] = [];
-  let inside = false;
+  let closing: string | null = null;
   let found = false;
   for (const line of lines) {
     const t = line.trim();
-    if (!inside && t === START) { inside = true; found = true; continue; }
-    if (inside) { if (t === END) inside = false; continue; }
+    if (closing === null) {
+      const open = markers.find((m) => m.start === t);
+      if (open) { closing = open.end; found = true; continue; }
+    } else {
+      if (t === closing) closing = null;
+      continue;
+    }
     out.push(line);
   }
   if (!found) return 'absent';
@@ -364,7 +373,10 @@ function targets(repo: string, opts: RetractOpts): Target[] {
     if (exclude.has(host.id)) keptPaths.add(join(repo, host.relPath));
   }
   for (const t of mcpTargets(repo, [...exclude], { home })) keptPaths.add(t.path);
-  if (exclude.has('claude')) for (const t of claudeTargets(repo)) keptPaths.add(t.path);
+  if (exclude.has('claude')) {
+    for (const t of claudeTargets(repo)) keptPaths.add(t.path);
+    for (const t of claudeGlobalTargets(home)) keptPaths.add(t.path);
+  }
   if (exclude.has('agents')) for (const t of hookTargets(home)) keptPaths.add(t.path);
   if (exclude.has('antigravity')) for (const t of antigravitySkillTargets(home)) keptPaths.add(t.path);
 
@@ -420,8 +432,17 @@ function targets(repo: string, opts: RetractOpts): Target[] {
     ] as Target[]) add(t);
   }
 
-  // 4. Global: Codex's hook shim + entries, and Antigravity's shared skill.
+  // 4. Global: Claude Code's user-level copy, Codex's hook shim + entries, and
+  //    Antigravity's shared skill.
   if (opts.global !== false) {
+    if (!exclude.has('claude')) {
+      const [shim, settings, mcp] = claudeGlobalTargets(home);
+      for (const t of [
+        { hostId: 'claude', path: shim.path, what: shim.what, scope: 'global', run: (a) => removeFile(shim.path, a) },
+        { hostId: 'claude', path: settings.path, what: settings.what, scope: 'global', run: (a) => stripClaudeSettings(settings.path, a) },
+        { hostId: 'claude', path: mcp.path, what: mcp.what, scope: 'global', run: (a) => removeJsonKey(mcp.path, 'mcpServers', a) },
+      ] as Target[]) add(t);
+    }
     if (!exclude.has('agents')) {
       for (const t of hookTargets(home)) {
         add({

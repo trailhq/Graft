@@ -3,17 +3,12 @@
  * PostToolUse semantics. Writes the shared hook shim and one PostToolUse
  * entry that runs post-edit + background sync after every file edit.
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { writeFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { hooksShim } from '../claude/shim-template.js';
 import { claudeDistDir } from '../claude/paths.js';
 import type { PlannedWrite } from './plan.js';
-
-export interface HookWrite {
-  id: string;
-  path: string;
-  action: 'created' | 'updated' | 'unchanged' | 'skipped-unparseable';
-}
+import { writeOwned, isGraftEntry, readJsonObject, type ConfigWrite } from './config-write.js';
 
 function dirExists(p: string): boolean {
   try { return statSync(p).isDirectory(); } catch { return false; }
@@ -42,22 +37,6 @@ export function hookTargets(home: string): PlannedWrite[] {
   ];
 }
 
-function writeOwned(id: string, path: string, content: string, mode?: number): HookWrite {
-  const existed = existsSync(path);
-  if (existed && readFileSync(path, 'utf8') === content) {
-    if (mode !== undefined && (statSync(path).mode & 0o777) !== mode) chmodSync(path, mode);
-    return { id, path, action: 'unchanged' };
-  }
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, content);
-  if (mode !== undefined) chmodSync(path, mode);
-  return { id, path, action: existed ? 'updated' : 'created' };
-}
-
-function isGraftEntry(entry: unknown): boolean {
-  return JSON.stringify(entry).includes('graft-hooks.cjs');
-}
-
 /**
  * The graft hook entries Codex should carry, mirroring the Claude Code set:
  *   - SessionStart → orientation from `graft/INDEX.md`
@@ -79,21 +58,18 @@ function desiredEntries(): DesiredEntry[] {
   ];
 }
 
-export function installCodexHooks(home: string): HookWrite[] {
+export function installCodexHooks(home: string): ConfigWrite[] {
   const targets = hookTargets(home);
   if (targets.length === 0) return [];
 
   const shimPath = targets[0].path;
   const shimWrite = writeOwned('codex-hook-shim', shimPath, hooksShim(claudeDistDir()), 0o755);
-  const skipped: HookWrite = { id: 'codex-hooks', path: targets[1].path, action: 'skipped-unparseable' };
-
   const cfgPath = targets[1].path;
-  let root: Record<string, any> = {};
-  const existed = existsSync(cfgPath);
-  if (existed) {
-    try { root = JSON.parse(readFileSync(cfgPath, 'utf8')); } catch { return [shimWrite, skipped]; }
-  }
-  if (typeof root !== 'object' || root === null || Array.isArray(root)) return [shimWrite, skipped];
+  const skipped: ConfigWrite = { id: 'codex-hooks', path: cfgPath, action: 'skipped-unparseable' };
+
+  const loaded = readJsonObject(cfgPath);
+  if (loaded === 'unparseable') return [shimWrite, skipped];
+  const { root, existed } = loaded;
   const before = JSON.stringify(root);
   const hooks = (root.hooks ??= {});
   if (typeof hooks !== 'object' || hooks === null || Array.isArray(hooks)) return [shimWrite, skipped];

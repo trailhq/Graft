@@ -16,6 +16,12 @@ Nothing is ever sent from a command you run. Events are appended to a local file
 and a detached background process posts them at most once a day, so no `graft
 ask` ever waits on the network.
 
+The one exception is the `install` event below, which the npm postinstall hook
+records and hands to that same detached process immediately — an install that
+never runs a command would otherwise never reach a flush, and "installed and
+never used" is a number we need to see. `npm install` itself still waits on
+nothing: the child is detached and its output discarded.
+
 ## What is sent
 
 Every event carries only these common properties:
@@ -34,11 +40,14 @@ The events:
 
 | Event | Extra properties | When |
 | --- | --- | --- |
-| `first_run` | — | Once, the first time graft runs on a machine |
+| `install` | `global` (`true` for `npm i -g`, `false` for a project dependency) | The npm postinstall hook runs — once per machine per version |
+| `first_run` | — | Once, the first time a graft command runs on a machine |
 | `init_completed` | `agents` (the ids you selected, sorted), `consent` | `graft init` finishes |
 | `build_completed` | `files_bucket`, `langs`, `mode` (`fast`/`deep`), `duration_bucket`, `incremental` | A build succeeds |
 | `build_failed` | `stage`, `code` — both fixed enums | A build throws |
 | `query` | `command`, `surface` (`cli`/`mcp`/`hook`), `hit` (`ask` only) | Any query command |
+| `brain_signup_opened` | — | `graft brain push` on a repo with no brain opens your browser to make one |
+| `brain_signup_settled` | `outcome` (`linked`/`timed_out`/`no_tty`/`bad_callback`), `duration_bucket` | That handoff ends, one way or the other |
 | `session_summary` | `graft_reads_bucket`, `source_reads_bucket`, `saved_tokens_bucket`, `graft_turns_bucket`, `reported_turns_bucket` | Once, after an agent session ends |
 
 Two rules govern every value above, and both are enforced in code rather than by

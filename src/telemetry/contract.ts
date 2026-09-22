@@ -30,7 +30,16 @@
  * centrally by `track()` and are deliberately not repeated per event.
  */
 export const EVENTS: Record<string, ReadonlySet<string>> = {
-  /** Once per machine, when the install id is first minted. The denominator. */
+  /** Once per machine per version, from the npm postinstall hook. The real
+   *  denominator: a machine that installs graft and never runs a command emits
+   *  this event and no other, so it is the only place the "installed, never
+   *  used" leak is visible at all. Version-scoped rather than once-ever so an
+   *  upgrade counts; distinct install ids still give unique machines.
+   *  `global` separates `npm i -g graft` from a project dependency, which is
+   *  roughly the difference between a person and a lockfile. */
+  install: new Set<string>(['global']),
+  /** Once per machine, the first time a command actually runs. Paired with
+   *  `install`, the gap between the two is the top of the funnel. */
   first_run: new Set<string>(),
   /** `graft init` completed. Tells us which agents people actually wire, and
    *  how many decline telemetry at the picker. */
@@ -42,6 +51,14 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
   build_failed: new Set<string>(['stage', 'code']),
   /** One query, from any surface. The DAU backbone and the dead-command detector. */
   query: new Set<string>(['command', 'surface', 'hit']),
+  /** `graft brain push` in a repo with no brain, sending the user to Trail to
+   *  make one. Queued the moment the link is printed, so a signup somebody
+   *  walked away from is still counted — the settle below never fires for those,
+   *  and abandonment is exactly the thing a terminal handoff loses silently. */
+  brain_signup_opened: new Set<string>(),
+  /** That handoff reaching an end. `outcome` is a closed set, so the reason a
+   *  signup failed travels as a category and never as the error's own words. */
+  brain_signup_settled: new Set<string>(['outcome', 'duration_bucket']),
   /** One closed agent session, summarised. `graft_reads` vs `source_reads` is
    *  the single number that says whether an agent prefers graft to grep; the two
    *  `*_turns` buckets are the follow-up question — of the turns that used graft,
@@ -88,6 +105,19 @@ export type TrackedCommand = (typeof TRACKED_COMMANDS)[number];
 export function isTrackedCommand(name: string): name is TrackedCommand {
   return (TRACKED_COMMANDS as readonly string[]).includes(name);
 }
+
+/**
+ * How a `graft brain push` signup ended.
+ *
+ * Four categories and nothing else, because the alternative — the error string
+ * the CLI already prints — carries a repo slug and a URL. `timed_out` and
+ * `no_tty` are deliberately apart: one is a person who opened the browser and
+ * did not finish, the other is a machine that was never able to open one, and
+ * treating them alike would read as a product problem where there is only a
+ * remote shell.
+ */
+export const BRAIN_SIGNUP_OUTCOMES = ['linked', 'timed_out', 'no_tty', 'bad_callback'] as const;
+export type BrainSignupOutcome = (typeof BRAIN_SIGNUP_OUTCOMES)[number];
 
 /** Where a failing build died. Coarse on purpose: enough to route a bug, not
  *  enough to describe anyone's repo. */

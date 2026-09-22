@@ -5,6 +5,8 @@
 import { createInterface } from 'node:readline';
 import { TOOLS, callTool } from './tools.js';
 import { mcpInstructions } from './instructions.js';
+import { hasGraftIndex } from '../graph/root.js';
+import { mainWorktreeRoot } from '../graph/seed.js';
 import { runUpkeep } from '../upkeep-run.js';
 import { runningVersion } from '../upkeep.js';
 import { maybeFlushInBackground, track } from '../telemetry/index.js';
@@ -34,6 +36,31 @@ function reply(id: unknown, result: object): void {
 
 function replyError(id: unknown, code: number, message: string): void {
   send({ jsonrpc: '2.0', id, error: { code, message } });
+}
+
+/**
+ * Which tools this server admits to having.
+ *
+ * `hosts/claude-global.ts` registers graft at the *user* MCP scope, which starts this
+ * server in every project the user opens — including ones that never asked for graft.
+ * Six tool schemas is real context, charged on every turn of every session, and in a
+ * repo with no graph every one of them can only answer "run graft build". So a repo
+ * that never invited graft is told there is nothing to call.
+ *
+ * The parent-checkout clause is not an optimization, it is the case the global
+ * registration exists for: a fresh `git worktree add` has no `graft/` of its own
+ * (it's gitignored, so git never checks it out) and gets one from its parent on the
+ * first query — see graph/seed.ts. Gating on this tree alone would hide graft in
+ * precisely the worktree the user is trying to work in, which is the bug, inverted.
+ *
+ * A `--dir` override is an explicit "the graph is over there", so it always
+ * advertises without a probe.
+ */
+function advertised(root: string, dirOverride?: string): typeof TOOLS {
+  if (dirOverride !== undefined) return TOOLS;
+  if (hasGraftIndex(root)) return TOOLS;
+  const main = mainWorktreeRoot(root);
+  return main && hasGraftIndex(main) ? TOOLS : [];
 }
 
 /**
@@ -88,11 +115,11 @@ export function startMcpServer(root: string, dirOverride?: string, version = '0'
       case 'ping':
         if (!isNotification) reply(id, {});
         return;
-      case 'tools/list':
-        if (!isNotification) {
-          reply(id, { tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) });
-        }
+      case 'tools/list': {
+        if (isNotification) return;
+        reply(id, { tools: advertised(root, dirOverride).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) });
         return;
+      }
       case 'tools/call': {
         if (isNotification) return;
         const name = String(params?.name ?? '');

@@ -4,8 +4,10 @@
  * pre-query auto-refresh can take the same lock; they are re-exported here so
  * every existing import path keeps working.
  */
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { cacheDir, readJson, writeJsonAtomic } from '../util/state.js';
+import type { AgentHost } from '../telemetry/contract.js';
 
 export {
   LOCK_STALE_MS,
@@ -49,18 +51,49 @@ export interface SessionState {
   /** `uuid` of the last assistant reply already examined, so a Stop that fires
    * without new prose (or fires twice) can't count one reply as two turns. */
   lastTallyUuid?: string;
+  /** Running micro-dollar cost of the input tokens this session has been billed
+   * for, and the tokens that bought. Their ratio is the blended price of one
+   * input token here — model and cache-hit ratio already folded in — which is
+   * what turns `savedTokens` into a dollar figure. Stored as the pair rather
+   * than the ratio so the rate re-blends as the session's cache warms rather
+   * than freezing at whatever turn one happened to pay. Optional: absent on a
+   * host that exposes no transcript, and on turn one of every session. */
+  inputCostMicros?: number;
+  inputTokensBilled?: number;
+  /** `uuid` of the last assistant entry already billed, so a duplicate Stop
+   * can't charge one turn twice. Separate from `lastTallyUuid` because the two
+   * are sampled on different turns: the tally only on graft turns, the cost on
+   * every one. */
+  lastBillingUuid?: string;
   /** Set once this session has been rolled up into a `session_summary`
    * telemetry event, so a resumed or long-lived session is counted once.
    * A flag rather than deleting the file: the file still holds `lastQuery` and
    * `injectedPointers`, which a resumed session needs. */
   summarized?: boolean;
+  /** Which host recorded this session, stamped on the first tool use. Lets the
+   * `session_summary` be attributed correctly even when Claude Code's idle sweep
+   * is what finally flushes a Cursor session. Optional: files written before
+   * host-stamping (or an empty session never touched by a tool) fall back to the
+   * flushing host. */
+  host?: AgentHost;
 }
 
 function emptySession(): SessionState {
   return { lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, savedTokens: 0, injectedPointers: [], nudges: 0 };
 }
 
-function sessionPath(d: string, id: string): string { return join(cacheDir(d), 'session', `${id}.json`); }
+/** The per-repo session directory holding one `<id>.json` per agent session. */
+export function sessionDir(d: string): string { return join(cacheDir(d), 'session'); }
+
+function sessionPath(d: string, id: string): string { return join(sessionDir(d), `${id}.json`); }
+
+/** Every session id with a file on disk, or `[]` when none exist (never throws).
+ *  Shared by the telemetry rollup and `graft stats` so they agree on the set. */
+export function listSessionIds(d: string): string[] {
+  try {
+    return readdirSync(sessionDir(d)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length));
+  } catch { return []; }
+}
 
 export function readSession(d: string, id: string): SessionState {
   return readJson<SessionState>(sessionPath(d, id)) ?? emptySession();

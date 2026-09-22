@@ -1,6 +1,8 @@
 import { mkdirSync, writeFileSync, readFileSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { installClaudeGlobal, type GlobalWrite } from '../hosts/claude-global.js';
 import { mergeGraftSettings } from './settings-merge.js';
 import { statuslineShim, hooksShim } from './shim-template.js';
 import { skillTemplate } from './skill-template.js';
@@ -52,11 +54,16 @@ export interface InitResult {
   skill: string;
   /** the `.mcp.json` write registering the graft MCP server for Claude Code. */
   mcp: McpWrite;
+  /** the user-level writes under `~/.claude`, empty when `global: false`. */
+  global: GlobalWrite[];
   warnings: string[];
   built: boolean;
 }
 
-export function runInit(dir: string, opts: { build?: boolean; cliPath?: string } = {}): InitResult {
+export function runInit(
+  dir: string,
+  opts: { build?: boolean; cliPath?: string; statusline?: boolean; global?: boolean; home?: string } = {},
+): InitResult {
   // Same list `--dry-run` and the picker report, so the two can't drift apart.
   const [settings, statusline, hooks, skill, mcpTarget] = claudeTargets(dir).map((t) => t.path);
 
@@ -65,7 +72,7 @@ export function runInit(dir: string, opts: { build?: boolean; cliPath?: string }
   const settingsPath = settings;
   let existing: Record<string, any> = {};
   try { existing = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch { /* none/invalid → start fresh */ }
-  const { merged, warnings } = mergeGraftSettings(existing);
+  const { merged, warnings } = mergeGraftSettings(existing, { statusline: opts.statusline });
   writeFileSync(settingsPath, `${JSON.stringify(merged, null, 2)}\n`);
 
   const sl = statusline;
@@ -85,6 +92,13 @@ export function runInit(dir: string, opts: { build?: boolean; cliPath?: string }
   // other hosts use (existing servers preserved; unparseable files skipped).
   const mcp = mergeJsonKey('claude', mcpTarget, 'mcpServers', serverEntry());
 
+  // The same wiring again, one level up in `~/.claude`, because everything above
+  // this line can be erased by a `.gitignore` and lost to `git worktree add`. See
+  // hosts/claude-global.ts for the failure that motivates it. Gated on the same
+  // flag `registerMcpConfigs` uses, so `--no-global` still means "nothing outside
+  // this repo".
+  const global = opts.global === false ? [] : installClaudeGlobal(opts.home ?? homedir());
+
   const built = buildGraphIfMissing(dir, opts);
-  return { settingsPath, shims: [sl, hk], skill: skillPath, mcp, warnings, built };
+  return { settingsPath, shims: [sl, hk], skill: skillPath, mcp, global, warnings, built };
 }

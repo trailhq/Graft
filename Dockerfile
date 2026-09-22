@@ -6,9 +6,16 @@
 #
 # Two constraints shape the stages, and both were found the hard way:
 #
-#  - `npm ci` runs this package's `prepare` script, which IS the build. So the
-#    sources have to be present before the install, not after it — a manifests-
-#    only copy fails with "The specified path does not exist: 'tsconfig.json'".
+#  - `npm ci` runs this package's `prepare` script, which IS the build, so a
+#    manifests-only copy fails with "The specified path does not exist:
+#    'tsconfig.json'". Copying the sources first fixes that and costs a full
+#    reinstall on every source change — nine tree-sitter grammars rebuilt from
+#    source through node-gyp, minutes of it, on a one-line edit. So the install
+#    layer drops OUR prepare (npm pkg delete) and keeps every dependency's own
+#    install script, which is what compiles those grammars. Then the sources
+#    arrive, restoring the real package.json, and the build runs explicitly.
+#    Unchanged dependencies now mean a cached install and a deploy that is just
+#    a tsc.
 #  - The runtime cannot reinstall. `npm ci --omit=dev` would run `prepare` again
 #    without tsc present, and `--ignore-scripts` would skip the native builds
 #    tree-sitter needs. So the compiled node_modules is carried over from the
@@ -22,8 +29,13 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json ./
+# Both of this package's own lifecycle scripts want the sources, which are not
+# here yet. Dependencies' scripts are untouched — those are the node-gyp builds
+# worth caching.
+RUN npm pkg delete scripts.prepare scripts.postinstall && npm ci
 COPY . .
-RUN npm ci
+RUN node scripts/postinstall.mjs && npm run prepare
 
 # node 22, not 20: commander@15 declares `node >=22.12`, and running under 20
 # left `npm ci` warning EBADENGINE on every build. The runtime base must match
@@ -44,10 +56,19 @@ COPY --from=build /app/dist ./dist
 # --ignore-scripts stops `prepare` from trying to rebuild without tsc.
 RUN npm prune --omit=dev --ignore-scripts && npm cache clean --force
 
+# The page store's directory exists in the image, owned by node, for one reason:
+# Docker initialises a fresh named volume from the mountpoint it covers, so a
+# `-v graft-pages:/var/lib/graft/pages` over a path that did NOT exist arrives
+# root-owned and the App silently cannot write to it. Unmounted this is still
+# worth having — `docker restart` keeps the container's filesystem, so the links
+# already posted to pull requests survive that much on their own.
+RUN mkdir -p /var/lib/graft/pages && chown node:node /var/lib/graft/pages
+
 # Never root: this process handles untrusted source and has no reason to be able
 # to write outside its own tree.
 USER node
 ENV PORT=3000
+ENV GRAFT_PAGE_DIR=/var/lib/graft/pages
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

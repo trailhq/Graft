@@ -194,10 +194,21 @@ test('formatPlan separates repo writes from machine-wide ones', () => {
 });
 
 test('formatPlan omits the machine-wide section when there is nothing global', () => {
+  // Cursor, not Claude Code: the claude layer now always carries three writes under
+  // `~/.claude` (src/hosts/claude-global.ts), so it can no longer stand in for a
+  // repo-only selection. Cursor is one — `.cursor/rules/` plus `.cursor/mcp.json`.
   const repo = fresh(); const home = fullHome();
-  const text = formatPlan(planInit(repo, { home }), ['claude'], repo, home, false);
+  const text = formatPlan(planInit(repo, { home }), ['cursor'], repo, home, false);
   assert.doesNotMatch(text, /affects ALL repos/);
   assert.doesNotMatch(text, /--no-global/);
+});
+
+test('formatPlan surfaces the claude layer\'s ~ writes as machine-wide', () => {
+  const repo = fresh(); const home = fullHome();
+  const text = formatPlan(planInit(repo, { home }), ['claude'], repo, home, false);
+  assert.match(text, /affects ALL repos/);
+  assert.match(text, /--no-global/);
+  assert.match(text, /\.claude\.json/);
 });
 
 test('formatPlan says so when nothing is selected', () => {

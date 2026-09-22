@@ -11,6 +11,7 @@ import { graftCliPath } from './claude/paths.js';
 import {
   formatUpdateNudge,
   formatWiringRefresh,
+  maybeRefreshBrainRules,
   maybeRefreshInBackground,
   readUpdateCache,
   reconcileWiring,
@@ -39,7 +40,11 @@ export interface UpkeepResult {
  * `opts.global`/`opts.hooks`, replayed from the stamp.
  */
 function rewriteWiring(repo: string, hosts: string[], opts: WiringOpts): void {
-  if (hosts.includes('claude')) runInit(repo, { build: false, cliPath: graftCliPath() });
+  // `opts.global` reaches the claude layer for the same reason `opts.statusline` does:
+  // its `~/.claude` writes (hosts/claude-global.ts) are out-of-repo, and a user who
+  // declined those at init time must keep declining them on every replay.
+  if (hosts.includes('claude'))
+    runInit(repo, { build: false, cliPath: graftCliPath(), statusline: opts.statusline, global: opts.global });
   const others = hosts.filter((h) => h !== 'claude');
   if (others.length)
     runHostsInit(repo, { agents: others, global: opts.global, mcp: opts.mcp, hooks: opts.hooks });
@@ -62,6 +67,11 @@ export function runUpkeep(
     const refreshLine = formatWiringRefresh(refreshed);
     if (refreshLine) lines.push(refreshLine);
   } catch { /* fail-soft: wiring refresh is never worth breaking a session for */ }
+  try {
+    // Rules the attached brain has gained since the last pull. Detached, so it
+    // never delays the session it runs in.
+    if (opts.background !== false) maybeRefreshBrainRules(repo);
+  } catch { /* same */ }
   try {
     if (opts.background !== false) maybeRefreshInBackground(opts.home);
     const nudge = formatUpdateNudge(current, readUpdateCache(opts.home)?.latest);

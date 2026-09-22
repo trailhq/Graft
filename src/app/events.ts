@@ -45,6 +45,13 @@ const ACTIONS = new Set(["opened", "synchronize", "reopened", "ready_for_review"
  * a bot commenting on every push to one is the fastest way to be uninstalled.
  * `ready_for_review` is in the accepted set so the comment appears the moment the
  * author asks for eyes.
+ *
+ * A CLOSED pull request is not skipped. The graph is most useful to whoever reads
+ * the PR later, and a merged PR is exactly what gets read — so the comment has to
+ * keep working after the merge. This costs nothing on live traffic: none of the
+ * four accepted actions fire on an already-merged PR, so in practice this only
+ * admits a `synchronize` that raced a merge, and a deliberate re-delivery. The
+ * accepted-action set, not the PR state, is what bounds the work.
  */
 export function reviewJobFor(event: string, payload: unknown): { job: ReviewJob } | { skip: string } {
   if (event === "ping") return { skip: "ping" };
@@ -66,7 +73,6 @@ export function reviewJobFor(event: string, payload: unknown): { job: ReviewJob 
     return { skip: "payload missing installation, repository or pull request fields" };
   }
   if (pr?.draft === true && action !== "ready_for_review") return { skip: "draft" };
-  if (pr?.state === "closed") return { skip: "closed" };
 
   const base = pr?.base?.repo?.full_name;
   const head = pr?.head?.repo?.full_name;

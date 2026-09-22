@@ -45,7 +45,10 @@ export interface ReviewResult {
 export async function reviewPullRequest(job: ReviewJob, deps: ReviewDeps): Promise<ReviewResult> {
   const log = deps.log ?? (() => {});
   const token = await deps.token(job.installationId);
-  const checkout = checkoutPullRequest({ owner: job.owner, repo: job.repo, number: job.number, baseRef: job.baseRef, token });
+  // `log` goes into the checkout because a closed pull request is reviewed from
+  // `refs/pull/N/head` against a different basis than an open one, and the only
+  // place that difference is visible afterwards is this line.
+  const checkout = checkoutPullRequest({ owner: job.owner, repo: job.repo, number: job.number, baseRef: job.baseRef, token, log });
 
   try {
     log(`${job.owner}/${job.repo}#${job.number}: building`);

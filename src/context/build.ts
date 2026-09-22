@@ -14,6 +14,8 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
+import { filterByOnlyDirs } from "../graph/source-files.js";
+import { readFingerprint } from "../graph/fingerprint.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
@@ -60,6 +62,10 @@ export interface BuildOptions {
   contextDir?: string;
   /** Extensions to treat as code. Default: {@link CODE_EXTENSIONS}. */
   extensions?: string[];
+  /** Repo-relative directory prefixes to limit the concept pass (`--only-dir`).
+   * Same prefix semantics as the wiring walk. When omitted, falls back to the
+   * whitelist recorded in the graph fingerprint (mirrors `checkGraph`). */
+  onlyDirs?: string[];
   /** Human label for the model, recorded in the manifest (e.g. "openrouter:openai/gpt-4o-mini"). */
   model: string;
   summarizer: Summarizer;
@@ -84,6 +90,35 @@ export interface BuildResult {
   skippedFiles: number;
   /** Why the summarize phase stopped early, when it did. */
   fatal?: string;
+}
+
+/** CLI/API `--only-dir` wins; otherwise the whitelist recorded in the graph
+ * fingerprint — the same source `checkGraph` / `probeDrift` use, so a later
+ * `--deep` without the flag still skips files the wiring pass excluded. */
+function resolveOnlyDirs(outDir: string, explicit?: readonly string[]): Set<string> | undefined {
+  const list = explicit && explicit.length > 0 ? explicit : (readFingerprint(outDir)?.onlyDirs ?? []);
+  return list.length > 0 ? new Set(list) : undefined;
+}
+
+/**
+ * Files the concept pass summarizes (and `checkContext` re-hashes): the same
+ * walk as before (`--include-dir` / submodule flags from state, minus the
+ * output dir), then {@link filterByOnlyDirs}. Shared so build and check cannot
+ * disagree about what "current" means under a whitelist.
+ */
+export function listContextFiles(
+  root: string,
+  outDir: string,
+  exts: readonly string[],
+  explicitOnlyDirs?: readonly string[],
+): string[] {
+  const walked = walkDir(root, readIncludeDirs(root), {
+    followSubmodules: readFollowSubmodules(root),
+    followNestedRepos: readFollowNestedRepos(root),
+  })
+    .filter((f) => exts.some((e) => f.toLowerCase().endsWith(e)))
+    .filter((f) => !f.startsWith(outDir));
+  return filterByOnlyDirs(walked, root, resolveOnlyDirs(outDir, explicitOnlyDirs));
 }
 
 /** The gitignored LLM-call cache: per-file summaries + per-batch synthesis. */
@@ -114,12 +149,9 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
   const exts = opts.extensions ?? CODE_EXTENSIONS;
   // Read the same persisted walk choices as the Tier-1 wiring graph, so the
   // Tier-2 concept pipeline sees exactly the same directories and submodules.
-  const files = walkDir(root, readIncludeDirs(root), {
-    followSubmodules: readFollowSubmodules(root),
-    followNestedRepos: readFollowNestedRepos(root),
-  })
-    .filter((f) => exts.some((e) => f.toLowerCase().endsWith(e)))
-    .filter((f) => !f.startsWith(outDir));
+  // `--only-dir` is applied with the same prefix match as wiring (CLI/API, else
+  // the fingerprint) so out-of-scope files are never summarized or synthesized.
+  const files = listContextFiles(root, outDir, exts, opts.onlyDirs);
 
   const cache = loadCache(outDir);
   // Flush the summary cache to disk during phase 1 so a build interrupted

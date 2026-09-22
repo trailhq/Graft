@@ -120,7 +120,13 @@ export function contextDirFor(root: string, override?: string): string {
  * expressed as a repo-relative ignore). Best-effort: an unwritable `.gitignore`
  * must never abort a build, so write failures are swallowed.
  */
-export function ensureGitignored(root: string, contextDir: string): void {
+const GRAPH_CACHE_NOTE = "graft's local graph cache — regenerable, not committed (run `graft build`).";
+
+/** Why `.graft/` is ignored, which is a different reason: not that it is cheap
+ *  to regenerate, but that it holds a token. */
+export const LINK_NOTE = "graft's brain link — holds a read token, never commit it.";
+
+export function ensureGitignored(root: string, contextDir: string, note = GRAPH_CACHE_NOTE): void {
   if (envTruthy("GRAFT_NO_GITIGNORE")) return;
   const rel = relPosix(root, contextDir);
   if (rel === "" || rel.startsWith("..")) return; // dir is at/above the repo root — nothing sane to ignore
@@ -141,7 +147,7 @@ export function ensureGitignored(root: string, contextDir: string): void {
   });
   if (present) return;
   const gap = current === "" ? "" : current.endsWith("\n") ? "\n" : "\n\n";
-  const block = `${gap}# graft's local graph cache — regenerable, not committed (run \`graft build\`).\n${entry}\n`;
+  const block = `${gap}# ${note}\n${entry}\n`;
   try { writeFileSync(path, current + block); } catch { /* best-effort — build already succeeded */ }
 }
 
@@ -266,6 +272,10 @@ export interface ParsedNode {
  * for source files in the repo root. Those cards share a directory with concept
  * nodes (`graft/<stem>.md`) but are recorded in `manifest.files`, not
  * `manifest.nodes`. Nested file cards live in subdirs and are never scanned here.
+ *
+ * Incomplete on its own (#261): the graph can write a root card for a source
+ * that the concept pipeline never recorded (different extension lists), so the
+ * stem is absent from `manifest.files`. Combined with isRootFileCard().
  */
 function rootFileCardStems(dir: string): Set<string> {
   const manifest = readManifest(dir);
@@ -278,20 +288,53 @@ function rootFileCardStems(dir: string): Set<string> {
   return stems;
 }
 
+function hasConceptSlug(fm: Record<string, unknown>): boolean {
+  return fm.slug != null && String(fm.slug).length > 0;
+}
+
+/** `writeCovers` used to stamp `covers: []` onto slug-less root file cards. */
+function isCoversOnlyFileCard(fm: Record<string, unknown>): boolean {
+  if (hasConceptSlug(fm) || !("covers" in fm)) return false;
+  return fm.name == null && fm.type == null && fm.sources == null;
+}
+
+/** Wiring cards start with `# <source path with extension>`, optionally followed
+ * by ` · [[slug]]` up-links. A hand-dropped `notes.md` does not. */
+function isWiringCardHeading(content: string): boolean {
+  const line = content.trimStart().split(/\r?\n/, 1)[0] ?? "";
+  return /^# [^\s#]+\.[A-Za-z0-9]{1,12}(?:\s|$)/.test(line);
+}
+
+/**
+ * A top-level `.md` that is a per-file wiring card, not a concept node.
+ * Real concepts always carry `slug` in frontmatter and are never skipped.
+ * A hand-dropped `notes.md` has no slug, no `covers`, and no file-path heading,
+ * so it still surfaces as indexDrift (#215 / #261).
+ */
+function isRootFileCard(
+  stem: string,
+  fm: Record<string, unknown>,
+  content: string,
+  fileCardStems: Set<string>,
+): boolean {
+  if (hasConceptSlug(fm)) return false;
+  if (fileCardStems.has(stem)) return true;
+  if (isCoversOnlyFileCard(fm)) return true;
+  return isWiringCardHeading(content);
+}
+
 /** Read and parse every concept-node `.md` in a context dir (skips INDEX.md
- * and root-level per-file cards already recorded in `manifest.files`). */
+ * and root-level per-file cards). */
 export function readNodes(dir: string): ParsedNode[] {
   if (!existsSync(dir)) return [];
   const fileCardStems = rootFileCardStems(dir);
   const out: ParsedNode[] = [];
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith(".md") || entry === "INDEX.md") continue;
-    const fm = matter(readFileSync(join(dir, entry), "utf8")).data as Record<string, unknown>;
+    const parsed = matter(readFileSync(join(dir, entry), "utf8"));
+    const fm = parsed.data as Record<string, unknown>;
     const fallbackSlug = entry.replace(/\.md$/, "");
-    // A root-level file card has no concept `slug` and its stem matches a
-    // recorded source file. Skipping it here (instead of all slug-less `.md`)
-    // keeps a hand-dropped notes.md visible to check's indexDrift detector.
-    if (fileCardStems.has(fallbackSlug) && fm.slug == null) continue;
+    if (isRootFileCard(fallbackSlug, fm, parsed.content, fileCardStems)) continue;
     out.push({
       slug: String(fm.slug ?? fallbackSlug),
       name: String(fm.name ?? ""),

@@ -10,6 +10,11 @@
  *
  * One gate, shared by both passes, so they agree on what "the provider stopped
  * working" means and a caller can report it once.
+ *
+ * Content-quality misses (empty/unusable crux, #235) still count as failed files
+ * so they are not cached as success (#177), but they do not increment the
+ * consecutive-failure cutoff — the provider is answering, just not usefully for
+ * those files. Quota/auth stay immediately terminal (#127).
  */
 
 /** Consecutive failures that end a pass. One flaky file is normal; five in a row is
@@ -55,14 +60,21 @@ export class LlmFailureGate {
     return this.fatal !== undefined;
   }
 
-  /** Record a failed unit; sets {@link fatal} when this failure is the last straw. */
-  record(message: string): void {
+  /**
+   * Record a failed unit; sets {@link fatal} when this failure is the last straw.
+   * Pass `{ quality: true }` for a content-quality miss (#235): counted, not fatal,
+   * unless the message is quota/auth (those still stop immediately).
+   */
+  record(message: string, opts?: { quality?: boolean }): void {
     this.failed++;
-    this.consecutive++;
     const terminal = terminalReason(message);
     if (terminal) {
       this.fatal = `${terminal} — stopped after ${this.failed} failed file(s). First error: ${message}`;
-    } else if (this.consecutive >= MAX_CONSECUTIVE_FAILURES) {
+      return;
+    }
+    if (opts?.quality) return;
+    this.consecutive++;
+    if (this.consecutive >= MAX_CONSECUTIVE_FAILURES) {
       this.fatal = `${this.consecutive} files in a row failed, so the pass stopped rather than keep calling. Last error: ${message}`;
     }
   }

@@ -28,6 +28,8 @@ export type { BuildResult, BuildProgress, CheckResult, GraphBuildResult, GraphCh
 export interface InitOptions {
   /** Code extensions to include. Default: {@link CODE_EXTENSIONS}. */
   extensions?: string[];
+  /** Repo-relative directory prefixes to limit the concept pass (`--only-dir`). */
+  onlyDirs?: string[];
   /** Progress callback for long builds. */
   onProgress?: (info: BuildProgress) => void;
 }
@@ -62,6 +64,7 @@ export class Graft {
     return buildContext(dir, {
       contextDir: this.cfg.contextDir,
       extensions: opts.extensions,
+      onlyDirs: opts.onlyDirs,
       model: this.modelLabel(),
       summarizer: this.summarizer(),
       synthesizer: this.synthesizer(),

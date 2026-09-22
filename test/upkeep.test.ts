@@ -80,7 +80,7 @@ test('the stamp round-trips under graft/.cache/', () => {
   assert.deepEqual(readStamp(repo), {
     version: '1.2.3',
     hosts: ['claude', 'cursor'], // sorted, so two inits in different picker order match
-    opts: { global: true, mcp: true, hooks: true },
+    opts: { global: true, mcp: true, hooks: true, statusline: true },
     at: '2026-01-01T00:00:00.000Z',
   });
 });
@@ -92,7 +92,7 @@ test('wiringOpts defaults an older stamp to what plain `graft init` does', () =>
   // A partial record still fills the gaps.
   assert.deepEqual(
     wiringOpts({ version: '1.0.0', hosts: ['claude'], at: 'x', opts: { global: false } }),
-    { global: false, mcp: true, hooks: true },
+    { global: false, mcp: true, hooks: true, statusline: true },
   );
 });
 
@@ -105,9 +105,21 @@ test('a refresh replays the flags init was given, including --no-global', () => 
     rewrite: (_repo, _hosts, opts) => { seen = opts; },
   });
   // The user said "keep out of ~/.codex" — a later session must not overrule that.
-  assert.deepEqual(seen, { global: false, mcp: true, hooks: false });
+  assert.deepEqual(seen, { global: false, mcp: true, hooks: false, statusline: true });
   assert.equal(r?.global, false);
-  assert.deepEqual(readStamp(repo)?.opts, { global: false, mcp: true, hooks: false }, 'and it stays recorded');
+  assert.deepEqual(readStamp(repo)?.opts, { global: false, mcp: true, hooks: false, statusline: true }, 'and it stays recorded');
+});
+
+test('a refresh replays --no-statusline so a later session cannot re-install the bar', () => {
+  const repo = tmpRepo('upkeep-statusline');
+  writeStamp(repo, '1.0.0', ['claude'], { statusline: false });
+  let seen: WiringOpts | null = null;
+  reconcileWiring(repo, '2.0.0', {
+    wired: () => ['claude'],
+    rewrite: (_repo, _hosts, opts) => { seen = opts; },
+  });
+  assert.deepEqual(seen, { global: true, mcp: true, hooks: true, statusline: false });
+  assert.deepEqual(readStamp(repo)?.opts, { global: true, mcp: true, hooks: true, statusline: false });
 });
 
 test('by default a refresh DOES reach ~/.codex — nothing else ever would', () => {
