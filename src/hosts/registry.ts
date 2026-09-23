@@ -121,6 +121,19 @@ export const HOSTS: HostTarget[] = [
     content: windsurfRule,
     detect: (p) => p.dirExists(join(p.home, '.codeium', 'windsurf')) || p.dirExists(join(p.repo, '.windsurf')),
   },
+  {
+    id: 'pi',
+    name: 'Pi (pi coding harness)',
+    kind: 'owned',
+    relPath: join('.pi', 'skills', 'graft', 'SKILL.md'),
+    content: skillTemplate,
+    // pi's global install marker (~/.pi/agent) or a project marker (./.pi):
+    // pi auto-discovers project-local skills from .pi/skills/ once trusted.
+    // (No MCP target: pi ships no built-in MCP client — the CLI is its API.)
+    detect: (p) =>
+      p.dirExists(join(p.home, '.pi', 'agent')) ||
+      p.dirExists(join(p.repo, '.pi')),
+  },
 ];
 
 export function hostIds(): string[] {
