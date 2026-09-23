@@ -84,7 +84,7 @@ export function statuslineWanted(opts: { statusline?: boolean } = {}): boolean {
   return opts.statusline !== false && !envNoStatusline();
 }
 
-function isGraftStatusline(value: unknown): boolean {
+export function isGraftStatusline(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
   const command = (value as Json).command;
   return typeof command === 'string' && command.includes(GRAFT_STATUSLINE_HELPER);
