@@ -7,7 +7,7 @@ const SL = 'node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs"
 test('empty settings gets the full Graft blocks', () => {
   const { merged, warnings } = mergeGraftSettings({});
   assert.equal(merged.statusLine.command, SL);
-  assert.equal(merged.subagentStatusLine.command, SL);
+  assert.equal(merged.subagentStatusLine, undefined, 'the helper does not speak the subagent row format');
   assert.ok(Array.isArray(merged.hooks.PostToolUse));
   assert.equal(merged.hooks.PostToolUse[0].matcher, 'Write|Edit|MultiEdit');
   for (const e of ['PostToolUse', 'UserPromptSubmit', 'SessionStart', 'Stop']) {
@@ -17,7 +17,7 @@ test('empty settings gets the full Graft blocks', () => {
   // accumulator over the retrieval tools (Bash `graft …`, the graft_* MCP tools)
   // and the source-read tools (Read/Grep/Glob) it scores against.
   const savings = merged.hooks.PostToolUse[1];
-  assert.equal(savings.matcher, 'Bash|mcp__graft__|Read|Grep|Glob');
+  assert.equal(savings.matcher, '^(Bash|Read|Grep|Glob|mcp__graft__.*)$');
   assert.ok(savings.hooks[0].command.includes('tool-savings'), 'savings hook wired');
   assert.ok(merged.footerLinksRegexes.includes('graft/[\\w./-]+\\.md'));
   assert.deepEqual(warnings, []);
@@ -36,8 +36,44 @@ test('a prior Graft statusLine (helper path, old command) is updated to the curr
     subagentStatusLine: { type: 'command', command: 'node .claude/helpers/graft-statusline.cjs' },
   });
   assert.equal(merged.statusLine.command, SL);
-  assert.equal(merged.subagentStatusLine.command, SL);
+  assert.equal(merged.subagentStatusLine, undefined, 'the old graft subagent line is removed');
   assert.deepEqual(warnings, []);
+});
+
+test('someone else\'s subagentStatusLine is left alone', () => {
+  const mine = { type: 'command', command: 'my-subagent-rows.sh' };
+  const { merged, warnings } = mergeGraftSettings({ subagentStatusLine: mine });
+  assert.deepEqual(merged.subagentStatusLine, mine);
+  assert.deepEqual(warnings, []);
+});
+
+// Claude Code's matcher rules: a matcher made only of letters, digits, `_`, `-`,
+// spaces, `,` and `|` is a list of exact tool names; anything else is an unanchored
+// JavaScript regex.
+function claudeMatches(matcher: string, tool: string): boolean {
+  if (/^[A-Za-z0-9_\-\s,|]*$/.test(matcher)) {
+    return matcher.split(/[|,]/).map((name) => name.trim()).includes(tool);
+  }
+  return new RegExp(matcher).test(tool);
+}
+
+test('the savings hook fires for graft MCP tools and the tools it scores, and nothing else', () => {
+  const savings = mergeGraftSettings({}).merged.hooks.PostToolUse[1];
+  for (const tool of ['Bash', 'Read', 'Grep', 'Glob', 'mcp__graft__graft_find_code', 'mcp__graft__graft_trace_calls']) {
+    assert.ok(claudeMatches(savings.matcher, tool), `${tool} reaches the savings hook`);
+  }
+  for (const tool of ['Edit', 'BashOutput', 'mcp__other__tool']) {
+    assert.ok(!claudeMatches(savings.matcher, tool), `${tool} does not`);
+  }
+});
+
+test('hook timeouts are written in seconds, the unit Claude Code reads', () => {
+  const { merged } = mergeGraftSettings({});
+  const timeouts = Object.values(merged.hooks as Record<string, any[]>)
+    .flat()
+    .flatMap((block) => block.hooks.map((h: any) => h.timeout));
+  assert.ok(timeouts.length > 0);
+  for (const t of timeouts) assert.ok(t > 0 && t <= 60, `timeout ${t} is a short wait in seconds`);
 });
 
 test('statusline: false does not install a statusLine on empty settings', () => {
