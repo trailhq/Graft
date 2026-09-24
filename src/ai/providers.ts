@@ -56,6 +56,7 @@ export interface ResolvedConfig {
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const ORCAROUTER_BASE_URL = "https://api.orcarouter.ai/v1";
+const ATLASCLOUD_BASE_URL = "https://api.atlascloud.ai/v1";
 
 /** Per-provider default model. */
 export const DEFAULT_MODELS: Record<ProviderKind, string> = {
@@ -65,6 +66,8 @@ export const DEFAULT_MODELS: Record<ProviderKind, string> = {
   litellm: "openai/gpt-4o-mini",
   // Provider-prefixed so the OrcaRouter gateway routes it; override with GRAFT_MODEL.
   orcarouter: "openai/gpt-4o-mini",
+  // Named as the Atlas Cloud gateway lists it; override with GRAFT_MODEL.
+  atlascloud: "zai-org/glm-5",
 };
 
 export const DEFAULTS = {
@@ -95,6 +98,8 @@ export function resolveConfig(config: EngineConfig = {}): ResolvedConfig {
   if (!baseUrl && provider === "openai" && usedLegacyEnv) baseUrl = OPENROUTER_BASE_URL;
   // The orcarouter provider points at the gateway unless a base URL is given.
   if (!baseUrl && provider === "orcarouter") baseUrl = ORCAROUTER_BASE_URL;
+  // Same for atlascloud.
+  if (!baseUrl && provider === "atlascloud") baseUrl = ATLASCLOUD_BASE_URL;
 
   const headers =
     provider === "openai" && baseUrl?.includes("openrouter.ai")

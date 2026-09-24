@@ -13,14 +13,19 @@
  * OrcaRouter AI gateway by default (see orcarouter.ts) so its users get the
  * gateway's routing, failover, and guardrails behind a named provider instead
  * of a bare custom base URL.
+ *
+ * `atlascloud` follows that same pattern, pointed at the Atlas Cloud gateway by
+ * default (see atlascloud.ts), so its users reach the models it serves behind a
+ * named provider instead of a bare custom base URL.
  */
 import type { ChatModel } from "./types.js";
 import { OpenAIChatModel } from "./openai.js";
 import { AnthropicChatModel } from "./anthropic.js";
 import { LiteLLMChatModel } from "./litellm.js";
 import { OrcaRouterChatModel } from "./orcarouter.js";
+import { AtlasCloudChatModel } from "./atlascloud.js";
 
-export type ProviderKind = "openai" | "anthropic" | "litellm" | "orcarouter";
+export type ProviderKind = "openai" | "anthropic" | "litellm" | "orcarouter" | "atlascloud";
 
 export interface ChatModelConfig {
   provider: ProviderKind;
@@ -51,6 +56,13 @@ export function createChatModel(cfg: ChatModelConfig): ChatModel {
       });
     case "orcarouter":
       return new OrcaRouterChatModel({
+        apiKey: cfg.apiKey,
+        model: cfg.model,
+        baseUrl: cfg.baseUrl,
+        headers: cfg.headers,
+      });
+    case "atlascloud":
+      return new AtlasCloudChatModel({
         apiKey: cfg.apiKey,
         model: cfg.model,
         baseUrl: cfg.baseUrl,
