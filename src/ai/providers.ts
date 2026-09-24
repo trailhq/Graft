@@ -20,11 +20,11 @@ export interface EngineConfig {
 
   /** Wire format / SDK. Env: GRAFT_PROVIDER. Default: `openai`. */
   provider?: ProviderKind;
-  /** API key for the chosen provider. Env: GRAFT_API_KEY (legacy: OPENROUTER_API_KEY). */
+  /** API key for the chosen provider. Env: GRAFT_API_KEY (legacy: OPENROUTER_API_KEY; requesty: REQUESTY_API_KEY). */
   apiKey?: string;
   /** Model id. Env: GRAFT_MODEL. Provider-specific default. */
   model?: string;
-  /** Base URL for OpenAI-compatible endpoints. Env: GRAFT_BASE_URL. */
+  /** Base URL for OpenAI-compatible endpoints. Env: GRAFT_BASE_URL (requesty: REQUESTY_BASE_URL). */
   baseUrl?: string;
 
   // --- advanced: bring your own components ---
@@ -56,6 +56,8 @@ export interface ResolvedConfig {
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const ORCAROUTER_BASE_URL = "https://api.orcarouter.ai/v1";
+// Regional routers: https://router.eu.requesty.ai/v1 (EU), .us. (US), .ap. (AP).
+const REQUESTY_BASE_URL = "https://router.requesty.ai/v1";
 
 /** Per-provider default model. */
 export const DEFAULT_MODELS: Record<ProviderKind, string> = {
@@ -65,6 +67,8 @@ export const DEFAULT_MODELS: Record<ProviderKind, string> = {
   litellm: "openai/gpt-4o-mini",
   // Provider-prefixed so the OrcaRouter gateway routes it; override with GRAFT_MODEL.
   orcarouter: "openai/gpt-4o-mini",
+  // Vendor-prefixed as Requesty names it; override with GRAFT_MODEL.
+  requesty: "openai/gpt-4o-mini",
 };
 
 export const DEFAULTS = {
@@ -76,8 +80,11 @@ export const DEFAULTS = {
 export function resolveConfig(config: EngineConfig = {}): ResolvedConfig {
   const env = process.env;
   const provider = config.provider ?? (env.GRAFT_PROVIDER as ProviderKind | undefined) ?? DEFAULTS.provider;
+  // REQUESTY_* vars are honored only when the requesty provider is selected, so a
+  // Requesty key is never sent to another endpoint by accident.
+  const requesty = provider === "requesty";
 
-  const explicitKey = config.apiKey ?? env.GRAFT_API_KEY;
+  const explicitKey = config.apiKey ?? env.GRAFT_API_KEY ?? (requesty ? env.REQUESTY_API_KEY : undefined);
   const legacyKey = env.OPENROUTER_API_KEY;
   const apiKey = explicitKey ?? legacyKey ?? env.ORCAROUTER_API_KEY;
   const usedLegacyEnv = !explicitKey && !!legacyKey;
@@ -89,15 +96,22 @@ export function resolveConfig(config: EngineConfig = {}): ResolvedConfig {
     env.ORCAROUTER_MODEL ??
     DEFAULT_MODELS[provider];
 
-  let baseUrl = config.baseUrl ?? env.GRAFT_BASE_URL ?? env.OPENROUTER_BASE_URL ?? env.ORCAROUTER_BASE_URL;
+  let baseUrl =
+    config.baseUrl ??
+    env.GRAFT_BASE_URL ??
+    (requesty ? env.REQUESTY_BASE_URL : undefined) ??
+    env.OPENROUTER_BASE_URL ??
+    env.ORCAROUTER_BASE_URL;
   // Back-compat: an existing setup with only OPENROUTER_API_KEY keeps hitting
   // OpenRouter without any config change.
   if (!baseUrl && provider === "openai" && usedLegacyEnv) baseUrl = OPENROUTER_BASE_URL;
   // The orcarouter provider points at the gateway unless a base URL is given.
   if (!baseUrl && provider === "orcarouter") baseUrl = ORCAROUTER_BASE_URL;
+  // The requesty provider points at the router unless a base URL is given.
+  if (!baseUrl && requesty) baseUrl = REQUESTY_BASE_URL;
 
   const headers =
-    provider === "openai" && baseUrl?.includes("openrouter.ai")
+    (provider === "openai" && baseUrl?.includes("openrouter.ai")) || requesty
       ? { "X-Title": "graft" }
       : undefined;
 

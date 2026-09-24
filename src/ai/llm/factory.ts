@@ -13,14 +13,19 @@
  * OrcaRouter AI gateway by default (see orcarouter.ts) so its users get the
  * gateway's routing, failover, and guardrails behind a named provider instead
  * of a bare custom base URL.
+ *
+ * `requesty` is the same kind of convenience over `openai`, pointed at the
+ * Requesty router by default (see requesty.ts) so its users get one key across
+ * 700+ models plus managed routing policies behind a named provider.
  */
 import type { ChatModel } from "./types.js";
 import { OpenAIChatModel } from "./openai.js";
 import { AnthropicChatModel } from "./anthropic.js";
 import { LiteLLMChatModel } from "./litellm.js";
 import { OrcaRouterChatModel } from "./orcarouter.js";
+import { RequestyChatModel } from "./requesty.js";
 
-export type ProviderKind = "openai" | "anthropic" | "litellm" | "orcarouter";
+export type ProviderKind = "openai" | "anthropic" | "litellm" | "orcarouter" | "requesty";
 
 export interface ChatModelConfig {
   provider: ProviderKind;
@@ -51,6 +56,13 @@ export function createChatModel(cfg: ChatModelConfig): ChatModel {
       });
     case "orcarouter":
       return new OrcaRouterChatModel({
+        apiKey: cfg.apiKey,
+        model: cfg.model,
+        baseUrl: cfg.baseUrl,
+        headers: cfg.headers,
+      });
+    case "requesty":
+      return new RequestyChatModel({
         apiKey: cfg.apiKey,
         model: cfg.model,
         baseUrl: cfg.baseUrl,
