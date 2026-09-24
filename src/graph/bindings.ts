@@ -77,6 +77,22 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
     if (node.type === "anonymous_class") return "{anonymous}";
     return null;
   }
+  if (lang === "hack") {
+    // Mirrors extract.ts's HACK_KINDS — the exact node types that push a scope
+    // segment there, so a typed parameter bound inside a method is keyed under
+    // the same scope path resolveRecvType later looks it up by.
+    const hackDefTypes = new Set([
+      "class_declaration",
+      "interface_declaration",
+      "trait_declaration",
+      "enum_declaration",
+      "enum_class_declaration",
+      "method_declaration",
+      "function_declaration",
+    ]);
+    if (hackDefTypes.has(node.type)) return node.childForFieldName("name")?.text ?? null;
+    return null;
+  }
   const defTypes =
     lang === "python"
       ? new Set(["class_definition", "function_definition"])
@@ -211,9 +227,9 @@ export function resolveRecvType(
       undefined
     );
   }
-  // PHP static call `Foo::bar()`: the scope operand is a class name, so it *is*
-  // the receiver type. (Member calls pass a `$var` receiver, filtered by the `$`.)
-  if (ctx.lang === "php" && !receiver.startsWith("$")) return receiver;
+  // PHP/Hack static call `Foo::bar()`: the scope operand is a class name, so it
+  // *is* the receiver type. (Member calls pass a `$var` receiver, filtered by `$`.)
+  if ((ctx.lang === "php" || ctx.lang === "hack") && !receiver.startsWith("$")) return receiver;
   return (
     (ctx.lang === "go" && receiver === ctx.goReceiverVar ? ctx.enclosingClass : undefined) ??
     ctx.bindings.lookup(ctx.scope, receiver) ??
@@ -307,6 +323,7 @@ function visit(
   else if (lang === "java") handleJava(node, scope, classScope, bindings);
   else if (lang === "swift") handleSwift(node, scope, classScope, bindings);
   else if (lang === "php") handlePhp(node, scope, bindings);
+  else if (lang === "hack") handleHack(node, scope, bindings);
   else handleTs(node, scope, classScope, bindings, aliases);
 
   const name = defName(node, lang);
@@ -467,6 +484,56 @@ function phpTypeName(node: Parser.SyntaxNode | null): string | null {
 function phpNewType(node: Parser.SyntaxNode): string | null {
   const cls = node.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name");
   return cls ? cls.text.replace(/^.*\\/, "") : null;
+}
+
+/** Hack variable->type bindings from the same two syntax-local clues PHP uses,
+ * but on Hack's node shapes: a typed `parameter` (`function f(Foo $x)`) and a
+ * `new` assignment (`$x = new Foo()`, a `binary_expression` with `=` operator).
+ * Keyed by the `$var` text so a `$var->method()` site resolves through
+ * resolveRecvType's bindings lookup, exactly like handlePhp. */
+function handleHack(node: Parser.SyntaxNode, scope: string[], bindings: FileBindings): void {
+  if (node.type === "parameter") {
+    const type = hackTypeName(node.childForFieldName("type"));
+    const name = node.childForFieldName("name");
+    if (type && name?.type === "variable") bindings.set(scope.join("."), name.text, type);
+    return;
+  }
+  if (node.type === "binary_expression") {
+    const op = node.childForFieldName("operator");
+    const left = node.childForFieldName("left");
+    const right = node.childForFieldName("right");
+    if (op?.text === "=" && left?.type === "variable" && right?.type === "new_expression") {
+      const type = hackConstructedName(right);
+      if (type) bindings.set(scope.join("."), left.text, type);
+    }
+  }
+}
+
+/** A Hack `type_specifier`'s bare class name — the trailing segment of the
+ * qualified name it wraps. Null for primitives (`int`/`void`, whose children are
+ * anonymous keyword tokens) and for shape/tuple/generic-only specifiers. */
+function hackTypeName(node: Parser.SyntaxNode | null): string | null {
+  if (!node || node.type !== "type_specifier") return null;
+  return hackTrailingIdent(node.namedChildren.find((c) => c.type === "qualified_identifier" || c.type === "identifier"));
+}
+
+/** The type constructed by a Hack `new_expression` (`new Foo()` → `Foo`),
+ * de-qualified; null when it wraps no qualified name. */
+function hackConstructedName(node: Parser.SyntaxNode): string | null {
+  return hackTrailingIdent(node.namedChildren.find((c) => c.type === "qualified_identifier" || c.type === "identifier"));
+}
+
+/** Trailing identifier of a Hack qualified name, or a bare identifier's own text;
+ * null otherwise. Duplicated here (not imported from extract.ts) per this file's
+ * no-value-import rule. */
+function hackTrailingIdent(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "identifier") return node.text;
+  if (node.type === "qualified_identifier") {
+    const ids = node.namedChildren.filter((c) => c.type === "identifier");
+    return ids.length ? ids[ids.length - 1]!.text : null;
+  }
+  return null;
 }
 
 function handlePy(

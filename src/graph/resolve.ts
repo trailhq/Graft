@@ -181,12 +181,14 @@ export function resolveEdges(
     push(classParents, ownName, e.name);
   }
 
-  // classTraits: class name → trait names from raw `implements` edges in PHP files.
-  // PHP models `use SomeTrait;` as implements; trait methods live on the trait owner,
-  // not the using class, so resolveTypedMember walks these after the class lookup fails.
+  // classTraits: class name → trait names from raw `implements` edges in PHP and
+  // Hack files. Both model `use SomeTrait;` as implements; trait methods live on the
+  // trait owner, not the using class, so resolveTypedMember walks these after the
+  // class lookup fails.
   const classTraits = new Map<string, string[]>();
   for (const e of rawEdges) {
-    if (e.relation !== "implements" || !e.name || !e.file.endsWith(".php")) continue;
+    const isTraitLang = e.file.endsWith(".php") || e.file.endsWith(".hack") || e.file.endsWith(".hhi");
+    if (e.relation !== "implements" || !e.name || !isTraitLang) continue;
     const ownName = byId.get(e.source)?.name;
     if (!ownName) continue;
     push(classTraits, ownName, e.name);

@@ -15,12 +15,23 @@ import Java from "tree-sitter-java";
 import Kotlin from "tree-sitter-kotlin";
 import Swift from "tree-sitter-swift";
 import PHP from "tree-sitter-php";
+import Hack from "tree-sitter-hack";
 import { basename } from "node:path";
 import { contentHash } from "../util/id.js";
 import { collectBindings, goReceiverVarOf, resolveRecvType, type FileBindings } from "./bindings.js";
 import type { Kind, NodeV1, Relation } from "./types.js";
 
-export type Language = "typescript" | "tsx" | "python" | "go" | "java" | "kotlin" | "swift" | "php" | "r";
+export type Language =
+  | "typescript"
+  | "tsx"
+  | "python"
+  | "go"
+  | "java"
+  | "kotlin"
+  | "swift"
+  | "php"
+  | "r"
+  | "hack";
 
 /**
  * Extension → the tree-sitter grammar that parses it, and the label a human expects
@@ -54,6 +65,8 @@ const EXTENSIONS: ReadonlyArray<{ ext: string; grammar: Language; label: string 
   { ext: ".kts", grammar: "kotlin", label: "kotlin" },
   { ext: ".swift", grammar: "swift", label: "swift" },
   { ext: ".php", grammar: "php", label: "php" },
+  { ext: ".hack", grammar: "hack", label: "hack" },
+  { ext: ".hhi", grammar: "hack", label: "hack" },
   // `entryFor` lower-cases the path before matching, so this one entry covers
   // both `.R` (the conventional case in real R codebases) and `.r`.
   { ext: ".r", grammar: "r", label: "r" },
@@ -263,6 +276,22 @@ const PHP_KINDS: Record<string, Kind> = {
   enum_declaration: "enum",
 };
 
+// Hack (Hacklang): like PHP, every definition node type is distinct — but a
+// top-level function is `function_declaration`, not php's `function_definition`,
+// and a class body's methods are `method_declaration`. `trait_declaration` maps
+// to the PHP-shared `trait` kind.
+const HACK_KINDS: Record<string, Kind> = {
+  function_declaration: "function",
+  method_declaration: "method",
+  class_declaration: "class",
+  interface_declaration: "interface",
+  trait_declaration: "trait",
+  enum_declaration: "enum",
+  // `enum class Foo: Bar {...}` — a Hack-only construct (111 files in webapp),
+  // a distinct node type from a plain `enum`. Mapped to the same `enum` kind.
+  enum_class_declaration: "enum",
+};
+
 const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   typescript: TS_KINDS,
   tsx: TS_KINDS,
@@ -273,6 +302,7 @@ const KINDS_BY_LANG: Record<Language, Record<string, Kind>> = {
   kotlin: KOTLIN_KINDS,
   swift: SWIFT_KINDS,
   php: PHP_KINDS,
+  hack: HACK_KINDS,
 };
 
 /**
@@ -299,6 +329,9 @@ const CALL_TYPES: Record<Language, ReadonlySet<string>> = {
     "scoped_call_expression",
   ]),
   r: new Set(["call"]),
+  // Hack: an ordinary call is a single `call_expression` (member/static/free all
+  // share it, unlike PHP); `new_expression` is the constructor-call shape.
+  hack: new Set(["call_expression", "new_expression"]),
 };
 
 const FUNCTION_VALUE_TYPES = new Set([
@@ -321,6 +354,7 @@ const GRAMMARS: Record<Language, unknown> = {
   kotlin: Kotlin,
   swift: Swift,
   php: PHP.php,
+  hack: Hack.hack,
 };
 
 export interface WalkCtx {
@@ -600,7 +634,7 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
                   ? kotlinExported(node)
                   : ctx.lang === "swift"
                     ? swiftExported(node)
-                    : ctx.lang === "php"
+                    : ctx.lang === "php" || ctx.lang === "hack"
                       ? phpExported(node)
                       : tsExported(node),
       origin: "ast",
@@ -620,13 +654,18 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     const javaTypeDecl = ctx.lang === "java" && JAVA_TYPE_KINDS.has(desc.kind);
     const kotlinTypeDecl = ctx.lang === "kotlin" && KOTLIN_TYPE_KINDS.has(desc.kind);
     const swiftTypeDecl = ctx.lang === "swift" && SWIFT_TYPE_KINDS.has(desc.kind);
-    if (desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl)
+    // Hack: a class, interface, or trait is a heritage site (an interface may
+    // `extends` other interfaces; a class `extends` one + `implements` many) and
+    // owns `$this`/`self::` member calls in its (and a trait's) method bodies.
+    const hackTypeDecl =
+      ctx.lang === "hack" && (desc.kind === "class" || desc.kind === "interface" || desc.kind === "trait");
+    if (desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl || hackTypeDecl)
       edges.push(...heritageEdges(node, id, ctx));
     if (ctx.lang === "php") edges.push(...phpAttributeReferenceEdges(node, id, ctx));
     if (ctx.lang === "java") edges.push(...javaAnnotationReferenceEdges(node, id, ctx));
 
     const enclosingClass =
-      desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl
+      desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl || hackTypeDecl
         ? desc.name
         : isGoMethod
           ? goReceiverType(node)
@@ -776,6 +815,17 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     for (const t of node.namedChildren) {
       if (t.type === "name" || t.type === "qualified_name") {
         edges.push({ source: ctx.parentId, relation: "implements", name: t.text.replace(/^.*\\/, ""), file: ctx.rel });
+      }
+    }
+    return;
+  } else if (ctx.lang === "hack" && node.type === "trait_use_clause") {
+    // Trait composition inside a class body (`use TA, TB;`). Modelled as
+    // `implements`, exactly like PHP's `use_declaration` above — a trait is a
+    // contract of behaviour the class mixes in (Graft's Relation set has no `uses`).
+    for (const t of node.namedChildren) {
+      if (t.type === "type_specifier") {
+        const name = hackTypeSpecifierName(t);
+        if (name) edges.push({ source: ctx.parentId, relation: "implements", name, file: ctx.rel });
       }
     }
     return;
@@ -2111,6 +2161,24 @@ function heritageEdges(node: Parser.SyntaxNode, classId: string, ctx: WalkCtx): 
     }
     return edges;
   }
+  if (ctx.lang === "hack") {
+    // `class C extends B implements I, J` / `interface I extends A, B` — unlike
+    // PHP the clauses are DIRECT children of the declaration (no wrapping
+    // `class_heritage`/`base_clause`), each holding one `type_specifier` per
+    // supertype. An interface's `extends` also lands here as an `extends` edge.
+    for (const clause of node.namedChildren) {
+      const relation: Relation | null =
+        clause.type === "extends_clause" ? "extends" : clause.type === "implements_clause" ? "implements" : null;
+      if (!relation) continue;
+      for (const t of clause.namedChildren) {
+        if (t.type === "type_specifier") {
+          const name = hackTypeSpecifierName(t);
+          if (name) edges.push({ source: classId, relation, name, file: ctx.rel });
+        }
+      }
+    }
+    return edges;
+  }
   const heritage = node.namedChildren.find((c) => c.type === "class_heritage");
   for (const clause of heritage?.namedChildren ?? []) {
     const relation: Relation | null =
@@ -2267,6 +2335,7 @@ if (lang === "kotlin") {
   }
 
   if (lang === "php") return phpCallee(node);
+  if (lang === "hack") return hackCallee(node);
 
   const fn = node.childForFieldName("function");
   if (!fn) return null;
@@ -2449,6 +2518,66 @@ function phpScopeReceiver(scope: Parser.SyntaxNode | null): string | undefined {
   return undefined;
 }
 
+/** Trailing identifier of a Hack qualified name (`Slack\Util\log` → `log`), or a
+ * bare identifier's own text. Null for anything else. */
+function hackLastIdent(node: Parser.SyntaxNode | null | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "identifier") return node.text;
+  if (node.type === "qualified_identifier") {
+    const ids = node.namedChildren.filter((c) => c.type === "identifier");
+    return ids.length ? ids[ids.length - 1]!.text : null;
+  }
+  return null;
+}
+
+/** The bare supertype / trait name a Hack `type_specifier` names — its qualified
+ * name's trailing segment, generic arguments and namespace qualifier discarded
+ * (`Ns\J<int>` → `J`). Null when it wraps no qualified name (a shape/tuple/etc.). */
+function hackTypeSpecifierName(ts: Parser.SyntaxNode): string | null {
+  return hackLastIdent(ts.namedChildren.find((c) => c.type === "qualified_identifier" || c.type === "identifier"));
+}
+
+/**
+ * Hack call shapes, all under one `call_expression` (unlike PHP's four node
+ * types): a free/namespaced `foo()` / `Ns\foo()` (function = qualified_identifier),
+ * a member `$obj->m()` (selection_expression), and a static `Cls::m()` /
+ * `self::m()` (scoped_identifier). Plus `new Foo()` (new_expression), whose
+ * constructed type is the call target. The receiver, when locally knowable
+ * (`$this`, `self`/`static`/`parent`, or a class name), feeds receiver-typed
+ * resolution the same way PHP's does.
+ */
+function hackCallee(node: Parser.SyntaxNode): { name: string; viaMember: boolean; receiver?: string } | null {
+  if (node.type === "new_expression") {
+    const name = hackTypeSpecifierName(node);
+    return name ? { name, viaMember: false } : null;
+  }
+  const fn = node.childForFieldName("function");
+  if (!fn) return null;
+  if (fn.type === "qualified_identifier" || fn.type === "identifier") {
+    const name = hackLastIdent(fn);
+    return name ? { name, viaMember: false } : null;
+  }
+  if (fn.type === "selection_expression") {
+    // `$obj->method()` — no field names; children are [receiver, name].
+    const name = hackLastIdent(fn.namedChildren[fn.namedChildren.length - 1]);
+    if (!name) return null;
+    const recv = fn.namedChildren[0];
+    const receiver = recv?.type === "variable" ? (recv.text === "$this" ? "this" : recv.text) : undefined;
+    return { name, viaMember: true, receiver };
+  }
+  if (fn.type === "scoped_identifier") {
+    // `Cls::m()` / `self::m()` — no field names; children are [scope, name].
+    const nameNode = fn.namedChildren[fn.namedChildren.length - 1];
+    if (nameNode?.type !== "identifier") return null;
+    const scope = fn.namedChildren[0];
+    // `self`/`static`/`parent` (a `scope_identifier`) → the enclosing class; a
+    // real class name resolves to itself via resolveRecvType's hack branch.
+    const receiver = scope?.type === "scope_identifier" ? "self" : (hackLastIdent(scope) ?? undefined);
+    return { name: nameNode.text, viaMember: true, receiver };
+  }
+  return null;
+}
+
 /** ts `member_expression` node's receiver text: `this`, `this.x`, or a bare identifier. */
 function tsReceiver(fn: Parser.SyntaxNode): string | undefined {
   const obj = fn.childForFieldName("object");
@@ -2484,6 +2613,9 @@ if (lang === "kotlin") return node.type === "import_header";
   // PHP: one edge per imported symbol — the clause leaf inside a (possibly
   // grouped) `use A\B, C\D;` / `use A\{B, C};` declaration.
   if (lang === "php") return node.type === "namespace_use_clause";
+  // Hack: `use A\B;` / `use type A\B;` / `use function f;` — one edge per
+  // `use_clause` inside the `use_statement`.
+  if (lang === "hack") return node.type === "use_clause";
   return node.type === "import_statement" || node.type === "import_from_statement";
 }
 
@@ -2491,6 +2623,12 @@ function importSpecifier(node: Parser.SyntaxNode, lang: Language): string | null
   if (lang === "php") {
     // namespace_use_clause → its `qualified_name`/`name`, e.g. `App\Models\Animal`.
     const q = node.namedChildren.find((c) => c.type === "qualified_name" || c.type === "name");
+    return q ? q.text.replace(/^\\/, "") : null;
+  }
+  if (lang === "hack") {
+    // use_clause → its `qualified_identifier`, e.g. `Slack\Widgets\Widget`. A
+    // `use_type` keyword (`type`/`namespace`/`function`) is a separate child.
+    const q = node.namedChildren.find((c) => c.type === "qualified_identifier");
     return q ? q.text.replace(/^\\/, "") : null;
   }
   if (lang === "python") {
