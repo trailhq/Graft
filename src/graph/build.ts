@@ -33,7 +33,7 @@ import {
 import { writeFingerprint } from "./fingerprint.js";
 import { seedGraph, type SeedResult } from "./seed.js";
 import { filterByOnlyDirs, listSourceStats } from "./source-files.js";
-import { resolveEdges, type GoModule } from "./resolve.js";
+import { resolveEdges, type GoModule, type RustCrate } from "./resolve.js";
 import { enrichGraph, type EnrichStats } from "./enrich.js";
 import { readGraph, writeGraph, wiringPath } from "./write.js";
 import { writeCards, writeIndex, writeCovers, type CardStats } from "./cards.js";
@@ -146,6 +146,47 @@ function readGoModules(root: string, repoFiles: string[]): GoModule[] {
     }
   }
   return mods;
+}
+
+/** Every Cargo package in the repo, keyed by its package name and the directory
+ * containing Cargo.toml. Cargo files can contain several unrelated `name` keys
+ * (`[[bin]]`, dependencies, package metadata), so only `[package]` contributes.
+ * Inline-table dependency renames are retained for resolution from the owning
+ * crate; other TOML dependency forms remain deliberately unsupported. */
+function readCargoCrates(root: string, repoFiles: string[]): RustCrate[] {
+  const crates: RustCrate[] = [];
+  for (const f of repoFiles) {
+    if (basename(f) !== "Cargo.toml") continue;
+    try {
+      let section = "";
+      let name: string | null = null;
+      const aliases: Record<string, string> = {};
+      for (const line of readFileSync(f, "utf8").split(/\r?\n/)) {
+        const header = line.match(/^\s*\[{1,2}\s*([^\]]+?)\s*\]{1,2}\s*(?:#.*)?$/);
+        if (header) {
+          section = header[1];
+          continue;
+        }
+        if (section === "package") {
+          const declared = line.match(/^\s*name\s*=\s*(["'])(.*?)\1\s*(?:#.*)?$/);
+          if (declared) name = declared[2];
+          continue;
+        }
+        if (!/^(?:(?:dev-|build-)?dependencies|target\..+\.(?:dev-|build-)?dependencies)$/.test(section)) {
+          continue;
+        }
+        const dependency = line.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*\{(.*)\}\s*(?:#.*)?$/);
+        const packageName = dependency?.[2].match(/(?:^|,)\s*package\s*=\s*(["'])(.*?)\1(?:\s*,|\s*$)/);
+        if (dependency && packageName) aliases[dependency[1]] = packageName[2];
+      }
+      if (!name) continue;
+      const rel = relPosix(root, dirname(f));
+      crates.push({ name, dir: rel === "" ? "." : rel, aliases });
+    } catch {
+      /* unreadable Cargo.toml — skip this crate */
+    }
+  }
+  return crates.sort((a, b) => a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0);
 }
 
 export async function buildGraph(
@@ -288,7 +329,10 @@ export async function buildGraph(
     files: entries,
   });
 
-  const edges = resolveEdges(nodes, rawEdges, { goModules: readGoModules(root, repoFiles) });
+  const edges = resolveEdges(nodes, rawEdges, {
+    goModules: readGoModules(root, repoFiles),
+    rustCrates: readCargoCrates(root, repoFiles),
+  });
 
   // Guard 5 (minimum-substance): node counts aren't known until nodes are
   // assembled, so the merge-tiny-scopes-into-root guard runs here.

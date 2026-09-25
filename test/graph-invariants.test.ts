@@ -40,6 +40,12 @@ function writeFixture(dir: string): void {
     `<?php\ninterface Shape { public function area(); }\n` +
       `class Circle implements Shape { public function area() { return 1; } }\n`,
   );
+  // a breadth-tier file: Ruby has no hand-written extractor, so its nodes come
+  // out of the generic (tags.scm) tier — the fixture needs one of each origin.
+  writeFileSync(
+    join(dir, "greeter.rb"),
+    `class Greeter\n  def render\n    self.draw\n  end\n  def draw\n    1\n  end\nend\n`,
+  );
 }
 
 /** The graph's identity for determinism: the node-id sequence and the ordered
@@ -62,8 +68,8 @@ test("Tier-0: a built multi-tier graph satisfies every structural invariant", as
 
     // both tiers are actually present, or the fixture isn't testing what it claims
     const origins = new Set(g!.nodes.filter((n) => n.kind !== "file").map((n) => n.origin));
-    assert.ok(origins.has("ast"), "TS/PHP depth-tier nodes present");
-    assert.ok(origins.has("generic"), "Rust breadth-tier nodes present");
+    assert.ok(origins.has("ast"), "TS/PHP/Rust depth-tier nodes present");
+    assert.ok(origins.has("generic"), "Ruby breadth-tier nodes present");
     // and that resolution actually produced the edge kinds this gate is meant to guard
     const rels = new Set(g!.edges.map((e) => e.relation));
     assert.ok(rels.has("calls"), "call edges resolved");

@@ -39,9 +39,10 @@ export interface GenericLang {
 }
 
 /** The breadth registry. Add a row + a queries/<name>.scm to support a language.
- * Extensions here must NOT collide with the depth tier's EXTENSIONS (extract.ts). */
+ * When a language later gains a hand-written (depth-tier) extractor, its row
+ * moves out of this list wholesale — a stale row is dead weight that misstates
+ * the tier split (PHP's was removed in #157, Rust's in PR #59). */
 export const GENERIC_LANGS: readonly GenericLang[] = [
-  { name: "rust", exts: [".rs"], wasm: "rust" },
   { name: "java", exts: [".java"], wasm: "java" },
   { name: "c", exts: [".c", ".h"], wasm: "c" },
   { name: "cpp", exts: [".cpp", ".cc", ".cxx", ".hpp", ".hh"], wasm: "cpp" },
