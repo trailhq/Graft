@@ -186,7 +186,7 @@ test('brain signup: the outcome is a category, never the sentence the user saw',
     {
       outcome: 'timed_out',
       duration_bucket: durationBucket(5 * 60 * 1000),
-      error: 'timed out waiting for the browser — run `graft brain push` again',
+      error: 'timed out waiting for the browser — run `graft trail push` again',
     },
     { home, env: OPEN },
   );

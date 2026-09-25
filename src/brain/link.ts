@@ -91,7 +91,7 @@ export function readLink(dir: string): BrainLink | null {
  * token — which is exactly why this is also where it gets ignored. The comment
  * on {@link BrainLink} has claimed `.graft/` was "git-ignored" since the day it
  * was written, and nothing ever made it true: `ensureGitignored` only ever ran
- * for the graph cache. Every repository anyone ran `graft brain connect` in was
+ * for the graph cache. Every repository anyone ran `graft trail connect` in was
  * therefore one `git add -A` away from publishing a credential. */
 export function writeLink(dir: string, link: BrainLink): void {
   patchBuildConfig(dir, { brain: link });

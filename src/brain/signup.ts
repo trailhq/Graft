@@ -2,12 +2,12 @@
  * Getting a brain without leaving the terminal.
  *
  * Until now a brain could only begin in the browser. You signed up on Trail, it
- * created the brain, and handed you a `graft init --brain <id>:<token>` line to
+ * created the brain, and handed you a `graft init --trail <id>:<token>` line to
  * paste. That is the right way round when the website is where you already are,
  * and the wrong way round when you are standing in a repository with graft
  * already installed — which is where most people meet graft first.
  *
- * So `graft brain push` on an unlinked repo starts here instead of stopping.
+ * So `graft trail push` on an unlinked repo starts here instead of stopping.
  * Graft opens a listener on loopback, sends the browser to Trail carrying the
  * repository it is standing in and the port to answer on, and waits. Trail does
  * the signing up, makes a brain for that repository, and redirects back to the
@@ -77,7 +77,7 @@ function sameState(got: string, want: string): boolean {
 function donePage(ok: boolean): string {
   const msg = ok
     ? "Your brain is connected. Return to your terminal — the push is already running."
-    : "That handoff did not match this terminal. Run `graft brain push` again.";
+    : "That handoff did not match this terminal. Run `graft trail push` again.";
   return `<!doctype html><meta charset="utf-8"><title>graft</title><body style="font:15px/1.5 system-ui,sans-serif;margin:3rem auto;max-width:32rem;color:#1F2129"><p>${msg}</p><p style="color:#676767">You can close this tab.</p>`;
 }
 
@@ -155,7 +155,7 @@ export async function startHandoff(): Promise<Handoff> {
       let timer: NodeJS.Timeout | undefined;
       const timeout = new Promise<HandoffResult>((resolve) => {
         timer = setTimeout(
-          () => resolve({ error: "timed out waiting for the browser — run `graft brain push` again, or use the link above", reason: "timed_out" }),
+          () => resolve({ error: "timed out waiting for the browser — run `graft trail push` again, or use the link above", reason: "timed_out" }),
           timeoutMs,
         );
         // The timer must not hold the process open once the browser has answered.

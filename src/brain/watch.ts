@@ -1,7 +1,7 @@
 /**
  * Watching a brain being built, from the terminal.
  *
- * `graft brain push` used to end at "it is being mined into rules now — a few
+ * `graft trail push` used to end at "it is being mined into rules now — a few
  * minutes. Watch it finish in your browser." and hand the prompt straight back.
  * That sentence is the last thing this process ever says about the work, and it
  * is said BEFORE the part that actually fails: of the repo brains attempted in

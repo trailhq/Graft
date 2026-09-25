@@ -51,7 +51,7 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
   build_failed: new Set<string>(['stage', 'code']),
   /** One query, from any surface. The DAU backbone and the dead-command detector. */
   query: new Set<string>(['command', 'surface', 'hit']),
-  /** `graft brain push` in a repo with no brain, sending the user to Trail to
+  /** `graft trail push` in a repo with no brain, sending the user to Trail to
    *  make one. Queued the moment the link is printed, so a signup somebody
    *  walked away from is still counted — the settle below never fires for those,
    *  and abandonment is exactly the thing a terminal handoff loses silently. */
@@ -107,7 +107,7 @@ export function isTrackedCommand(name: string): name is TrackedCommand {
 }
 
 /**
- * How a `graft brain push` signup ended.
+ * How a `graft trail push` signup ended.
  *
  * Four categories and nothing else, because the alternative — the error string
  * the CLI already prints — carries a repo slug and a URL. `timed_out` and

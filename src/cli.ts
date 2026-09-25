@@ -31,6 +31,7 @@ import {
 } from "./brain/push.js";
 import type { HistoryThread } from "./app/history.js";
 import { readLink, writeLink } from "./brain/link.js";
+import { withLegacyNames } from "./legacy-args.js";
 import { applyChanges, fetchAcceptedChanges, markApplied } from "./brain/claude-md.js";
 import { watchBuild } from "./brain/watch.js";
 import { openBrowser, signupUrl, startHandoff } from "./brain/signup.js";
@@ -958,8 +959,8 @@ program
   .option("--dry-run", "print every file init would touch, then exit without writing")
   .option("-y, --yes", "skip the picker and wire every detected agent (the pre-0.8 default)")
   .option("--no-global", "skip writes outside this repo (the ~/.codex/ config + hooks)")
-  .option("--brain <handoff>", "attach a Trail brain: <brainId>:<token> (or a bare brain id with GRAFT_BRAIN_TOKEN set)")
-  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; brain?: string }) => {
+  .option("--trail <handoff>", "attach a Trail: <brainId>:<token> (or a bare id with GRAFT_BRAIN_TOKEN set)")
+  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; trail?: string }) => {
     if (opts.listAgents) {
       for (const id of [...hostIds(), "claude"]) console.log(id);
       return;
@@ -967,10 +968,10 @@ program
     // Parsed before anything is written: a mistyped handoff should cost the user
     // an error, not a half-wired repo they have to `graft uninstall` out of.
     let brainLink: BrainLink | undefined;
-    if (opts.brain) {
-      const parsed = parseBrainArg(opts.brain);
+    if (opts.trail) {
+      const parsed = parseBrainArg(opts.trail);
       if ("error" in parsed) {
-        console.error(`✗ --brain: ${parsed.error}`);
+        console.error(`✗ --trail: ${parsed.error}`);
         process.exitCode = 1;
         return;
       }
@@ -1063,7 +1064,7 @@ program
     }
 
     // The brain comes last, after the graph exists: its rules are anchored to
-    // symbols, and `graft brain status` can only report how many of them resolve
+    // symbols, and `graft trail status` can only report how many of them resolve
     // once there is a graph to resolve them against.
     if (brainLink) {
       const res = await connectBrain(repo, brainLink, { home, ids });
@@ -1247,9 +1248,10 @@ program
     );
   });
 
+// `graft trail …` still works: see legacy-args.ts.
 const brain = program
-  .command("brain")
-  .description("The Trail brain attached to this repo: the rules mined from its own history");
+  .command("trail")
+  .description("The Trail attached to this repo: the rules mined from its own history");
 
 /**
  * Get this repo a brain from the terminal, by sending the user through signup
@@ -1279,7 +1281,7 @@ async function signUpForBrain(repo: string, slug: string): Promise<BrainLink | n
   // A non-interactive shell has nobody to click anything, so waiting five
   // minutes for a browser that will never come is worse than saying so now.
   if (!process.stderr.isTTY) {
-    console.error("· not a terminal — open that link, then run `graft brain connect <brainId>:<token>` here");
+    console.error("· not a terminal — open that link, then run `graft trail connect <brainId>:<token>` here");
     // Its own outcome, not a timeout: nothing here could have opened a browser,
     // so folding the two together would read as people abandoning signup when
     // it is only a remote shell doing what it has to.
@@ -1327,7 +1329,7 @@ brain
       // read the repo yet. Saying "0 rules" without saying why reads as a
       // failure, and the next step is the whole point.
       console.error("✓ attached this repo to the brain — it has no rules yet");
-      console.error("· run `graft brain push` to read this repository into it");
+      console.error("· run `graft trail push` to read this repository into it");
       return;
     }
     console.error(`✓ pulled ${res.ruleCount} rule(s) from ${parsed.brainId}`);
@@ -1342,7 +1344,7 @@ brain
     const repo = resolve(dir);
     const res = await pullBrain(repo, { home: homedir() });
     if (!res) {
-      console.error("· no brain attached — run `graft brain connect <brainId>:<token>`");
+      console.error("· no brain attached — run `graft trail connect <brainId>:<token>`");
       return;
     }
     if (res.warning) {
@@ -1471,7 +1473,7 @@ brain
       // A non-zero exit, unlike every other ending here: this is the one case
       // where the work did not produce a brain, and a CI step that ran the push
       // should hear about it the way it hears about any other failure.
-      console.error("  Nothing was lost — the brain is still there. Run `graft brain push` again to retry the read.");
+      console.error("  Nothing was lost — the brain is still there. Run `graft trail push` again to retry the read.");
       process.exitCode = 1;
       return;
     }
@@ -1495,7 +1497,7 @@ claudeMd
     const repo = resolve(dir);
     const link = readLink(repo);
     if (!link) {
-      console.error("✗ this repo has no brain attached — run `graft brain push` first");
+      console.error("✗ this repo has no brain attached — run `graft trail push` first");
       process.exitCode = 1;
       return;
     }
@@ -1565,7 +1567,7 @@ brain
       return;
     }
     if (!link) {
-      console.error("· no brain attached — run `graft brain connect <brainId>:<token>`");
+      console.error("· no brain attached — run `graft trail connect <brainId>:<token>`");
       return;
     }
     console.error(`brain ${link.brainId}`);
@@ -1594,7 +1596,7 @@ brain
     console.error(`✓ detached the brain from ${repo}`);
   });
 
-program.parseAsync().catch((err) => {
+program.parseAsync(withLegacyNames(process.argv)).catch((err) => {
   console.error(err instanceof Error ? err.message : err);
   process.exit(1);
 });
