@@ -10,6 +10,7 @@ import { loadGraphCached } from '../graph/load.js';
 import { ensureFreshChildren, ensureFreshGraph, refreshNote } from '../graph/refresh.js';
 import { contextDirFor } from '../context/node-file.js';
 import { resolveSymbol, edgeWalk, type Direction, type EdgeHit } from '../graph/traverse.js';
+import { findImportCycles, formatImportCycles } from '../graph/cycles.js';
 import { callersSavings, headerOf, hitLine, looseNoteFor } from '../graph/traverse-cli.js';
 import { withSavings, setInputRate } from '../context/savings.js';
 import { sessionInputRate } from '../claude/session-metrics.js';
@@ -96,6 +97,12 @@ export const TOOLS: ToolDef[] = [
       },
       required: ['symbol'],
     },
+  },
+  {
+    name: 'graft_find_import_cycles',
+    description:
+      'Find every resolved file-to-file import cycle across all languages. Reports each import line and marks lazy edges within each cycle ($0, no LLM).',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'graft_find_all',
@@ -302,6 +309,11 @@ async function callSingleTool(
         const body = renderMatches(direction, depth > 1, matches, (m) => byId.get(m.id) ?? []);
         const text = withSavings(body, callersSavings(w, results));
         return { text, isError: false };
+      }
+      case 'graft_find_import_cycles': {
+        const w = loadGraphCached(contextDirFor(root, dirOverride));
+        if (!w) return { text: NO_GRAPH, isError: true };
+        return { text: formatImportCycles(findImportCycles(w)), isError: false };
       }
       case 'graft_find_all': {
         const pattern = String(args.pattern ?? '');

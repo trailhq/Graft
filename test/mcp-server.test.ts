@@ -64,6 +64,7 @@ const ALL_TOOLS = [
   'graft_file_api',
   'graft_check_freshness',
   'graft_trace_calls',
+  'graft_find_import_cycles',
   'graft_find_all',
   'graft_repo_map',
 ];
@@ -139,7 +140,7 @@ test('initialize carries instructions — the layer that survives tool deferral'
   // else, so this string has to carry both the pitch and the recovery instruction.
   assert.match(instructions, /ONE lookup/, 'tells the agent to batch the schema fetch');
   assert.match(instructions, /select:mcp__graft__graft_find_code,/, 'gives a copy-pasteable query');
-  for (const t of ['graft_find_code', 'graft_find_all', 'graft_trace_calls', 'graft_file_api', 'graft_repo_map']) {
+  for (const t of ['graft_find_code', 'graft_find_all', 'graft_trace_calls', 'graft_find_import_cycles', 'graft_file_api', 'graft_repo_map']) {
     assert.ok(instructions.includes(t), `names ${t}`);
   }
   // Observed sibling servers sit at 660–984 chars; nothing proves a longer one

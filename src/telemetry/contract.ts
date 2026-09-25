@@ -98,7 +98,7 @@ export type AgentHost = 'claude-code' | 'cursor' | 'mcp' | 'cli';
  * what keeps a future `graft <something-user-named>` from becoming a data leak.
  */
 export const TRACKED_COMMANDS = [
-  'ask', 'grep', 'callers', 'skeleton', 'map', 'check', 'blast', 'viz',
+  'ask', 'grep', 'callers', 'cycles', 'skeleton', 'map', 'check', 'blast', 'viz',
 ] as const;
 export type TrackedCommand = (typeof TRACKED_COMMANDS)[number];
 

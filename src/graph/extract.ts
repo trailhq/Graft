@@ -93,6 +93,8 @@ export interface RawEdge {
   file: string; // the file this edge originates in (scopes name resolution)
   targetId?: string; // already-resolved target (contains)
   specifier?: string; // module path to resolve (imports / imported-symbol references)
+  lazy?: true; // present-only-when-true keeps eager imports byte-compatible
+  line?: number; // 1-based to match graph spans and editor coordinates
   name?: string; // symbol name to resolve (extends/implements/calls)
   viaMember?: boolean; // calls: was it `obj.foo()` (→ prefer method targets)?
   /** calls with viaMember: the receiver's resolved type name (from bindings /
@@ -335,6 +337,7 @@ export interface WalkCtx {
   enclosingClass: string | null; // nearest enclosing class (py/ts `self`/`this`)
   goReceiverVar: string | null; // Go receiver var, e.g. `w` in `func (w *Worker)`
   importedSymbols: ReadonlyMap<string, { name: string; specifier: string }>;
+  typeCheckingOnly: boolean;
   // R6 (Phase 2): which list we're inside while walking an `R6Class(...)` call's
   // arguments — set only for the direct span of a `public =`/`private =`/
   // `active =` `list(...)`'s own entries (see walk()'s special-cased `argument`
@@ -422,6 +425,7 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
     enclosingClass: null,
     goReceiverVar: null,
     importedSymbols,
+    typeCheckingOnly: false,
     rR6Access: null,
     rGenerics,
     rSuperClass: null,
@@ -698,6 +702,28 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
     }
   }
 
+  if (ctx.lang === "python" && ctx.enclosingKind === null && node.type === "if_statement") {
+    const condition = node.childForFieldName("condition");
+    const consequence = node.childForFieldName("consequence");
+    const isTypeChecking =
+      (condition?.type === "identifier" && condition.text === "TYPE_CHECKING") ||
+      (condition?.type === "attribute" &&
+        condition.childForFieldName("object")?.text === "typing" &&
+        condition.childForFieldName("attribute")?.text === "TYPE_CHECKING");
+    if (isTypeChecking && consequence) {
+      for (const child of node.namedChildren) {
+        walk(
+          child,
+          sameSyntaxNode(child, consequence) ? { ...ctx, typeCheckingOnly: true } : ctx,
+          out,
+          edges,
+          minted,
+        );
+      }
+      return;
+    }
+  }
+
   // not a definition — capture calls/imports/references, then descend with the same context
   // R's `call` node is also its ONLY vehicle for library()/require()/source() —
   // there's no separate import-statement grammar construct to key off, so isImport
@@ -706,7 +732,16 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
   const callTypes = CALL_TYPES[ctx.lang];
   if (isImport(node, ctx.lang)) {
     const spec = importSpecifier(node, ctx.lang);
-    if (spec) edges.push({ source: ctx.rel, relation: "imports", specifier: spec, file: ctx.rel });
+    if (spec) {
+      edges.push({
+        source: ctx.rel,
+        relation: "imports",
+        specifier: spec,
+        file: ctx.rel,
+        line: node.startPosition.row + 1,
+        ...(ctx.enclosingKind !== null || ctx.typeCheckingOnly ? { lazy: true as const } : {}),
+      });
+    }
     // Imported identifiers are declarations, not uses. The import-binding pass
     // above already recorded them, so do not descend and emit false references.
     return;

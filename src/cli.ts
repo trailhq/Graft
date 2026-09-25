@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `graft` CLI. Commands: build, ask, check, viz, mcp, callers, skeleton, grep,
+ * `graft` CLI. Commands: build, ask, check, viz, mcp, callers, cycles, skeleton, grep,
  * map, init. Git is the sync: commit graft/ and a clone has the graph. A
  * workspace parent (≥2 git children) federates query commands across children.
  */
@@ -36,6 +36,7 @@ import {
   runWorkspaceBuild,
   runWorkspaceCallers,
   runWorkspaceCheck,
+  runWorkspaceCycles,
   runWorkspaceGrep,
   runWorkspaceMap,
 } from "./graph/workspace-cli.js";
@@ -769,13 +770,39 @@ program
 
 program
   .command("mcp")
-  .description("Serve the graph over MCP (stdio) — exposes graft_find_code, graft_trace_calls, graft_find_all, graft_file_api, graft_repo_map and graft_check_freshness as tools")
+  .description("Serve the graph over MCP (stdio) — exposes code search, call tracing, import cycles, file APIs, repo maps and freshness checks as tools")
   .argument(...DIR_ARG)
   .action(async (dirArg: string | undefined) => {
     const dir = noteQuery(queryRoot(dirArg));
     const { startMcpServer } = await import("./mcp/server.js");
     const globalOpts = program.opts<{ dir?: string }>();
     startMcpServer(dir, globalOpts.dir, currentVersion);
+  });
+
+program
+  .command("cycles")
+  .description("Find resolved file-to-file import cycles, with lazy edges and import lines ($0, no LLM)")
+  .argument(...DIR_ARG)
+  .option(...NO_REFRESH_FLAG)
+  .action(async (dirArg: string | undefined, opts: { refresh?: boolean }) => {
+    const dir = noteQuery(queryRoot(dirArg));
+    await refreshBefore(dir, opts);
+    const root = resolve(dir);
+    const globalOpts = program.opts<{ dir?: string }>();
+    if (readWorkspace(root, globalOpts.dir)) {
+      noteHit(runWorkspaceCycles(root, globalOpts.dir) > 0);
+      return;
+    }
+    const graph = loadGraphCached(contextDirFor(root, globalOpts.dir));
+    if (!graph) {
+      console.error("✗ no graph — run graft build first");
+      process.exit(1);
+      return;
+    }
+    const { findImportCycles, formatImportCycles } = await import("./graph/cycles.js");
+    const cycles = findImportCycles(graph);
+    noteHit(cycles.length > 0);
+    process.stdout.write(formatImportCycles(cycles));
   });
 
 program

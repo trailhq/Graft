@@ -84,6 +84,7 @@ test('the contract lists exactly the nine documented events', () => {
 
 test('only the known commands are tracked', () => {
   assert.equal(isTrackedCommand('ask'), true);
+  assert.equal(isTrackedCommand('cycles'), true);
   assert.equal(isTrackedCommand('init'), false, 'init has its own event, not a query');
   assert.equal(isTrackedCommand('telemetry'), false);
   assert.equal(isTrackedCommand('_telemetry-flush'), false);

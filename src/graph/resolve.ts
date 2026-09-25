@@ -116,6 +116,9 @@ export function resolveEdges(
   // language convention mirrors the directory path under whatever source root the
   // project uses (`src/main/java/`, `src/`, …) — so the suffix is the portable key.
   const javaFilesBySuffix = new Map<string, string[]>();
+  // Python's import path omits both the source root and file extension, so its
+  // suffix key is the extensionless module path; package dirs also name __init__.
+  const pythonFilesBySuffix = new Map<string, PythonImportCandidate[]>();
   // C/C++ header resolution: a file's path-suffix (`net/socket.h`, `socket.h`) → its
   // file node ids, so an `#include` reached through an `-I` dir (not relative to the
   // including file) still resolves to the in-repo header when the suffix is unique.
@@ -141,6 +144,22 @@ export function resolveEdges(
         // `acme/Foo.java`, and so on. The import's own FQN picks the right depth.
         const parts = toPosixPath(n.path).split("/");
         for (let i = 0; i < parts.length; i++) push(javaFilesBySuffix, parts.slice(i).join("/"), n.id);
+      }
+      if (PY_EXT.test(n.path)) {
+        const modulePath = toPosixPath(n.path).replace(/\.pyi?$/i, "");
+        const modulePaths = [modulePath];
+        if (modulePath.endsWith("/__init__") || modulePath === "__init__") {
+          modulePaths.push(posix.dirname(modulePath));
+        }
+        for (const candidatePath of modulePaths) {
+          const parts = candidatePath === "." ? [] : candidatePath.split("/");
+          for (let i = 0; i < parts.length; i++) {
+            push(pythonFilesBySuffix, parts.slice(i).join("/"), {
+              id: n.id,
+              root: parts.slice(0, i).join("/"),
+            });
+          }
+        }
       }
       if (C_EXT.test(n.path)) {
         const parts = toPosixPath(n.path).split("/");
@@ -193,12 +212,31 @@ export function resolveEdges(
   }
 
   const out: EdgeV1[] = [];
-  const seen = new Set<string>();
-  const add = (source: string, target: string, relation: Relation, confidence: EdgeV1["confidence"]) => {
+  const edgeIndexByKey = new Map<string, number>();
+  const add = (
+    source: string,
+    target: string,
+    relation: Relation,
+    confidence: EdgeV1["confidence"],
+    metadata: Pick<EdgeV1, "lazy" | "line"> = {},
+  ) => {
     const key = `${source}\0${relation}\0${target}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push({ source, target, relation, confidence });
+    const edge: EdgeV1 = {
+      source,
+      target,
+      relation,
+      confidence,
+      ...(metadata.lazy ? { lazy: true as const } : {}),
+      ...(metadata.line === undefined ? {} : { line: metadata.line }),
+    };
+    const existingIndex = edgeIndexByKey.get(key);
+    if (existingIndex !== undefined) {
+      // Import timing is semantic: an eager occurrence must win regardless of arrival order.
+      if (relation === "imports" && out[existingIndex].lazy && !edge.lazy) out[existingIndex] = edge;
+      return;
+    }
+    edgeIndexByKey.set(key, out.length);
+    out.push(edge);
   };
 
   for (const e of rawEdges) {
@@ -208,16 +246,18 @@ export function resolveEdges(
       const target =
         hasGoModules && e.file.endsWith(".go")
           ? resolveGoImport(e.specifier, opts.goModules!, goFilesByDir)
-          : e.file.endsWith(".java")
-            ? resolveJavaImport(e.specifier, javaFilesBySuffix)
-            : C_EXT.test(e.file)
-              ? resolveCInclude(e.specifier, e.file, byId, cFilesBySuffix)
-              : e.file.endsWith(".rs")
-                ? resolveRustUse(e.specifier, e.file, byId, rustCrateRoots)
-                : e.file.endsWith(".php")
-                  ? resolvePhpUse(e.specifier, phpFilesBySuffix)
-                  : resolveImport(e.specifier, e.file, byId);
-      add(e.source, target, "imports", "extracted");
+          : PY_EXT.test(e.file)
+            ? resolvePythonImport(e.specifier, e.file, byId, pythonFilesBySuffix)
+            : e.file.endsWith(".java")
+              ? resolveJavaImport(e.specifier, javaFilesBySuffix)
+              : C_EXT.test(e.file)
+                ? resolveCInclude(e.specifier, e.file, byId, cFilesBySuffix)
+                : e.file.endsWith(".rs")
+                  ? resolveRustUse(e.specifier, e.file, byId, rustCrateRoots)
+                  : e.file.endsWith(".php")
+                    ? resolvePhpUse(e.specifier, phpFilesBySuffix)
+                    : resolveImport(e.specifier, e.file, byId);
+      add(e.source, target, "imports", "extracted", { lazy: e.lazy, line: e.line });
     } else if (e.relation === "extends" || e.relation === "implements") {
       // `implements` also resolves to a `trait` — PHP models trait composition
       // (`use SomeTrait;`) as an implements edge, and a trait is a valid target.
@@ -504,6 +544,55 @@ function resolveImport(spec: string, file: string, byId: Map<string, NodeV1>): s
     ...IMPORT_EXTS.map((e) => `${noExt}/index${e}`),
   ];
   for (const c of candidates) if (byId.has(c)) return c;
+  return spec;
+}
+
+/** Python source roots are not declared uniformly, so only a unique dotted
+ * module-path suffix is certain; a bare name may still be stdlib/third-party.
+ * A missing full module may name an attribute on its parent; retry that parent
+ * once, but never fall through an ambiguous full suffix. */
+interface PythonImportCandidate {
+  id: string;
+  root: string;
+}
+
+function resolvePythonImport(
+  spec: string,
+  file: string,
+  byId: Map<string, NodeV1>,
+  filesBySuffix: Map<string, PythonImportCandidate[]>,
+): string {
+  if (spec.startsWith(".")) {
+    const leadingDots = spec.match(/^\.+/)![0].length;
+    const packageParts = posix.dirname(toPosixPath(file)).split("/").filter((part) => part !== ".");
+    const parentHops = leadingDots - 1;
+    if (parentHops >= packageParts.length) return spec;
+    const moduleParts = spec.slice(leadingDots).split(".").filter(Boolean);
+    const modulePath = [...packageParts.slice(0, packageParts.length - parentHops), ...moduleParts].join("/");
+    const candidates = [
+      `${modulePath}.py`,
+      `${modulePath}.pyi`,
+      `${modulePath}/__init__.py`,
+      `${modulePath}/__init__.pyi`,
+    ].filter((candidate) => byId.has(candidate));
+    return candidates.length === 1 ? candidates[0] : spec;
+  }
+  const hit = (module: string): string | "ambiguous" | null => {
+    const files = filesBySuffix.get(module.split(".").join("/"));
+    if (!files || files.length === 0) return null;
+    if (files.length === 1 && module.includes(".")) return files[0].id;
+    const local = files.filter(({ root }) => root === "" || file.startsWith(`${root}/`));
+    return local.length === 1 ? local[0].id : "ambiguous";
+  };
+
+  const direct = hit(spec);
+  if (direct === "ambiguous") return spec;
+  if (direct) return direct;
+  const dot = spec.lastIndexOf(".");
+  if (dot > 0) {
+    const enclosing = hit(spec.slice(0, dot));
+    if (enclosing && enclosing !== "ambiguous") return enclosing;
+  }
   return spec;
 }
 

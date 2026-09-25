@@ -56,7 +56,7 @@ review:
 - **Every number is a bucket.** A build reports `"200-999"` files, never `417`.
   An exact count next to a language set starts to fingerprint a specific repo; a
   bucket does not.
-- **Every string is a member of a fixed set.** `command` is one of eight known
+- **Every string is a member of a fixed set.** `command` is one of nine known
   subcommands, `code` is one of eleven known failure codes. A value outside the
   set is dropped, not sent — which is what stops a path, a symbol name, or a
   snippet of an error message from riding along inside a "string property".

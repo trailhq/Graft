@@ -11,13 +11,16 @@ import { patchBuildConfig, type BuildConfig } from "../util/state.js";
 import type { EngineConfig } from "../ai/providers.js";
 import { formatAsk } from "../ask/ask.js";
 import type { Direction } from "./traverse.js";
+import { findImportCycles, formatImportCycles } from "./cycles.js";
 import {
+  coverageNote,
   federateAsk,
   federateCallers,
   federateCheck,
   federateGrep,
   federateMap,
   formatGrepResult,
+  loadWorkspaceGraphs,
   migrationNote,
   splitWorkspace,
   zeroHitNote,
@@ -127,6 +130,20 @@ export async function runWorkspaceCheck(root: string, override?: string): Promis
   const { text, ok } = await federateCheck(root, override);
   process.stdout.write(text);
   if (!ok) process.exit(1);
+}
+
+export function runWorkspaceCycles(root: string, override?: string): number {
+  const wg = loadWorkspaceGraphs(root, override);
+  let cycleCount = 0;
+  const sections = wg.loaded.map(({ child, graph }) => {
+    const cycles = findImportCycles(graph);
+    cycleCount += cycles.length;
+    return `## ${child}/\n${formatImportCycles(cycles).trimEnd()}`;
+  });
+  const coverage = coverageNote(wg);
+  if (coverage) sections.push(coverage);
+  if (sections.length > 0) process.stdout.write(sections.join("\n\n") + "\n");
+  return cycleCount;
 }
 
 export function runWorkspaceCallers(

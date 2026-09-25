@@ -21,6 +21,7 @@ const TOOL_COMMAND: Record<string, string> = {
   graft_find_code: 'ask',
   graft_find_all: 'grep',
   graft_trace_calls: 'callers',
+  graft_find_import_cycles: 'cycles',
   graft_file_api: 'skeleton',
   graft_repo_map: 'map',
   graft_check_freshness: 'check',

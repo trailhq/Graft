@@ -105,6 +105,8 @@ export interface EdgeV1 {
   target: string; // node id, or an unresolved module string for imports
   relation: Relation;
   confidence: Confidence;
+  lazy?: true; // present-only-when-true keeps old graphs and eager edges compatible
+  line?: number; // 1-based to match node spans and editor coordinates
 }
 
 /** A ranking scope: a sub-project discovered by project-marker files (`package.json`,
