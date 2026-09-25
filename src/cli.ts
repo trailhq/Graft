@@ -11,6 +11,8 @@ import { fileURLToPath } from "node:url";
 import { Graft } from "./engine.js";
 import { resolveConfig, type EngineConfig } from "./ai/providers.js";
 import type { ProviderKind } from "./ai/llm/factory.js";
+import { ClaudeCodeChatModel, claudeCodeStatus, describeSignIn, preflightProblem } from "./ai/llm/claude-code.js";
+import { runAuth } from "./ai/claude-code-auth.js";
 import { formatCheckReport } from "./context/check.js";
 import { formatGraphCheckReport } from "./graph/check.js";
 import { buildGraphIfMissing, runInit } from "./claude/init.js";
@@ -113,7 +115,7 @@ program
   .description("Build a repo's context graph as linked markdown, and keep it in sync with the code.")
   .version(currentVersion, "-v, --version")
   .option("--dir <path>", "context graph directory (default: <repo>/graft)")
-  .option("--provider <name>", "LLM wire format: openai | anthropic | litellm | orcarouter (env GRAFT_PROVIDER)")
+  .option("--provider <name>", "LLM wire format: openai | anthropic | litellm | orcarouter, or claude-code to run the local Claude Code on its own sign-in, no key (env GRAFT_PROVIDER)")
   .option("--model <id>", "model id for the LLM pass (env GRAFT_MODEL)")
   .option("--api-key <key>", "provider API key (env GRAFT_API_KEY)")
   .option("--base-url <url>", "OpenAI-compatible endpoint URL (env GRAFT_BASE_URL)");
@@ -331,6 +333,33 @@ program
     if (result.ran && !result.ok) process.exit(1);
   });
 
+// Sign-in for `--provider claude-code`. Every subcommand hands off to Claude
+// Code's own flow; graft never sees a credential (see ai/claude-code-auth.ts).
+const auth = program
+  .command("auth")
+  .description("Sign Claude Code in for --provider claude-code — hands off to Claude Code's own flow, graft never sees a credential");
+
+auth
+  .command("login")
+  .description("Sign in to Claude Code with your Claude subscription, in the browser (runs `claude auth login`)")
+  .action(async () => {
+    process.exitCode = await runAuth("login");
+  });
+
+auth
+  .command("status")
+  .description("Show whether Claude Code is signed in, and whether it bills a subscription or an API key")
+  .action(async () => {
+    process.exitCode = await runAuth("status");
+  });
+
+auth
+  .command("token")
+  .description("Create a long-lived token for CI or headless machines (runs `claude setup-token`); you export CLAUDE_CODE_OAUTH_TOKEN yourself")
+  .action(async () => {
+    process.exitCode = await runAuth("token");
+  });
+
 program
   .command("build")
   .description(
@@ -340,7 +369,7 @@ program
   .argument("[dir]", "repository root", ".")
   .option("--deep", "run the LLM pass: concept nodes (graft/*.md) + per-symbol summary/crux")
   .option("-e, --extensions <exts...>", 'code extensions to include (e.g. ".ts" ".py"); an extension with no parser is ignored with a warning that lists the supported set')
-  .option("-j, --concurrency <n>", "files summarized in parallel during --deep (default 5)")
+  .option("-j, --concurrency <n>", "files summarized in parallel during --deep, in both passes (default 8 for concepts, 5 for symbols)")
   .option("--no-reuse", "re-parse every file instead of replaying unchanged ones from the extraction cache")
   .option("--lsp", "add compiler-grade call edges via a language server if one is installed (opt-in, slower; e.g. rust-analyzer, clangd)")
   .option("--allow-partial", "with --deep: exit 0 even when some files' summaries failed (default: a degraded meaning tier exits 1)")
@@ -462,10 +491,21 @@ program
         .map(([k, n]) => `${n} ${k}`)
         .join(", ");
 
-    // --deep needs a key; without one, degrade to the $0 structural build.
+    // --deep needs a key; without one, degrade to the $0 structural build. The
+    // claude-code provider needs none, but a missing or signed-out Claude Code is
+    // an error here, before any file is read.
     let deep = opts.deep;
     const resolved = resolveConfig(cliConfig());
-    if (deep && !resolved.apiKey) {
+    if (deep && resolved.provider === "claude-code") {
+      const status = await claudeCodeStatus();
+      const problem = preflightProblem(status);
+      if (problem) {
+        console.error(`✗ --provider claude-code: ${problem}`);
+        process.exit(1);
+      }
+      // An API key in Claude Code's environment outranks the subscription sign-in.
+      console.error(`${status.apiKeySource ? "⚠" : "•"} claude-code: ${describeSignIn(status)}, model ${resolved.model}`);
+    } else if (deep && !resolved.apiKey) {
       deep = false;
       console.error(
         "⚠ no API key set — falling back to the structural build (no LLM summaries).\n" +
@@ -503,6 +543,7 @@ program
       const c = await engine.init(dir, {
         extensions: opts.extensions,
         onlyDirs,
+        concurrency,
         onProgress: ({ phase, index, total, file }) =>
           process.stderr.write(
             `\r${phase === "summarize" ? "reading" : "writing"} concepts ${index + 1}/${total}: ${file.slice(0, 40).padEnd(40)}`,
@@ -544,6 +585,13 @@ program
     if (deep) {
       const m = g.meaning;
       console.log(`  meaning: ${m.computed} computed, ${m.cached} cached, ${m.stale} stale, ${m.pending} pending`);
+      const transport = engine.chatModelInUse;
+      if (transport instanceof ClaudeCodeChatModel && transport.calls > 0) {
+        console.log(
+          `  claude-code: ${transport.calls} calls, $${transport.totalCostUsd.toFixed(2)} at API prices ` +
+            "(Claude Code's estimate; on a subscription it counts against your plan's usage, not a bill)",
+        );
+      }
     }
     console.log(`  → ${g.contextDir}`);
     // The activation event. Everything here is a bucket or a fixed label: repo
@@ -841,7 +889,7 @@ program
   .option("--base <ref>", "diff against this ref's merge base with HEAD (e.g. origin/main); default: the working tree vs HEAD")
   .option("-d, --depth <n>", 'hops to walk over incoming edges, or "all" for the full closure (default 2)')
   .option("--format <fmt>", "text (default) | markdown | mermaid | json")
-  .option("--name", "name the affected areas with one cached LLM call (needs GRAFT_API_KEY); without it, areas are named after their hub symbol")
+  .option("--name", "name the affected areas with one cached LLM call (needs GRAFT_API_KEY, or GRAFT_PROVIDER=claude-code); without it, areas are named after their hub symbol")
   .option("--export-viz <dir>", "also write the interactive page for this radius (one self-contained index.html — for CI, GitHub Pages, or an artifact)")
   .option("--title <text>", "subtitle beside the repo name on the exported page (e.g. \"PR #171\")")
   .option("--no-owners", "do not suggest who to tag (by default, git history names the people behind each affected area)")

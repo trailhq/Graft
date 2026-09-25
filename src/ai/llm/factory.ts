@@ -13,18 +13,29 @@
  * OrcaRouter AI gateway by default (see orcarouter.ts) so its users get the
  * gateway's routing, failover, and guardrails behind a named provider instead
  * of a bare custom base URL.
+ *
+ * `claude-code` is the one provider that is not a wire format: it runs the local
+ * `claude` binary headless (see claude-code.ts), so it takes no key and no base
+ * URL — Claude Code's own sign-in pays for the call.
  */
 import type { ChatModel } from "./types.js";
 import { OpenAIChatModel } from "./openai.js";
 import { AnthropicChatModel } from "./anthropic.js";
 import { LiteLLMChatModel } from "./litellm.js";
 import { OrcaRouterChatModel } from "./orcarouter.js";
+import { ClaudeCodeChatModel } from "./claude-code.js";
 
-export type ProviderKind = "openai" | "anthropic" | "litellm" | "orcarouter";
+export type ProviderKind = "openai" | "anthropic" | "litellm" | "orcarouter" | "claude-code";
+
+/** Whether the provider needs an API key. Only `claude-code` does not. */
+export function providerNeedsKey(provider: ProviderKind): boolean {
+  return provider !== "claude-code";
+}
 
 export interface ChatModelConfig {
   provider: ProviderKind;
-  apiKey: string;
+  /** Required by every provider except `claude-code`. */
+  apiKey?: string;
   model: string;
   baseUrl?: string;
   /** Extra default headers for OpenAI-compatible endpoints (e.g. OpenRouter `X-Title`). */
@@ -32,30 +43,36 @@ export interface ChatModelConfig {
 }
 
 export function createChatModel(cfg: ChatModelConfig): ChatModel {
+  const apiKey = (): string => {
+    if (!cfg.apiKey) throw new Error(`the ${cfg.provider} provider needs an API key (GRAFT_API_KEY)`);
+    return cfg.apiKey;
+  };
   switch (cfg.provider) {
     case "anthropic":
-      return new AnthropicChatModel({ apiKey: cfg.apiKey, model: cfg.model, baseUrl: cfg.baseUrl });
+      return new AnthropicChatModel({ apiKey: apiKey(), model: cfg.model, baseUrl: cfg.baseUrl });
     case "openai":
       return new OpenAIChatModel({
-        apiKey: cfg.apiKey,
+        apiKey: apiKey(),
         model: cfg.model,
         baseUrl: cfg.baseUrl,
         headers: cfg.headers,
       });
     case "litellm":
       return new LiteLLMChatModel({
-        apiKey: cfg.apiKey,
+        apiKey: apiKey(),
         model: cfg.model,
         baseUrl: cfg.baseUrl,
         headers: cfg.headers,
       });
     case "orcarouter":
       return new OrcaRouterChatModel({
-        apiKey: cfg.apiKey,
+        apiKey: apiKey(),
         model: cfg.model,
         baseUrl: cfg.baseUrl,
         headers: cfg.headers,
       });
+    case "claude-code":
+      return new ClaudeCodeChatModel({ model: cfg.model });
     default: {
       const _exhaustive: never = cfg.provider;
       throw new Error(`unknown provider: ${String(_exhaustive)}`);

@@ -30,6 +30,14 @@ export const MAX_CONSECUTIVE_FAILURES = 5;
  */
 export function terminalReason(message: string): string | null {
   const m = message.toLowerCase();
+  // The claude-code provider's own errors (llm/claude-code.ts), checked first so a
+  // spent subscription is not reported as a spent API key.
+  if (m.includes("claude code usage limit reached")) {
+    return "the Claude subscription's usage limit is reached (reported by Claude Code)";
+  }
+  if (m.includes("claude code is not signed in")) {
+    return "Claude Code is not signed in (run `graft auth login`)";
+  }
   if (/quota|insufficient[_ ]funds|insufficient[_ ]quota|billing|payment required|402/.test(m)) {
     return "the provider reports the quota/credit for this key is exhausted";
   }

@@ -61,7 +61,7 @@
 - [How the graph gets built](#how-the-graph-gets-built)
 - [Supported languages](#supported-languages)
 - [What's in a node](#whats-in-a-node)
-- [What runs where](#what-runs-where)
+- [What runs where](#what-runs-where) — [Use your Claude subscription](#use-your-claude-subscription---provider-claude-code)
 - [Agent integration](#agent-integration) — [MCP server](#mcp-server) · [Claude Code (deep integration)](#claude-code-deep-integration)
 - [CLI](#cli)
 - [Search & orient](#search--orient-graft-grep--graft-map) (`graft grep` / `graft map`)
@@ -255,10 +255,30 @@ _Summary, sources, links, and notes ship today in markdown nodes. The crux ships
 ## What runs where
 
 - **On your machine, no key, no network:** the structural code graph. `graft build` (wiring graph + per-file cards), `graft check`, and `graft ask` are deterministic tree-sitter — they never call a model.
-- **Through your provider key:** the LLM-written parts — `graft build --deep` adds the concept nodes (file summaries + node synthesis) and the per-symbol summaries and cruxes. graft is vendor-neutral: set `GRAFT_PROVIDER` (`openai` for any OpenAI-compatible endpoint, `anthropic` for the native API, or `litellm` / `orcarouter` for a gateway that speaks the OpenAI-compatible format), your `GRAFT_API_KEY`, `GRAFT_MODEL`, and — for the `openai` wire format — `GRAFT_BASE_URL` to point at OpenRouter, Fireworks, Groq, a LiteLLM proxy, a local server, or OpenAI itself. Or pass `--provider/--model/--api-key/--base-url` on the command line. (`OPENROUTER_API_KEY` still works as a deprecated fallback, and `ORCAROUTER_API_KEY` as a second one.)
+- **Through your provider key:** the LLM-written parts — `graft build --deep` adds the concept nodes (file summaries + node synthesis) and the per-symbol summaries and cruxes. graft is vendor-neutral: set `GRAFT_PROVIDER` (`openai` for any OpenAI-compatible endpoint, `anthropic` for the native API, or `litellm` / `orcarouter` for a gateway that speaks the OpenAI-compatible format), your `GRAFT_API_KEY`, `GRAFT_MODEL`, and — for the `openai` wire format — `GRAFT_BASE_URL` to point at OpenRouter, Fireworks, Groq, a LiteLLM proxy, a local server, or OpenAI itself. Or pass `--provider/--model/--api-key/--base-url` on the command line. (`OPENROUTER_API_KEY` still works as a deprecated fallback, and `ORCAROUTER_API_KEY` as a second one.) No key at all: `--provider claude-code` runs the deep pass on your Claude subscription through Claude Code ([below](#use-your-claude-subscription---provider-claude-code)).
 - **Anonymous usage stats** — the only network calls are the LLM requests you configured, a daily npm version check, and one batched usage ping. The ping carries buckets and fixed labels only: never your code, file paths, repo name, symbols, queries, or error messages. [`TELEMETRY.md`](TELEMETRY.md) is the complete list and `graft telemetry debug` prints exactly what your machine would send. Turn it off with `graft telemetry disable`, `DO_NOT_TRACK=1`, or by unchecking the box in `graft init`; it is off in CI and in any build from source.
 
 See [`.env.example`](.env.example) for the full list of settings (model, base URL, graph directory).
+
+### Use your Claude subscription (`--provider claude-code`)
+
+If you have Claude Code signed in to a Claude Pro, Max, Team or Enterprise plan, `--deep` can run on that sign-in instead of an API key:
+
+```bash
+graft auth login                                  # once: Claude Code's own browser sign-in
+graft build --deep --provider claude-code         # or GRAFT_PROVIDER=claude-code; no GRAFT_API_KEY needed
+graft build --deep --provider claude-code --model opus -j 3
+```
+
+graft does this by running the `claude` binary you installed, headless (`claude -p`), once per LLM call. It writes the prompt to Claude Code's stdin and reads the JSON it prints. It never reads Claude Code's stored credentials, never holds an OAuth token, and never calls the Anthropic API itself. Anthropic's [legal and compliance terms](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) allow you to sign in to the unmodified Claude Code binary with your own subscription, but they don't allow a third-party tool to collect, store or pass along Claude.ai credentials or session tokens. Driving the binary keeps graft on the permitted side of that line: the sign-in stays between you and Claude Code.
+
+Each call is isolated from your Claude Code setup. It loads no user or project settings, so none of your hooks run and your `CLAUDE.md` isn't read. It also starts no MCP servers, offers the model no tools, loads no skills, saves no session transcript, and replaces Claude Code's agent prompt with graft's own. Every call runs in a fresh empty temp directory, never in your repo.
+
+- `graft auth login` runs `claude auth login` (Anthropic's browser sign-in, stored by Claude Code).
+- `graft auth status` says whether Claude Code is signed in and whether it will use your subscription or an API key. It never prints your email address. An `ANTHROPIC_API_KEY` in the environment takes precedence over the subscription in Claude Code, so `graft build` warns when one is set.
+- `graft auth token` runs `claude setup-token` for CI and headless machines. Claude Code prints the token straight to your terminal; graft never sees it. Export it yourself as `CLAUDE_CODE_OAUTH_TOKEN` where graft runs.
+
+The model defaults to `sonnet` (a Claude Code alias). `--model` / `GRAFT_MODEL` take any alias or full model id Claude Code accepts. `-j` sets how many `claude` processes run at once. When your plan's usage limit is reached, the build stops instead of retrying and tells you to re-run after the reset; whatever was already summarized is cached. `GRAFT_CLAUDE_CODE_BIN` points at a `claude` that isn't on `PATH`, and `GRAFT_CLAUDE_CODE_TIMEOUT_MS` changes the 10-minute per-call timeout. The build prints the API-price estimate Claude Code reports; on a subscription that counts against your plan's usage and isn't billed per call.
 
 ---
 
@@ -407,6 +427,10 @@ graft uninstall [dir]                # remove every file and config entry graft 
 graft uninstall -y                   # actually remove (without -y it prints what it would remove and exits)
 graft uninstall --keep-cache         # wiring only; leave graft/ and the .gitignore entry
 graft uninstall --no-global          # leave out-of-repo files alone (~/.codex, ~/.gemini)
+
+graft auth login                     # sign Claude Code in for --provider claude-code (runs `claude auth login`)
+graft auth status                    # is Claude Code signed in, and does it bill a subscription or an API key?
+graft auth token                     # long-lived token for CI (runs `claude setup-token`; you export CLAUDE_CODE_OAUTH_TOKEN)
 
 graft version                        # print the installed + latest published npm version
 graft upgrade                        # npm install -g the latest published version

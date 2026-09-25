@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`--provider claude-code`: run `build --deep` on your Claude subscription.**
+  graft runs the local, unmodified `claude` binary headless (`claude -p`) once per
+  LLM call, so a signed-in Claude Code pays for the deep pass and no API key is
+  needed. graft never reads Claude Code's credentials or holds an OAuth token,
+  per Anthropic's [credential-use terms](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use).
+  Each call loads no user or project settings (so no hooks run), no MCP servers,
+  tools, skills or CLAUDE.md, saves no session, and runs in a fresh temp
+  directory. A spent usage limit stops the build at once instead of retrying.
+- **`graft auth login | status | token`** hand off to Claude Code's own
+  `claude auth login`, `claude auth status` and `claude setup-token`. `status`
+  never prints the account's email address, and graft never sees the token
+  `token` creates.
+
+### Fixed
+
+- **`-j/--concurrency` now reaches the concept pass of `build --deep`**, which
+  used to run 8 files at a time whatever `-j` said.
+
 ## 0.19.0
 
 ### Added

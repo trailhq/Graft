@@ -99,6 +99,8 @@ export interface ChatResponse {
   toolCalls: ToolCall[];
   usage: Usage;
   stopReason: string | null;
+  /** USD cost of this call, when the transport reports one (Claude Code does). */
+  costUsd?: number;
   /** The assistant turn as a neutral message — push straight back into `messages`. */
   assistant: Message;
 }

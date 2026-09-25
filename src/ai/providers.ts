@@ -2,7 +2,7 @@ import type { Summarizer } from "./summarize.js";
 import type { Synthesizer } from "./synthesize.js";
 import type { CruxSummarizer } from "./crux.js";
 import type { ChatModel } from "./llm/types.js";
-import type { ProviderKind } from "./llm/factory.js";
+import { providerNeedsKey, type ProviderKind } from "./llm/factory.js";
 
 /**
  * User-facing configuration. Anything omitted falls back to environment
@@ -12,7 +12,8 @@ import type { ProviderKind } from "./llm/factory.js";
  * `openai` speaks the OpenAI-compatible API — point `baseUrl` at OpenRouter,
  * Fireworks, a LiteLLM proxy, Groq, a local server, or OpenAI itself, and pass
  * your own key. `anthropic` speaks the native Messages API. Any LLM-backed
- * operation needs an API key.
+ * operation needs an API key, except with `claude-code`, which runs the local
+ * Claude Code binary on its own sign-in.
  */
 export interface EngineConfig {
   /** Where the graph lives. Env: GRAFT_DIR. Default: `<repo>/.context`. */
@@ -65,6 +66,8 @@ export const DEFAULT_MODELS: Record<ProviderKind, string> = {
   litellm: "openai/gpt-4o-mini",
   // Provider-prefixed so the OrcaRouter gateway routes it; override with GRAFT_MODEL.
   orcarouter: "openai/gpt-4o-mini",
+  // A Claude Code alias, so it follows the latest Sonnet as Claude Code updates.
+  "claude-code": "sonnet",
 };
 
 export const DEFAULTS = {
@@ -77,9 +80,12 @@ export function resolveConfig(config: EngineConfig = {}): ResolvedConfig {
   const env = process.env;
   const provider = config.provider ?? (env.GRAFT_PROVIDER as ProviderKind | undefined) ?? DEFAULTS.provider;
 
-  const explicitKey = config.apiKey ?? env.GRAFT_API_KEY;
-  const legacyKey = env.OPENROUTER_API_KEY;
-  const apiKey = explicitKey ?? legacyKey ?? env.ORCAROUTER_API_KEY;
+  // claude-code never holds a key: Claude Code signs in by itself, and a key
+  // resolved here must not reach anything on that path.
+  const keyed = providerNeedsKey(provider);
+  const explicitKey = keyed ? config.apiKey ?? env.GRAFT_API_KEY : undefined;
+  const legacyKey = keyed ? env.OPENROUTER_API_KEY : undefined;
+  const apiKey = keyed ? explicitKey ?? legacyKey ?? env.ORCAROUTER_API_KEY : undefined;
   const usedLegacyEnv = !explicitKey && !!legacyKey;
 
   const model =

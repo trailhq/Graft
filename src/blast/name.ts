@@ -275,14 +275,18 @@ export async function nameReport(
   graph: GraphV1,
   report: BlastReport,
   contextDir: string,
+  opts: { allowClaudeCode?: boolean } = {},
 ): Promise<{ stats: NameStats; note: string | null }> {
   const { resolveConfig } = await import("../ai/providers.js");
   const cfg = resolveConfig({ contextDir });
 
+  // claude-code runs on one person's own Claude sign-in, so only a command that
+  // person runs may use it — never the GitHub App, which serves other people's PRs.
+  const claudeCode = cfg.provider === "claude-code";
   let namer: Namer | undefined;
   if (cfg.chatModel) {
     namer = new ChatNamer(cfg.chatModel);
-  } else if (cfg.apiKey) {
+  } else if (cfg.apiKey || (claudeCode && opts.allowClaudeCode)) {
     const { createChatModel } = await import("../ai/llm/factory.js");
     namer = new ChatNamer(createChatModel({
       provider: cfg.provider, apiKey: cfg.apiKey, model: cfg.model,
@@ -291,6 +295,9 @@ export async function nameReport(
   }
 
   const stats = await applyNames(graph, report, { namer, contextDir });
+  if (!namer && claudeCode) {
+    return { stats, note: "the claude-code provider is for commands you run yourself, so areas keep their symbol names" };
+  }
   if (!namer) return { stats, note: "no API key (GRAFT_API_KEY), so areas keep their symbol names" };
   if (stats.error) return { stats, note: `naming failed (${stats.error}) — areas keep their symbol names` };
   if (stats.named + stats.cached + stats.declined > 0) {

@@ -8,13 +8,14 @@
  *
  * The graph is a folder of linked markdown files committed to the repo; git is
  * the sync. This class wires the configured LLM provider into the build/check
- * pipelines; an API key is required for any LLM-backed operation.
+ * pipelines; an API key is required for any LLM-backed operation, except with the
+ * `claude-code` provider.
  */
 import { resolveConfig, type EngineConfig, type ResolvedConfig } from "./ai/providers.js";
 import { ChatSynthesizer, type Synthesizer } from "./ai/synthesize.js";
 import { ChatSummarizer, type Summarizer } from "./ai/summarize.js";
 import { ChatCruxSummarizer, type CruxSummarizer } from "./ai/crux.js";
-import { createChatModel } from "./ai/llm/factory.js";
+import { createChatModel, providerNeedsKey } from "./ai/llm/factory.js";
 import type { ChatModel } from "./ai/llm/types.js";
 import { buildContext, CODE_EXTENSIONS, type BuildProgress, type BuildResult } from "./context/build.js";
 import { checkContext, type CheckResult } from "./context/check.js";
@@ -30,6 +31,8 @@ export interface InitOptions {
   extensions?: string[];
   /** Repo-relative directory prefixes to limit the concept pass (`--only-dir`). */
   onlyDirs?: string[];
+  /** Max files summarized in parallel (`-j`). Default: the concept pass's own. */
+  concurrency?: number;
   /** Progress callback for long builds. */
   onProgress?: (info: BuildProgress) => void;
 }
@@ -65,6 +68,7 @@ export class Graft {
       contextDir: this.cfg.contextDir,
       extensions: opts.extensions,
       onlyDirs: opts.onlyDirs,
+      concurrency: opts.concurrency,
       model: this.modelLabel(),
       summarizer: this.summarizer(),
       synthesizer: this.synthesizer(),
@@ -118,11 +122,16 @@ export class Graft {
 
   private _chatModel?: ChatModel;
 
+  /** The transport built for LLM calls so far, if any call needed one (reports cost after a build). */
+  get chatModelInUse(): ChatModel | undefined {
+    return this.cfg.chatModel ?? this._chatModel;
+  }
+
   /** The configured transport, or a clear error telling the user how to set a key. */
   private chatModel(): ChatModel {
     if (this.cfg.chatModel) return this.cfg.chatModel;
     if (this._chatModel) return this._chatModel;
-    if (!this.cfg.apiKey) {
+    if (!this.cfg.apiKey && providerNeedsKey(this.cfg.provider)) {
       throw new Error(
         "No API key. Set GRAFT_API_KEY (and GRAFT_PROVIDER / GRAFT_BASE_URL / GRAFT_MODEL " +
           "for your provider) to build or summarize the graph.",
