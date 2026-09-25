@@ -169,6 +169,9 @@ export async function readThreads(
   fetchImpl: Fetch,
   api = "https://api.github.com",
   max = MAX_THREADS,
+  // Threads already read (the early upload's newest ones), reused rather than
+  // fetched a second time.
+  known: ReadonlyMap<number, HistoryThread> = new Map(),
 ): Promise<HistoryThread[]> {
   const headers = ghHeaders(token);
 
@@ -197,6 +200,8 @@ export async function readThreads(
     const slice = candidates.slice(i, i + THREAD_FETCH_CONCURRENCY);
     const fetched = await Promise.all(
       slice.map(async (p) => {
+        const seen = known.get(p.number);
+        if (seen) return seen;
         const [issueComments, reviewComments] = await Promise.all([
           readComments(`${api}/repos/${owner}/${repo}/issues/${p.number}/comments`, headers, fetchImpl),
           readComments(`${api}/repos/${owner}/${repo}/pulls/${p.number}/comments`, headers, fetchImpl),

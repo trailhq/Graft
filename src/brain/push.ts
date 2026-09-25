@@ -20,6 +20,7 @@ import {
   readCommits,
   readSymbols,
   readThreads,
+  type HistoryThread,
   type RepoDigest,
 } from "../app/history.js";
 import {
@@ -114,6 +115,8 @@ export interface ExpectedRepo {
   slug: string;
   status: string;
   brainName: string;
+  /** The brain accepts an early upload (see pushEarlyDigest). */
+  earlyUpload: boolean;
 }
 
 /**
@@ -135,9 +138,18 @@ export async function fetchExpectedRepo(link: BrainLink, fetchImpl: typeof fetch
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return null;
-    const body = (await res.json()) as { repo?: { slug?: string; status?: string } | null; brain_name?: string };
+    const body = (await res.json()) as {
+      repo?: { slug?: string; status?: string } | null;
+      brain_name?: string;
+      early_upload?: boolean;
+    };
     if (!body.repo?.slug) return null;
-    return { slug: body.repo.slug, status: String(body.repo.status ?? ""), brainName: String(body.brain_name ?? "") };
+    return {
+      slug: body.repo.slug,
+      status: String(body.repo.status ?? ""),
+      brainName: String(body.brain_name ?? ""),
+      earlyUpload: body.early_upload === true,
+    };
   } catch {
     return null;
   }
@@ -148,11 +160,84 @@ export function sameRepo(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
+/** How many of the newest pull requests and commits the early upload carries —
+ * what Trail's quick CLAUDE.md pass reads, and no more. */
+export const EARLY_THREADS = 30;
+export const EARLY_COMMITS = 80;
+
+/**
+ * The early upload: the instruction files, the newest pull requests and the
+ * newest commits, read before the rest of the history.
+ *
+ * Reading the history is most of a push's wait — up to 200 pull requests at two
+ * GitHub calls each — and Trail's first CLAUDE.md suggestions need none of it
+ * beyond the newest few. Sent first, they start while the full read is still
+ * going here, and the full upload that follows mines as before.
+ *
+ * Returns the threads it read, so the full read reuses them instead of asking
+ * GitHub twice. Null when there is nothing worth sending early.
+ */
+export async function buildEarlyDigest(
+  root: string,
+  opts: { fetchImpl?: typeof fetch } = {},
+): Promise<{ digest: RepoDigest; threads: HistoryThread[] } | null> {
+  const slug = repoSlugFromGit(root);
+  if (!slug) return null;
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const token = githubToken();
+  // Oldest first, like the full read, so the newest are the tail.
+  const commits = readCommits(root).slice(-EARLY_COMMITS);
+  if (commits.length === 0) return null;
+  let threads: HistoryThread[] = [];
+  if (token) {
+    try {
+      threads = await readThreads(slug.owner, slug.name, token, fetchImpl as never, undefined, EARLY_THREADS);
+    } catch {
+      threads = [];
+    }
+  }
+  const digest = buildDigest({
+    owner: slug.owner,
+    name: slug.name,
+    headSha: git(root, ["rev-parse", "HEAD"]) ?? "",
+    defaultBranch: currentBranch(root),
+    isPrivate: await isPrivate(slug.owner, slug.name, token, fetchImpl),
+    commits,
+    threads,
+    symbols: [],
+    sources: budgetSources(readAgentInstructions(root)),
+    autoApprove: true,
+  });
+  return { digest, threads };
+}
+
+/** Send the early upload. Best-effort: false on any failure, and the full
+ * upload still does everything. */
+export async function pushEarlyDigest(link: BrainLink, digest: RepoDigest, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  const url = `${baseUrlFor(link)}/api/public/brains/${encodeURIComponent(link.brainId)}/repo?stage=early`;
+  try {
+    const res = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${link.token}`,
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify(digest),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return false;
+    return ((await res.json()) as { early?: boolean }).early === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Build the digest for the checkout at `root`. Reads nothing but text. */
 export async function buildLocalDigest(
   root: string,
   graph: GraphV1 | null,
-  opts: { autoApprove?: boolean; fetchImpl?: typeof fetch } = {},
+  opts: { autoApprove?: boolean; fetchImpl?: typeof fetch; knownThreads?: HistoryThread[] } = {},
 ): Promise<{ digest: RepoDigest; warning?: string } | { error: string }> {
   const slug = repoSlugFromGit(root);
   if (!slug) {
@@ -171,7 +256,8 @@ export async function buildLocalDigest(
   let warning: string | undefined;
   if (token) {
     try {
-      threads = await readThreads(slug.owner, slug.name, token, fetchImpl as never);
+      const known = new Map((opts.knownThreads ?? []).map((t) => [t.number, t]));
+      threads = await readThreads(slug.owner, slug.name, token, fetchImpl as never, undefined, undefined, known);
     } catch {
       warning = "could not read pull-request discussion; mining commits and repo files only";
     }

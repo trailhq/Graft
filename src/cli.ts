@@ -20,7 +20,16 @@ import { hostIds } from "./hosts/registry.js";
 import { parseBrainArg, connectBrain, pullBrain, brainStatus } from "./brain/connect.js";
 import { rulesForPointers } from "./brain/attach.js";
 import { clearLink, type BrainLink } from "./brain/link.js";
-import { buildLocalDigest, fetchExpectedRepo, pushDigest, repoSlugFromGit, sameRepo } from "./brain/push.js";
+import {
+  buildEarlyDigest,
+  buildLocalDigest,
+  fetchExpectedRepo,
+  pushDigest,
+  pushEarlyDigest,
+  repoSlugFromGit,
+  sameRepo,
+} from "./brain/push.js";
+import type { HistoryThread } from "./app/history.js";
 import { readLink, writeLink } from "./brain/link.js";
 import { watchBuild } from "./brain/watch.js";
 import { openBrowser, signupUrl, startHandoff } from "./brain/signup.js";
@@ -1392,7 +1401,23 @@ brain
     const label = expected?.slug ?? (here ? `${here.owner}/${here.name}` : "this repository");
     console.error(`· reading ${label} — commit messages, pull-request discussion and the docs in the tree.`);
     console.error("  No file contents leave this machine.");
-    const built = await buildLocalDigest(repo, graph, { autoApprove: opts.approve !== false });
+    // The instruction file and the newest pull requests go first, when the brain
+    // takes them: its CLAUDE.md suggestions start from those while the rest of
+    // the history is still being read here. Not awaited — the full read starts
+    // at once, reusing the threads the early one already fetched.
+    let early: Promise<unknown> = Promise.resolve();
+    let knownThreads: HistoryThread[] = [];
+    if (expected?.earlyUpload) {
+      const first = await buildEarlyDigest(repo);
+      if (first) {
+        knownThreads = first.threads;
+        early = pushEarlyDigest(link, first.digest).then((ok) => {
+          if (ok) console.error("· CLAUDE.md suggestions are on their way in your browser, from the newest pull requests");
+        });
+      }
+    }
+    const built = await buildLocalDigest(repo, graph, { autoApprove: opts.approve !== false, knownThreads });
+    await early;
     if ("error" in built) {
       console.error(`✗ ${built.error}`);
       process.exitCode = 1;
