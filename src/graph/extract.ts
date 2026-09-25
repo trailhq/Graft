@@ -335,6 +335,12 @@ export interface WalkCtx {
   enclosingClass: string | null; // nearest enclosing class (py/ts `self`/`this`)
   goReceiverVar: string | null; // Go receiver var, e.g. `w` in `func (w *Worker)`
   importedSymbols: ReadonlyMap<string, { name: string; specifier: string }>;
+  /** Python only: local name → dotted module path, for every import that binds a
+   * MODULE (`import a.b as M`, `from a import b as M`, `from a import b`,
+   * `import a.b`). A call whose receiver is one of these names is a call into
+   * that module's file, not a method on an object of unknown type — see the
+   * module-receiver branch in walk() and resolvePyModule in resolve.ts. */
+  importedModules: ReadonlyMap<string, string>;
   // R6 (Phase 2): which list we're inside while walking an `R6Class(...)` call's
   // arguments — set only for the direct span of a `public =`/`private =`/
   // `active =` `list(...)`'s own entries (see walk()'s special-cased `argument`
@@ -389,6 +395,7 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
   const root = parseSource(source);
   const bindings = collectBindings(root, lang);
   const importedSymbols = collectImportedSymbols(root, lang);
+  const importedModules = lang === "python" ? collectPyImportedModules(root) : EMPTY_MODULES;
   const rGenerics = lang === "r" ? collectRGenerics(root) : EMPTY_SET;
 
   const nodes: NodeV1[] = [
@@ -422,6 +429,7 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
     enclosingClass: null,
     goReceiverVar: null,
     importedSymbols,
+    importedModules,
     rR6Access: null,
     rGenerics,
     rSuperClass: null,
@@ -766,7 +774,17 @@ function walk(node: Parser.SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEd
         });
       } else {
         const recvType = resolveRecvType(callee.receiver, ctx);
-        edges.push(recvType ? { ...callEdge, recvType } : callEdge);
+        // Python: `M.f()` where `M` is an imported MODULE (not a bound type). The
+        // import names the exact file, so the call carries that module as its
+        // specifier and resolve.ts looks the name up inside that file only. A
+        // receiver that resolved to a type keeps the typed-member path — a class
+        // alias (`from pkg import Widget as W; W.make()`) is not a module.
+        const moduleSpec =
+          !recvType && ctx.lang === "python" && callee.viaMember && callee.receiver
+            ? ctx.importedModules.get(callee.receiver)
+            : undefined;
+        if (moduleSpec) edges.push({ ...callEdge, viaMember: false, specifier: moduleSpec });
+        else edges.push(recvType ? { ...callEdge, recvType } : callEdge);
       }
     }
   } else if (ctx.lang === "php" && node.type === "use_declaration") {
@@ -2397,8 +2415,72 @@ function pyReceiver(fn: Parser.SyntaxNode): string | undefined {
     const innerObj = obj.childForFieldName("object");
     const innerAttr = obj.childForFieldName("attribute");
     if (innerObj?.type === "identifier" && innerObj.text === "self" && innerAttr) return `self.${innerAttr.text}`;
+    // A pure dotted chain of names (`pkg.mod.f()`) is spelled the way
+    // `import pkg.mod` binds it; anything else on the chain (a call, a subscript)
+    // carries no local clue and stays unknown.
+    const dotted = pyDottedName(obj);
+    if (dotted && !dotted.startsWith("self.") && !dotted.startsWith("cls.")) return dotted;
   }
   return undefined;
+}
+
+/** `a.b.c` as text when the node is only identifiers joined by attribute access. */
+function pyDottedName(node: Parser.SyntaxNode): string | null {
+  if (node.type === "identifier") return node.text;
+  if (node.type !== "attribute") return null;
+  const obj = node.childForFieldName("object");
+  const attr = node.childForFieldName("attribute");
+  if (!obj || !attr) return null;
+  const head = pyDottedName(obj);
+  return head ? `${head}.${attr.text}` : null;
+}
+
+const EMPTY_MODULES: ReadonlyMap<string, string> = new Map();
+
+/**
+ * Python import statements that bind a module to a local name:
+ *   import a.b            → "a.b" → "a.b"
+ *   import a.b as M       → "M"   → "a.b"
+ *   from a import b       → "b"   → "a.b"   (b may be a symbol, not a module —
+ *                                             resolve.ts drops it when no file matches)
+ *   from a import b as M  → "M"   → "a.b"
+ *   from . import b       → "b"   → ".b"    (relative; resolved against the file's dir)
+ * `from a import *` binds nothing nameable and is skipped.
+ */
+function collectPyImportedModules(root: Parser.SyntaxNode): Map<string, string> {
+  const out = new Map<string, string>();
+  const visit = (node: Parser.SyntaxNode): void => {
+    if (node.type === "import_statement") {
+      for (const c of node.namedChildren) {
+        if (c.type === "dotted_name") out.set(c.text, c.text);
+        else if (c.type === "aliased_import") {
+          const name = c.childForFieldName("name")?.text;
+          const alias = c.childForFieldName("alias")?.text;
+          if (name && alias) out.set(alias, name);
+        }
+      }
+      return;
+    }
+    if (node.type === "import_from_statement") {
+      const moduleNode = node.childForFieldName("module_name");
+      const base = moduleNode?.text;
+      if (!base) return;
+      const join = (name: string): string => (base.endsWith(".") ? `${base}${name}` : `${base}.${name}`);
+      for (const c of node.namedChildren) {
+        if (c === moduleNode || sameSyntaxNode(c, moduleNode)) continue;
+        if (c.type === "dotted_name") out.set(c.text, join(c.text));
+        else if (c.type === "aliased_import") {
+          const name = c.childForFieldName("name")?.text;
+          const alias = c.childForFieldName("alias")?.text;
+          if (name && alias) out.set(alias, join(name));
+        }
+      }
+      return;
+    }
+    for (const child of node.namedChildren) visit(child);
+  };
+  visit(root);
+  return out;
 }
 
 /**

@@ -268,6 +268,20 @@ export function resolveEdges(
         if (hit && hit.id !== e.source) add(e.source, hit.id, "references", hit.confidence);
       }
     } else if (e.relation === "calls") {
+      if (e.specifier) {
+        // Python `M.f()` with `M` an imported module (extract.ts stamps the
+        // module's dotted path as the specifier). The import names the file, so
+        // the lookup is confined to it: a same-named function anywhere else in
+        // the repo is not a candidate, and a name defined twice in that file (or
+        // not at all — `from a import b` where `b` is a symbol) drops.
+        const targetFile = resolvePyModule(e.specifier, e.file, byId);
+        if (!targetFile) continue;
+        const candidates = (perFileName.get(targetFile)?.get(e.name!) ?? []).filter((n) =>
+          PY_MODULE_CALL_KINDS.includes(n.kind),
+        );
+        if (candidates.length === 1) add(e.source, candidates[0].id, "calls", "extracted");
+        continue;
+      }
       if (e.viaMember) {
         if (!e.recvType) continue;
         const hit = resolveTypedMember(e.recvType, e.name!, e.file, ownerMethod, classParents, classTraits, e.argCount);
@@ -334,6 +348,44 @@ export function resolveEdges(
     }
   }
   return out;
+}
+
+/** What `M.name()` may target inside a module: a function, or a class
+ * (`M.Widget()` constructs). Methods are never module-level. */
+const PY_MODULE_CALL_KINDS: Kind[] = ["function", "class"];
+
+/**
+ * Resolve a Python dotted module path to an in-repo file node id, or null.
+ *
+ * Absolute (`a.b`): tried as `a/b.py` then `a/b/__init__.py` under every
+ * ancestor directory of the importing file, nearest first — Python's own
+ * search order (the script's directory, then the roots on sys.path), which also
+ * covers a `src/` layout without parsing any build file.
+ * Relative (`.b`, `..b`): each leading dot after the first climbs one directory
+ * from the importing file's own.
+ * A path that matches nothing is an external package — null, never a guess.
+ */
+function resolvePyModule(spec: string, file: string, byId: Map<string, NodeV1>): string | null {
+  const dir = posix.dirname(toPosixPath(file));
+  const asPath = (base: string, dotted: string): string[] => {
+    const rel = dotted.split(".").filter(Boolean).join("/");
+    const stem = base === "." || base === "" ? rel : posix.join(base, rel);
+    return [`${stem}.py`, `${stem}/__init__.py`];
+  };
+  const hit = (cands: string[]): string | null => cands.find((c) => byId.has(c)) ?? null;
+  const dots = spec.match(/^\.+/)?.[0].length ?? 0;
+  if (dots > 0) {
+    let base = dir;
+    for (let i = 1; i < dots; i++) base = posix.dirname(base);
+    return hit(asPath(base, spec.slice(dots)));
+  }
+  let base = dir;
+  for (;;) {
+    const found = hit(asPath(base, spec));
+    if (found) return found;
+    if (base === "." || base === "" || base === "/") return null;
+    base = posix.dirname(base);
+  }
 }
 
 function push<T>(map: Map<string, T[]>, key: string, val: T): void {
