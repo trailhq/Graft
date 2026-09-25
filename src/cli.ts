@@ -31,6 +31,7 @@ import {
 } from "./brain/push.js";
 import type { HistoryThread } from "./app/history.js";
 import { readLink, writeLink } from "./brain/link.js";
+import { applyChanges, fetchAcceptedChanges, markApplied } from "./brain/claude-md.js";
 import { watchBuild } from "./brain/watch.js";
 import { openBrowser, signupUrl, startHandoff } from "./brain/signup.js";
 import { contextDirFor } from "./context/node-file.js";
@@ -1479,6 +1480,66 @@ brain
       return;
     }
     console.error("· still building after 15 minutes — it has not failed, it is just long. Watch it finish in your browser.");
+  });
+
+const claudeMd = program
+  .command("claude-md")
+  .description("The CLAUDE.md changes this repo's brain suggested and you accepted in Trail");
+
+claudeMd
+  .command("pull")
+  .description("Write the CLAUDE.md changes you accepted in Trail into this repo's instruction file")
+  .argument("[dir]", "target repo directory", ".")
+  .option("--dry-run", "show what would change without writing the file or telling Trail")
+  .action(async (dir: string, opts: { dryRun?: boolean }) => {
+    const repo = resolve(dir);
+    const link = readLink(repo);
+    if (!link) {
+      console.error("✗ this repo has no brain attached — run `graft brain push` first");
+      process.exitCode = 1;
+      return;
+    }
+    const pulled = await fetchAcceptedChanges(link);
+    if ("error" in pulled) {
+      console.error(`✗ ${pulled.error}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (pulled.changes.length === 0) {
+      console.error("· nothing accepted yet — accept suggestions on the brain's CLAUDE.md page, then pull again");
+      return;
+    }
+    // The file Trail read, or a new CLAUDE.md when the repo had none.
+    const rel = pulled.path || "CLAUDE.md";
+    const file = join(repo, rel);
+    const { existsSync, readFileSync, writeFileSync } = await import("node:fs");
+    const before = existsSync(file) ? readFileSync(file, "utf8") : "";
+    const result = applyChanges(before, pulled.changes);
+
+    for (const c of result.written) console.error(`  + ${c.kind === "add" ? "new section" : "edit"} · ${c.heading}`);
+    for (const c of result.present) console.error(`  = already in the file · ${c.heading}`);
+    for (const s of result.skipped) console.error(`  ! skipped · ${s.change.heading} — ${s.why}`);
+
+    if (opts.dryRun) {
+      console.error(`· dry run: ${result.written.length} change(s) would be written to ${rel}; nothing was written`);
+      return;
+    }
+    if (result.written.length > 0) writeFileSync(file, result.text);
+    // Written now or already there: either way the page should stop listing it.
+    const done = [...result.written, ...result.present].map((c) => c.id);
+    const told = await markApplied(link, done);
+    if (result.written.length > 0) {
+      console.error(`✓ wrote ${result.written.length} change(s) to ${rel} — review and commit it like any other edit`);
+    } else if (result.present.length > 0) {
+      console.error(`✓ ${rel} already has every accepted change`);
+    }
+    if (!told) console.error("⚠ could not tell Trail which changes were written; the page may still list them");
+    if (result.skipped.length > 0) {
+      console.error(
+        `· ${result.skipped.length} change(s) no longer match the local file — edit them on the CLAUDE.md page, or apply them by hand`,
+      );
+      process.exitCode = 1;
+    }
   });
 
 brain
