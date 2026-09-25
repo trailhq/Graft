@@ -41,6 +41,19 @@ const CHILD_TIMEOUT_MS = 8000;
 const HOOK_OVERHEAD_MS = 2000;
 /** Floor, so a hand-edited tiny timeout can't leave the child no time at all. */
 const MIN_CHILD_TIMEOUT_MS = 4000;
+/** An installed `timeout` at or above this is the legacy millisecond form. */
+const LEGACY_MS_THRESHOLD = 1000;
+
+/**
+ * An installed hook `timeout`, in milliseconds. Claude Code reads `timeout` in
+ * seconds, which is what `graft init` now writes. Repos wired by earlier versions
+ * still carry milliseconds (8000, 15000). Claude Code gives those hours, but they
+ * were meant as seconds-scale budgets, so they are read as milliseconds here. No
+ * real hook budget is 1000 seconds or more, so the two forms cannot be confused.
+ */
+export function hookTimeoutMs(installed: number): number {
+  return installed >= LEGACY_MS_THRESHOLD ? installed : installed * 1000;
+}
 
 /**
  * How long the prompt hook may let `graft ask` run — derived from the budget that is
@@ -50,7 +63,8 @@ const MIN_CHILD_TIMEOUT_MS = 4000;
  * A query now brings the graph up to date first, so `graft init` raises the
  * UserPromptSubmit budget to 15s to cover the one cold rebuild after an upgrade. But
  * `mergeGraftSettings` only runs during `graft init` — upgrading the npm package does
- * not re-run it. So every repo wired before that change keeps `"timeout": 8000`, and
+ * not re-run it. So every repo wired before that change keeps `"timeout": 8` (or the
+ * legacy `8000`, see `hookTimeoutMs`), and
  * hard-coding a 13s child there means Claude Code kills the hook first: `emit()` and
  * `writeSession()` never run, the turn gets no retrieval pack at all, and the SIGKILLed
  * child can't even release the build lock. Reading the installed number keeps the child
@@ -77,8 +91,10 @@ function hookSettingsFiles(dir: string): string[] {
   ];
 }
 
-/** The timeout on one settings file's graft hook entry for `event`, or null if it
- * can't be read (no settings file, hand-edited shape, unparseable JSON). */
+/** The timeout on one settings file's graft hook entry for `event`, in milliseconds
+ * (whichever form it was installed in), or null if it can't be read (no settings
+ * file, hand-edited shape, unparseable JSON). Normalising here is what lets a
+ * seconds-form repo entry and a legacy millisecond user-level entry be compared. */
 function hookTimeoutIn(file: string, event: string): number | null {
   try {
     const settings = JSON.parse(readFileSync(file, 'utf8')) as any;
@@ -87,7 +103,7 @@ function hookTimeoutIn(file: string, event: string): number | null {
     for (const block of blocks) {
       for (const h of block?.hooks ?? []) {
         if (typeof h?.command === 'string' && h.command.includes('graft-hooks.cjs') && typeof h.timeout === 'number') {
-          return h.timeout;
+          return hookTimeoutMs(h.timeout);
         }
       }
     }
