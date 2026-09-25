@@ -27,6 +27,17 @@ test('no-op when the CLI home dir is absent', () => {
   assert.deepEqual(installCodexHooks(fresh()), []);
 });
 
+test('hook timeouts are written in seconds, the unit Codex reads', () => {
+  const home = fresh();
+  mkdirSync(join(home, '.codex'), { recursive: true });
+  installCodexHooks(home);
+  const cfg = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
+  const timeouts = Object.values(cfg.hooks as Record<string, any[]>)
+    .flatMap((blocks) => blocks.flatMap((b) => b.hooks.map((h: any) => h.timeout)));
+  assert.ok(timeouts.length > 0);
+  for (const t of timeouts) assert.ok(t > 0 && t <= 60, `timeout ${t} should be seconds`);
+});
+
 test('writes shim + hooks.json entry, idempotent on re-run', () => {
   const home = fresh();
   mkdirSync(join(home, '.codex'), { recursive: true });

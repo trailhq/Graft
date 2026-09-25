@@ -23,6 +23,17 @@ test('empty settings gets the full Graft blocks', () => {
   assert.deepEqual(warnings, []);
 });
 
+test('hook timeouts are written in seconds, the unit Claude Code reads', () => {
+  // Earlier versions wrote 8000/15000 — hours, to Claude Code — so a hung hook
+  // was never cut off.
+  const { merged } = mergeGraftSettings({});
+  const timeouts = Object.values(merged.hooks as Record<string, any[]>)
+    .flatMap((blocks) => blocks.flatMap((b) => b.hooks.map((h: any) => h.timeout)));
+  assert.ok(timeouts.length > 0);
+  for (const t of timeouts) assert.ok(t > 0 && t <= 60, `timeout ${t} should be seconds`);
+  assert.equal(merged.hooks.UserPromptSubmit[0].hooks[0].timeout, 15);
+});
+
 test('foreign statusLine is preserved with a warning; Graft not forced in', () => {
   const { merged, warnings } = mergeGraftSettings({ statusLine: { type: 'command', command: 'my-bar.sh' } });
   assert.equal(merged.statusLine.command, 'my-bar.sh');
