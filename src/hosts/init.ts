@@ -13,6 +13,7 @@ import { installCodexHooks } from './codex-hooks.js';
 import { installCursorHooks } from './cursor-hooks.js';
 import type { ConfigWrite } from './config-write.js';
 import { installAntigravitySkill } from './antigravity.js';
+import { installPiOmp, installPiOmpGlobal } from './pi-omp.js';
 
 export interface HostsInitResult {
   written: { id: string; path: string; action: string }[];
@@ -94,5 +95,17 @@ export function runHostsInit(
     opts.global === false || !selected.some((h) => h.id === 'antigravity')
       ? []
       : installAntigravitySkill(home);
-  return { written, skipped, unknown, mcp, hooks: [...hooks, ...cursorHooks, ...antigravitySkill] };
+  // pi/omp get the extension both ways: repo-local (Cursor posture — --no-global
+  // does NOT suppress it, only --no-hooks) and user-level in the agent dir
+  // (Codex/Claude posture — --no-global suppresses it). The global copy governs
+  // every project; the extension itself no-ops without a graft graph in cwd.
+  const piOmpRepo =
+    opts.hooks === false || !selected.some((h) => h.id === 'pi' || h.id === 'omp')
+      ? []
+      : installPiOmp(repo, selected.map((h) => h.id));
+  const piOmpGlobal =
+    opts.global === false || opts.hooks === false || !selected.some((h) => h.id === 'pi' || h.id === 'omp')
+      ? []
+      : installPiOmpGlobal(home, selected.map((h) => h.id));
+  return { written, skipped, unknown, mcp, hooks: [...hooks, ...cursorHooks, ...antigravitySkill, ...piOmpRepo, ...piOmpGlobal] };
 }

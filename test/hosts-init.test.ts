@@ -34,7 +34,7 @@ test('explicit agents list overrides detection and flags unknown ids', () => {
 test('all writes every host and re-run converges (idempotent)', () => {
   const home = fresh(); const repo = fresh();
   const first = runHostsInit(repo, { home, all: true });
-  assert.equal(first.written.length, 10);
+  assert.equal(first.written.length, 12);
   const second = runHostsInit(repo, { home, all: true });
   assert.ok(second.written.every((w) => w.action === 'unchanged'));
   // `agents` and `antigravity` share AGENTS.md, but the fenced section is written once
@@ -249,4 +249,27 @@ test('CLI: --dry-run respects an explicit --agents list', () => {
   assert.ok(out.includes(join('.adal', 'skills', 'graft', 'SKILL.md')), out);
   assert.doesNotMatch(out, /AGENTS\.md/);
   assert.doesNotMatch(out, /affects ALL repos/);
+});
+
+test('pi/omp write the extension repo-locally AND user-level, and re-run converges', () => {
+  const home = fresh(); const repo = fresh();
+  const first = runHostsInit(repo, { home, agents: ['pi', 'omp'] });
+  const paths = first.hooks.map((h) => h.path);
+  // Four extension copies: two repo-local (pi, omp each read only their own) and
+  // two user-level (the agent dirs, where the hook governs every project).
+  assert.equal(paths.length, 4);
+  assert.ok(paths.some((p) => p.endsWith(join('.pi', 'extensions', 'graft.ts'))));
+  assert.ok(paths.some((p) => p.endsWith(join('.omp', 'hooks', 'pre', 'graft.ts'))));
+  assert.ok(paths.some((p) => p.includes(join(home, '.pi', 'agent', 'extensions'))));
+  assert.ok(paths.some((p) => p.includes(join(home, '.omp', 'agent', 'hooks', 'pre'))));
+  const second = runHostsInit(repo, { home, agents: ['pi', 'omp'] });
+  assert.ok(second.hooks.every((h) => h.action === 'unchanged'));
+});
+
+test('global: false keeps the pi/omp repo extension but skips the agent-dir copy', () => {
+  const home = fresh(); const repo = fresh();
+  const r = runHostsInit(repo, { home, agents: ['pi', 'omp'], global: false });
+  const paths = r.hooks.map((h) => h.path);
+  assert.ok(paths.some((p) => p.endsWith(join('.pi', 'extensions', 'graft.ts'))));
+  assert.ok(paths.every((p) => !p.startsWith(home)));
 });
