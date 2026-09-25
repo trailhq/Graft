@@ -60,7 +60,7 @@ import { patchBuildConfig, type BuildConfig } from "./util/state.js";
 import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
 import { setInputRate } from "./context/savings.js";
-import { formatUpdateNudge, maybeRefreshInBackground, readUpdateCache, refreshUpdateCache, writeStamp } from "./upkeep.js";
+import { formatUpdateNudge, maybeRefreshInBackground, readUpdateCache, refreshUpdateCache, wiredHostIds, writeStamp } from "./upkeep.js";
 import {
   errorCode,
   filesBucket,
@@ -960,7 +960,18 @@ program
   .option("-y, --yes", "skip the picker and wire every detected agent (the pre-0.8 default)")
   .option("--no-global", "skip writes outside this repo (the ~/.codex/ config + hooks)")
   .option("--trail <handoff>", "attach a Trail: <brainId>:<token> (or a bare id with GRAFT_BRAIN_TOKEN set)")
-  .action(async (dir: string, opts: { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; trail?: string }) => {
+  .action((dir: string, opts: InitOptions) => runInitCommand(dir, opts));
+
+/** `graft init`'s flags, as commander hands them over. */
+interface InitOptions { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; trail?: string }
+
+/**
+ * `graft init`. Also run by `graft trail push` on a repo graft has not been set
+ * up in — the Trail pages start people at push, and a trail whose rules no
+ * coding agent reads is only half set up. `epilogue: false` leaves out the
+ * closing banner when push is going to keep talking.
+ */
+async function runInitCommand(dir: string, opts: InitOptions, how: { epilogue?: boolean } = {}): Promise<void> {
     if (opts.listAgents) {
       for (const id of [...hostIds(), "claude"]) console.log(id);
       return;
@@ -1081,7 +1092,7 @@ program
     const graphs = (children.length ? children.map((c) => join(repo, c)) : [repo])
       .map((d) => loadGraphCached(contextDirFor(d, children.length ? undefined : globalDir)))
       .filter((g): g is NonNullable<typeof g> => g !== null);
-    console.error(
+    if (how.epilogue !== false) console.error(
       "\n" +
         formatInitEpilogue({
           graphBuilt: graphs.length > 0,
@@ -1095,7 +1106,7 @@ program
       { agents: [...ids].sort().join(","), consent: consent === undefined ? "unasked" : String(consent) },
       { repo },
     );
-  });
+}
 
 /** One repo's worth of `init` writes — the parent, then each workspace child. */
 function wireTarget(
@@ -1395,11 +1406,6 @@ brain
       return;
     }
 
-    // The graph is what symbol anchors are resolved against, so a rule mined
-    // here can later go stale on its own. Without one the ingest still works;
-    // its rules simply govern the repo rather than a symbol in it.
-    const graph = loadGraphCached(contextDirFor(repo, program.opts<GlobalOpts>().dir));
-    if (!graph) console.error("· no graph yet — run `graft build` first so rules can be anchored to symbols");
 
     const label = expected?.slug ?? (here ? `${here.owner}/${here.name}` : "this repository");
     console.error(`· reading ${label} — commit messages, pull-request discussion and the docs in the tree.`);
@@ -1419,6 +1425,26 @@ brain
         });
       }
     }
+    // A repo graft was never set up in gets `graft init` first — after the early
+    // upload has gone, so the CLAUDE.md suggestions are not held up by the graph
+    // build. Same picker as init: it is how someone agrees to what gets written,
+    // so a non-interactive push only says what to run.
+    if (wiredHostIds(repo).length === 0) {
+      if (process.stdin.isTTY && process.stderr.isTTY) {
+        // Its one line of output lands before the picker, not across it.
+        await early;
+        console.error("· graft is not set up in this repo yet — setting it up first, the same as `graft init`");
+        await runInitCommand(repo, { build: true, mcp: true, hooks: true, statusline: true, global: true }, { epilogue: false });
+      } else {
+        console.error("· graft is not set up in this repo — run `graft init` so your coding agent reads these rules");
+      }
+    }
+
+    // The graph is what symbol anchors are resolved against, so a rule mined
+    // here can later go stale on its own. Without one the ingest still works;
+    // its rules simply govern the repo rather than a symbol in it.
+    const graph = loadGraphCached(contextDirFor(repo, program.opts<GlobalOpts>().dir));
+    if (!graph) console.error("· no graph yet — run `graft build` first so rules can be anchored to symbols");
     const built = await buildLocalDigest(repo, graph, { autoApprove: opts.approve !== false, knownThreads });
     await early;
     if ("error" in built) {
