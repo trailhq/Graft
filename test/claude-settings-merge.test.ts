@@ -137,3 +137,112 @@ test('permissions object with no allow key gets one added; other keys preserved'
   assert.deepEqual(merged.permissions.deny, ['Bash(rm:*)']);
   assert.deepEqual(merged.permissions.allow, ['Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
 });
+
+/**
+ * A budget raised by hand in `.claude/settings.json` is the only way to say "this
+ * repo's graph needs longer than the template assumes". It could not survive: the
+ * merge dropped graft's own entries whole and rewrote them from the template, and
+ * `reconcileWiring()` fires that rewrite on every version bump, so the raise reverted
+ * unattended with only the one-line "refreshed this repo's agent wiring" notice as a
+ * trace (issue #366).
+ */
+const POST_EDIT = 'node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-hooks.cjs" post-edit';
+const SAVINGS = 'node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-hooks.cjs" tool-savings';
+
+function postToolUse(merged: any) {
+  const byName: Record<string, any> = {};
+  for (const entry of merged.hooks.PostToolUse) {
+    for (const hook of entry.hooks ?? []) byName[String(hook.command).split(/\s+/).pop()!] = hook;
+  }
+  return byName;
+}
+
+test('a hand-raised hook timeout survives a refresh', () => {
+  const { merged } = mergeGraftSettings({
+    hooks: {
+      PostToolUse: [
+        { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: POST_EDIT, timeout: 20000 }] },
+        { matcher: 'Bash|mcp__graft__|Read|Grep|Glob', hooks: [{ type: 'command', command: SAVINGS, timeout: 8000 }] },
+      ],
+    },
+  });
+
+  const hooks = postToolUse(merged);
+  assert.equal(hooks['post-edit'].timeout, 20000, 'the raise is carried forward');
+  // Per hook, not per event: the raise belongs to the entry it was made on.
+  assert.equal(hooks['tool-savings'].timeout, 8000);
+  // Still one entry per template block, so a refresh converges instead of stacking.
+  assert.equal(merged.hooks.PostToolUse.length, 2);
+  assert.equal(merged.hooks.PostToolUse[0].matcher, 'Write|Edit|MultiEdit');
+});
+
+test('the template can still raise the floor for a repo below it', () => {
+  const { merged } = mergeGraftSettings({
+    hooks: {
+      PostToolUse: [
+        { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: POST_EDIT, timeout: 5000 }] },
+      ],
+    },
+  });
+  // Raise-only in both directions: a prior value below the template does not hold it
+  // down, so a repo wired before a bump still gets the longer budget.
+  assert.equal(postToolUse(merged)['post-edit'].timeout, 10000);
+});
+
+test('a raise is matched by hook name, not by the whole command', () => {
+  // The helpers path differs between the repo-level and user-level installs and has
+  // changed between versions, so an entry written by an older graft still has to be
+  // recognised as the same hook.
+  const { merged } = mergeGraftSettings({
+    hooks: {
+      PostToolUse: [
+        { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: 'node .claude/helpers/graft-hooks.cjs post-edit', timeout: 30000 }] },
+      ],
+      UserPromptSubmit: [
+        { hooks: [{ type: 'command', command: 'node "$HOME/.claude/helpers/graft-hooks.cjs" prompt', timeout: 25000 }] },
+      ],
+    },
+  });
+  assert.equal(postToolUse(merged)['post-edit'].timeout, 30000);
+  assert.equal(merged.hooks.UserPromptSubmit[0].hooks[0].timeout, 25000);
+});
+
+test('a garbage prior timeout is ignored rather than carried', () => {
+  for (const timeout of ['20000', null, undefined, NaN, Infinity]) {
+    const { merged } = mergeGraftSettings({
+      hooks: {
+        PostToolUse: [
+          { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: POST_EDIT, timeout }] },
+        ],
+      },
+    });
+    assert.equal(postToolUse(merged)['post-edit'].timeout, 10000, `timeout=${String(timeout)}`);
+  }
+});
+
+test('a foreign hook on the same event keeps its own timeout', () => {
+  const { merged } = mergeGraftSettings({
+    hooks: {
+      PostToolUse: [
+        { matcher: 'Write', hooks: [{ type: 'command', command: 'my-linter.sh', timeout: 1 }] },
+        { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: POST_EDIT, timeout: 20000 }] },
+      ],
+    },
+  });
+  const foreign = merged.hooks.PostToolUse.find((e: any) => e.hooks[0].command === 'my-linter.sh');
+  assert.equal(foreign.hooks[0].timeout, 1);
+  assert.equal(postToolUse(merged)['post-edit'].timeout, 20000);
+});
+
+test('re-running after a raise is idempotent', () => {
+  const raised = {
+    hooks: {
+      PostToolUse: [
+        { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: POST_EDIT, timeout: 20000 }] },
+      ],
+    },
+  };
+  const once = mergeGraftSettings(raised).merged;
+  const twice = mergeGraftSettings(once).merged;
+  assert.deepEqual(twice, once);
+});

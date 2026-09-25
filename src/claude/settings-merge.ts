@@ -111,6 +111,71 @@ function applyStatusline(
   warnings.push(foreignWarning);
 }
 
+/**
+ * The hook a graft command runs (`post-edit`, `prompt`, …), or null for anything
+ * that is not one. The command also carries the helpers path, which differs between
+ * the repo-level and user-level installs and has changed between versions, so the
+ * hook name rather than the whole command is what identifies an entry across a
+ * rewrite.
+ */
+function graftHookName(command: unknown): string | null {
+  if (typeof command !== 'string' || !command.includes('graft-hooks.cjs')) return null;
+  const last = command.trim().split(/\s+/).pop() ?? '';
+  return last && !last.includes('graft-hooks.cjs') ? last : null;
+}
+
+/**
+ * The largest timeout each prior graft entry declared, keyed by hook name.
+ *
+ * Raising a budget by hand in `.claude/settings.json` is the only way to say "this
+ * repo's graph needs longer than the template assumes", and it could not survive:
+ * the merge below drops graft's own entries whole and rewrites them from the
+ * template, and `reconcileWiring()` fires that rewrite on every version bump, so the
+ * raise reverted unattended (issue #366). Keyed per hook because `PostToolUse`
+ * declares two entries and a raise belongs to the one it was made on.
+ */
+function priorGraftTimeouts(prior: Json[]): Map<string, number> {
+  const timeouts = new Map<string, number>();
+  for (const entry of prior) {
+    if (!isGraftEntry(entry)) continue;
+    const hooks = Array.isArray((entry as any)?.hooks) ? (entry as any).hooks : [];
+    for (const hook of hooks) {
+      const name = graftHookName(hook?.command);
+      const timeout = hook?.timeout;
+      if (name === null || typeof timeout !== 'number' || !Number.isFinite(timeout)) continue;
+      timeouts.set(name, Math.max(timeouts.get(name) ?? 0, timeout));
+    }
+  }
+  return timeouts;
+}
+
+/**
+ * One event's entries after a merge: foreign ones kept untouched, graft's replaced by
+ * the current template — except that a timeout raised above the template is carried
+ * forward.
+ *
+ * Raise-only in both directions: a template can still lift the floor for every repo,
+ * and a hand-raised budget is not lowered back to it. Still exactly one graft entry
+ * per template block, so re-running `graft init` converges rather than stacking.
+ */
+function mergeHookEntries(prior: Json[], blocks: Json[]): Json[] {
+  const raised = priorGraftTimeouts(prior);
+  const current = blocks.map((block: Json) => {
+    const hooks = Array.isArray((block as any)?.hooks) ? (block as any).hooks : [];
+    return {
+      ...(block as any),
+      hooks: hooks.map((hook: any) => {
+        const name = graftHookName(hook?.command);
+        const previous = name === null ? undefined : raised.get(name);
+        return previous !== undefined && previous > (hook?.timeout ?? 0)
+          ? { ...hook, timeout: previous }
+          : hook;
+      }),
+    };
+  });
+  return [...prior.filter((e: Json) => !isGraftEntry(e)), ...current];
+}
+
 export function mergeGraftSettings(
   existing: Json,
   opts: { statusline?: boolean } = {},
@@ -131,8 +196,7 @@ export function mergeGraftSettings(
   merged.hooks = { ...(merged.hooks ?? {}) };
   for (const [event, blocks] of Object.entries(graftBlocks())) {
     const prior = Array.isArray(merged.hooks[event]) ? merged.hooks[event] : [];
-    const foreign = prior.filter((e: Json) => !isGraftEntry(e)); // drop old Graft entries → idempotent
-    merged.hooks[event] = [...foreign, ...blocks];
+    merged.hooks[event] = mergeHookEntries(prior, blocks);
   }
 
   // Drop graft's own prior regex before re-adding, so a change to FOOTER replaces
@@ -172,8 +236,7 @@ export function mergeGraftHooks(existing: Json, helpers: string): { merged: Json
   merged.hooks = { ...(merged.hooks ?? {}) };
   for (const [event, blocks] of Object.entries(graftBlocks(helpers))) {
     const prior = Array.isArray(merged.hooks[event]) ? merged.hooks[event] : [];
-    const foreign = prior.filter((e: Json) => !isGraftEntry(e));
-    merged.hooks[event] = [...foreign, ...blocks];
+    merged.hooks[event] = mergeHookEntries(prior, blocks);
   }
   return { merged };
 }

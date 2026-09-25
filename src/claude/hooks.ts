@@ -63,6 +63,29 @@ export function promptAskTimeout(dir: string): number {
 }
 
 /**
+ * The same derivation for the other hook that spawns a child: how long post-edit may
+ * let `graft check` run.
+ *
+ * It had no equivalent, so the child kept the flat {@link CHILD_TIMEOUT_MS}. On a repo
+ * wired before the post-edit budget was raised, `PostToolUse` is still `8000` — the
+ * same number — so the child could consume the entire hook budget and leave nothing
+ * for `readWiring()` and `formatBlastRadius()`, which is the failure
+ * {@link promptAskTimeout} exists to prevent, one hook over: the kill takes `emit()`
+ * with it, so the edit gets no blast radius and the stats write never lands
+ * (issue #366).
+ *
+ * `PostToolUse` carries two graft entries (post-edit and tool-savings) and
+ * {@link installedHookTimeout} is matcher-blind by design, so this reads the smaller
+ * of them. That is the conservative direction it documents: guessing high gets the
+ * hook killed, guessing low only shortens one `graft check`.
+ */
+export function postEditCheckTimeout(dir: string): number {
+  const installed = installedHookTimeout(dir, 'PostToolUse');
+  if (installed === null) return CHILD_TIMEOUT_MS - HOOK_OVERHEAD_MS;
+  return Math.max(MIN_CHILD_TIMEOUT_MS, installed - HOOK_OVERHEAD_MS);
+}
+
+/**
  * Every settings file Claude Code merges hook definitions from, for a session
  * rooted at `dir`. The per-repo file is not the only place graft's hooks can be
  * installed: declaring them once at the user level wires every repo on the
@@ -84,14 +107,21 @@ function hookTimeoutIn(file: string, event: string): number | null {
     const settings = JSON.parse(readFileSync(file, 'utf8')) as any;
     const blocks = settings?.hooks?.[event];
     if (!Array.isArray(blocks)) return null;
+    // Smallest within the file, for the same reason {@link installedHookTimeout}
+    // takes the smallest across files: one event can carry several graft entries
+    // (`PostToolUse` carries post-edit and tool-savings) and nothing here can tell
+    // which matcher launched this process. Returning the first one found made the
+    // answer depend on the order the template happens to write them in.
+    let smallest: number | null = null;
     for (const block of blocks) {
       for (const h of block?.hooks ?? []) {
-        if (typeof h?.command === 'string' && h.command.includes('graft-hooks.cjs') && typeof h.timeout === 'number') {
-          return h.timeout;
+        if (typeof h?.command === 'string' && h.command.includes('graft-hooks.cjs')
+          && typeof h.timeout === 'number' && Number.isFinite(h.timeout)) {
+          if (smallest === null || h.timeout < smallest) smallest = h.timeout;
         }
       }
     }
-    return null;
+    return smallest;
   } catch {
     return null;
   }
@@ -150,7 +180,7 @@ function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_
   }
 }
 function checkStaleCount(dir: string): number {
-  const r = graftJson(dir, withContextDirArg(dir, ['check', '.', '--json']));
+  const r = graftJson(dir, withContextDirArg(dir, ['check', '.', '--json']), postEditCheckTimeout(dir));
   const g = r?.graph ?? {};
   return (g.changed?.length ?? 0) + (g.added?.length ?? 0) + (g.removed?.length ?? 0);
 }

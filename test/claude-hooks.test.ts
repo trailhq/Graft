@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { underGraft, main, lastFileScopeHint, promptAskTimeout } from '../src/claude/hooks.js';
+import { underGraft, main, lastFileScopeHint, promptAskTimeout, postEditCheckTimeout } from '../src/claude/hooks.js';
 import { readStats, readSession } from '../src/claude/state.js';
 import { runSync } from '../src/claude/sync-run.js';
 import { savingsLine } from '../src/context/savings.js';
@@ -750,4 +750,76 @@ test('session-start reads INDEX.md from a GRAFT_DIR-relocated context dir', asyn
     delete process.env.GRAFT_DIR;
   }
   assert.match(chunks.join(''), /repo map \(relocated\)/, 'orientation was built from the relocated INDEX.md');
+});
+
+/**
+ * The post-edit hook's `graft check` child had a flat 8s cap while the event it runs
+ * under can carry any budget. On a repo wired before post-edit's budget was raised,
+ * `PostToolUse` is still 8000 — the same number — so the child could eat the whole
+ * hook and `emit()`/`patchStats()` never ran: no blast radius for the edit and no
+ * stats write, silently (issue #366).
+ */
+function withPostToolUse(entries: unknown): string {
+  const d = mkdtempSync(join(tmpdir(), 'graft-postedit-'));
+  mkdirSync(join(d, '.claude'), { recursive: true });
+  const hooks = entries === undefined ? {} : { PostToolUse: entries };
+  writeFileSync(join(d, '.claude', 'settings.json'), JSON.stringify({ hooks }));
+  return d;
+}
+
+function postEditEntry(timeout: unknown) {
+  return { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: 'node ".claude/helpers/graft-hooks.cjs" post-edit', timeout }] };
+}
+function savingsEntry(timeout: unknown) {
+  return { matcher: 'Bash|mcp__graft__|Read|Grep|Glob', hooks: [{ type: 'command', command: 'node ".claude/helpers/graft-hooks.cjs" tool-savings', timeout }] };
+}
+
+test('postEditCheckTimeout is derived from the installed hook budget', () => {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'graft-nouser-'));
+  try {
+    // A repo wired before post-edit's budget was raised: 8000 for both entries, so
+    // the old flat 8000 child had the whole budget and left nothing after it.
+    assert.equal(postEditCheckTimeout(withPostToolUse([postEditEntry(8000), savingsEntry(8000)])), 6000);
+
+    // The current template. `installedHookTimeout` is matcher-blind by design and
+    // takes the smallest, which is the conservative direction: guessing high gets
+    // the hook killed, guessing low only shortens one `graft check`.
+    assert.equal(postEditCheckTimeout(withPostToolUse([postEditEntry(10000), savingsEntry(8000)])), 6000);
+
+    // A repo that raised both by hand gets the longer child it asked for.
+    assert.equal(postEditCheckTimeout(withPostToolUse([postEditEntry(20000), savingsEntry(20000)])), 18000);
+
+    // Never so small the child has no chance.
+    assert.equal(postEditCheckTimeout(withPostToolUse([postEditEntry(1000)])), 4000);
+
+    // Nothing readable: the conservative 8s budget the other hooks carry.
+    assert.equal(postEditCheckTimeout(withPostToolUse(undefined)), 6000);
+    assert.equal(postEditCheckTimeout(withPostToolUse([postEditEntry('nonsense')])), 6000);
+    assert.equal(postEditCheckTimeout(mkdtempSync(join(tmpdir(), 'graft-nosettings-'))), 6000);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+});
+
+test('postEditCheckTimeout reads its own event, not the prompt hook budget', () => {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'graft-nouser-'));
+  try {
+    const d = mkdtempSync(join(tmpdir(), 'graft-bothevents-'));
+    mkdirSync(join(d, '.claude'), { recursive: true });
+    writeFileSync(join(d, '.claude', 'settings.json'), JSON.stringify({
+      hooks: {
+        PostToolUse: [postEditEntry(20000)],
+        UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node ".claude/helpers/graft-hooks.cjs" prompt', timeout: 8000 }] }],
+      },
+    }));
+    // The two hooks run under separate budgets; neither may cap the other.
+    assert.equal(postEditCheckTimeout(d), 18000);
+    assert.equal(promptAskTimeout(d), 6000);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
 });
