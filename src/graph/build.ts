@@ -23,7 +23,7 @@ import { containerLangOf, extractContainer, warmContainerGrammars } from "./cont
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
-import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
+import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs, readOnlyDirs, writeOnlyDirs } from "../util/state.js";
 import {
   emptyExtractCache,
   readExtractCache,
@@ -161,9 +161,14 @@ export async function buildGraph(
     followSubmodules: readFollowSubmodules(root),
     followNestedRepos: readFollowNestedRepos(root),
   });
-  const onlyDirs = opts.onlyDirs && opts.onlyDirs.length > 0 ? new Set(opts.onlyDirs) : undefined;
+  // A flag wins and sticks; with none, the graph's persisted whitelist stands.
+  // Without that fallback the hooks' bare `graft build .` re-indexes the whole
+  // repo and quietly undoes every `--only-dir` the user set. An empty array is
+  // `--all-dirs`: clear the whitelist and index everything again.
+  if (opts.onlyDirs !== undefined) writeOnlyDirs(root, opts.onlyDirs);
+  const onlyDirs = readOnlyDirs(root);
   const repoFiles = filterByOnlyDirs(walked, root, onlyDirs);
-  const files = listSourceStats(root, outDir, repoFiles);
+  const files = listSourceStats(root, outDir, repoFiles, onlyDirs);
   const discoveredScopes = discoverScopes(root, repoFiles);
 
   const nodes: NodeV1[] = [];
@@ -358,7 +363,7 @@ export async function buildGraph(
   // these source bytes." Nothing about the projections below — which is why it is
   // safe to write here, and why `graphOnly` builds (the query path, which stops
   // right after this line) are still recorded as fresh.
-  writeFingerprint(outDir, entries, opts.onlyDirs);
+  writeFingerprint(outDir, entries, onlyDirs ? [...onlyDirs] : undefined);
 
   // Tier-2 passive surface: project the nodes into per-file markdown cards, and
   // refresh the INDEX roster. Pure projection — no LLM, no network.

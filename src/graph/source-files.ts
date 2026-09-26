@@ -10,7 +10,7 @@ import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { relPosix } from "../util/paths.js";
-import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
+import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs, readOnlyDirs } from "../util/state.js";
 import { languageOf, depthExtensions } from "./extract.js";
 import { genericLangOf, genericExtensions } from "./generic.js";
 import { containerLangOf, containerExtensions } from "./container.js";
@@ -68,7 +68,7 @@ export function listSourceFiles(
     followSubmodules: readFollowSubmodules(resolve(root)),
     followNestedRepos: readFollowNestedRepos(resolve(root)),
   }),
-  onlyDirs?: ReadonlySet<string>,
+  onlyDirs: ReadonlySet<string> | undefined = readOnlyDirs(resolve(root)),
 ): string[] {
   // A file is a source file if a depth-tier grammar (languageOf), a breadth-tier
   // grammar (genericLangOf) or a container (containerLangOf) claims its extension.

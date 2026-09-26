@@ -228,3 +228,19 @@ test('renderStatusline shows tokens alone until a turn has been billed', () => {
   assert.match(line, /~100,000 tok saved/);
   assert.doesNotMatch(line, /\$/);
 });
+
+test('incomingEdges matches a Windows path against posix node paths', () => {
+  // The post-edit hook forwards `tool_input.file_path` exactly as the host wrote
+  // it. On Windows that is a backslash path, while every node.path is posix — so
+  // the suffix test used to miss on every file and the blast radius came back
+  // empty for every language, silently.
+  const win = String.raw`E:\projetos\repo\src\pkce.ts`;
+  const e = incomingEdges(wiring2, win);
+  assert.equal(e.length, 1, 'a backslash path must resolve to the same nodes');
+  assert.equal(e[0].source, 'src/client.ts#exchange');
+
+  assert.match(strip(formatBlastRadius(wiring2, win)!), /blast radius for pkce\.ts/);
+
+  // A backslash path that names no indexed file still resolves to nothing.
+  assert.equal(formatBlastRadius(wiring2, String.raw`E:\projetos\repo\src\unknown.ts`), null);
+});

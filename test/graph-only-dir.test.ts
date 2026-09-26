@@ -87,3 +87,31 @@ test("--only-dir rejects a prefix that normalizes to empty", () => {
     rmSync(d, { recursive: true, force: true });
   }
 });
+
+test("the whitelist survives a no-flag rebuild, and --all-dirs clears it", () => {
+  const d = repoWithDirs();
+  try {
+    runCli(["build", d, "--only-dir", "src/a"]);
+    assert.ok(!graphOf(d)!.nodes.some((n) => n.path === "src/b/b.ts"), "src/b starts excluded");
+
+    // The regression: the hooks shell a bare `graft build .` with no flags at all.
+    // Before the whitelist was made sticky this re-indexed the whole repo, so one
+    // file edit silently undid the user's scope.
+    runCli(["build", d]);
+    const after = graphOf(d)!;
+    assert.ok(after.nodes.some((n) => n.path === "src/a/a.ts"), "src/a still indexed");
+    assert.ok(!after.nodes.some((n) => n.path === "src/b/b.ts"), "src/b must STILL be skipped");
+    assert.ok(!after.nodes.some((n) => n.path === "top.ts"), "top.ts must STILL be skipped");
+    assert.deepEqual(readFingerprint(join(d, "graft"))?.onlyDirs, ["src/a"]);
+    assert.ok(!existsSync(join(d, ".graft", "config.json")), "source repo config still untouched");
+
+    // And the escape hatch puts the whole repo back.
+    runCli(["build", d, "--all-dirs"]);
+    const full = graphOf(d)!;
+    assert.ok(full.nodes.some((n) => n.path === "src/b/b.ts"), "--all-dirs re-indexes src/b");
+    assert.ok(full.nodes.some((n) => n.path === "top.ts"), "--all-dirs re-indexes top.ts");
+    assert.equal(readFingerprint(join(d, "graft"))?.onlyDirs, undefined, "whitelist cleared");
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});

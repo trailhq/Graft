@@ -471,3 +471,110 @@ test("a throwing grammar is a per-file build error, cached as a failure (#139)",
     swapGrammarForTest("rust", prev);
   }
 });
+
+// GDScript: a .gd file IS a class, so `class_name` names the file's own type and
+// `class Inner:` is a nested one. Locals inside a func body must stay out.
+const GDSCRIPT = `extends Node
+class_name WaterCache
+
+signal chunk_ready(id: int)
+
+enum Mode { FAST, SLOW }
+
+const MAX_CHUNKS := 32
+var cache := {}
+
+class Inner:
+\thelper_placeholder
+
+func _ready() -> void:
+\tvar local_only := 1
+\t_build(local_only)
+
+func _build(n: int) -> int:
+\treturn n + MAX_CHUNKS
+`.replace(/helper_placeholder/, "func helper() -> void:\n\t\tpass");
+
+test("genericLangOf routes .gd to the breadth tier", () => {
+  assert.equal(genericLangOf("scripts/save/water_cache.gd")?.name, "gdscript");
+});
+
+test("GDScript: class_name/nested class/signal/enum/const become symbols, body locals do not", async () => {
+  await warmGenericGrammars(["gdscript"]);
+  assert.ok(isWarm("gdscript"), "gdscript grammar should warm");
+  const { nodes, rawEdges } = extractGeneric("water_cache.gd", GDSCRIPT, "gdscript");
+  const symbols = nodes.filter((n) => n.kind !== "file");
+  const byName = new Map(symbols.map((n) => [n.name, n]));
+
+  assert.equal(byName.get("WaterCache")?.kind, "class", "class_name is the file's own class");
+  assert.equal(byName.get("Inner")?.kind, "class", "nested class");
+  assert.equal(byName.get("helper")?.kind, "method", "func inside a class body is a method");
+  assert.equal(byName.get("_build")?.kind, "function", "top-level func");
+  assert.equal(byName.get("Mode")?.kind, "enum");
+  assert.equal(byName.get("MAX_CHUNKS")?.kind, "constant");
+  assert.equal(byName.get("chunk_ready")?.kind, "variable", "signals are named so callers can find emits");
+  assert.equal(byName.get("cache")?.kind, "variable", "class-level var");
+
+  assert.ok(!symbols.some((n) => n.name === "local_only"), "function-body local is not a symbol");
+
+  const edges = resolveEdges(nodes, rawEdges);
+  const calls = edges
+    .filter((e) => e.relation === "calls")
+    .map((e) => `${e.source.split("#")[1]}→${e.target.split("#")[1]}`);
+  assert.ok(calls.includes("_ready→_build"), `_ready → _build (got ${calls.join(", ")})`);
+});
+
+const GD_TARGET = `extends Node
+class_name WaterCache
+
+func build() -> void:
+	pass
+`;
+
+const GD_USER = `extends Node
+
+const WaterCacheScript := preload("res://scripts/save/water_cache.gd")
+const Missing := preload("res://scripts/does_not_exist.gd")
+
+func run() -> void:
+	var runtime := load("res://scripts/save/water_cache.gd")
+`;
+
+test("GDScript: preload/load give the imported FILE an incoming edge (blast radius)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-gd-import-"));
+  mkdirSync(join(dir, "scripts", "save"), { recursive: true });
+  writeFileSync(join(dir, "scripts", "save", "water_cache.gd"), GD_TARGET);
+  writeFileSync(join(dir, "scripts", "save", "user.gd"), GD_USER);
+
+  await buildGraph(dir, { reuse: false });
+  const g = readGraph(wiringPath(join(dir, "graft")))!;
+  const imports = g.edges.filter((e) => e.relation === "imports");
+
+  // `res://` is the Godot project root, so the prefix is stripped and the rest
+  // matched as a path suffix — this is the edge a post-edit blast radius reads.
+  assert.ok(
+    imports.some(
+      (e) =>
+        e.source === "scripts/save/user.gd" && e.target === "scripts/save/water_cache.gd",
+    ),
+    `user.gd imports water_cache.gd (got ${imports.map((e) => `${e.source}→${e.target}`).join(", ")})`,
+  );
+
+  // preload and load of the SAME path are one edge, not two.
+  assert.equal(
+    imports.filter((e) => e.target === "scripts/save/water_cache.gd").length,
+    1,
+    "preload + load of one path must not double the edge",
+  );
+
+  // A path with no file behind it keeps the raw specifier as its target — the
+  // same shape every other resolver uses for an unresolved import — rather than
+  // being pointed at some same-named node elsewhere in the repo.
+  const dangling = imports.filter((e) => e.target.includes("does_not_exist"));
+  assert.equal(dangling.length, 1, "the dangling import is still recorded");
+  assert.equal(
+    dangling[0].target,
+    "res://scripts/does_not_exist.gd",
+    "an unresolvable res:// path stays the raw specifier, never a node id",
+  );
+});
