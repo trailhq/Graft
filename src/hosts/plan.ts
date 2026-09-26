@@ -65,26 +65,55 @@ function instructionTarget(repo: string, host: HostTarget): PlannedWrite {
  * touch. Claude Code comes first — it's the deep integration and the picker's
  * default. `ids`, when given, restricts the plan to those hosts.
  */
-export function planInit(repo: string, opts: { home?: string; ids?: string[] } = {}): HostPlan[] {
+export interface PlanInitOptions {
+  home?: string;
+  ids?: string[];
+  /** `--no-mcp`: skip MCP server registration for the non-Claude hosts. */
+  mcp?: boolean;
+  /** `--no-hooks`: skip hook installation for the non-Claude hosts. */
+  hooks?: boolean;
+  /** `--no-global`: skip every write outside the repo. */
+  global?: boolean;
+}
+
+/**
+ * The same predicates `runHostsInit()` applies when it writes, so `--dry-run`
+ * describes the operation the flags actually select (#329):
+ *  - `--no-mcp` drops the MCP registrations;
+ *  - `--no-hooks` drops the Codex and Cursor hooks;
+ *  - `--no-global` drops everything outside the repo: the `~/.claude` copy, the
+ *    global MCP configs (Codex, Antigravity), the Codex hooks and the
+ *    Antigravity skill. Cursor's hooks are repo-local and stay.
+ */
+export function planInit(repo: string, opts: PlanInitOptions = {}): HostPlan[] {
   const home = opts.home ?? homedir();
   const probe = probeFor(home, repo);
   const detected = new Set(detectHosts(probe).map((h) => h.id));
+  const withGlobal = opts.global !== false;
+  const withMcp = opts.mcp !== false;
+  const withHooks = opts.hooks !== false;
+  const inScope = (w: PlannedWrite) => withGlobal || w.scope !== 'global';
 
   const plans: HostPlan[] = [
     // Repo writes plus the user-level copy under `~/.claude` — the picker and
     // `--dry-run` render 'global' writes in their own section, so a user sees
     // what lands outside the repo before agreeing to it.
-    { id: 'claude', name: 'Claude Code', detected: true, writes: [...claudeTargets(repo), ...claudeGlobalTargets(home)] },
+    {
+      id: 'claude',
+      name: 'Claude Code',
+      detected: true,
+      writes: [...claudeTargets(repo), ...(withGlobal ? claudeGlobalTargets(home) : [])],
+    },
     ...HOSTS.map((host) => ({
       id: host.id,
       name: host.name,
       detected: detected.has(host.id),
       writes: [
         instructionTarget(repo, host),
-        ...mcpTargets(repo, [host.id], { home }),
-        ...(host.id === 'agents' ? hookTargets(home) : []),
-        ...(host.id === 'cursor' ? cursorHookTargets(repo) : []),
-        ...(host.id === 'antigravity' ? antigravitySkillTargets(home) : []),
+        ...(withMcp ? mcpTargets(repo, [host.id], { home }).filter(inScope) : []),
+        ...(host.id === 'agents' && withHooks && withGlobal ? hookTargets(home) : []),
+        ...(host.id === 'cursor' && withHooks ? cursorHookTargets(repo) : []),
+        ...(host.id === 'antigravity' && withGlobal ? antigravitySkillTargets(home) : []),
       ],
     })),
   ];
