@@ -50,7 +50,7 @@ const MIN_CHILD_TIMEOUT_MS = 4000;
  * A query now brings the graph up to date first, so `graft init` raises the
  * UserPromptSubmit budget to 15s to cover the one cold rebuild after an upgrade. But
  * `mergeGraftSettings` only runs during `graft init` — upgrading the npm package does
- * not re-run it. So every repo wired before that change keeps `"timeout": 8000`, and
+ * not re-run it. So every repo wired before that change keeps an 8s timeout, and
  * hard-coding a 13s child there means Claude Code kills the hook first: `emit()` and
  * `writeSession()` never run, the turn gets no retrieval pack at all, and the SIGKILLed
  * child can't even release the build lock. Reading the installed number keeps the child
@@ -77,8 +77,17 @@ function hookSettingsFiles(dir: string): string[] {
   ];
 }
 
-/** The timeout on one settings file's graft hook entry for `event`, or null if it
- * can't be read (no settings file, hand-edited shape, unparseable JSON). */
+/**
+ * A hook `timeout` from settings.json, in milliseconds. Claude Code reads it in
+ * seconds. Older graft versions wrote milliseconds (8000, 15000), so a value of
+ * 1000 or more is taken as one of those rather than as a wait of over 16 minutes.
+ */
+function timeoutMs(timeout: number): number {
+  return timeout >= 1000 ? timeout : timeout * 1000;
+}
+
+/** The timeout in ms on one settings file's graft hook entry for `event`, or null if
+ * it can't be read (no settings file, hand-edited shape, unparseable JSON). */
 function hookTimeoutIn(file: string, event: string): number | null {
   try {
     const settings = JSON.parse(readFileSync(file, 'utf8')) as any;
@@ -87,7 +96,7 @@ function hookTimeoutIn(file: string, event: string): number | null {
     for (const block of blocks) {
       for (const h of block?.hooks ?? []) {
         if (typeof h?.command === 'string' && h.command.includes('graft-hooks.cjs') && typeof h.timeout === 'number') {
-          return h.timeout;
+          return timeoutMs(h.timeout);
         }
       }
     }
