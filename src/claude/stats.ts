@@ -5,8 +5,13 @@ import type { Stats } from './state.js';
 import { resolveContextDir } from '../util/state.js';
 
 export function readWiring(projectDir: string): GraphV1 | null {
+  return readWiringIn(resolveContextDir(projectDir));
+}
+
+/** Read `wiring.json` from an explicit graft context dir (`<repo>/graft`). */
+export function readWiringIn(contextDir: string): GraphV1 | null {
   try {
-    return JSON.parse(readFileSync(join(resolveContextDir(projectDir), '.graph', 'wiring.json'), 'utf8')) as GraphV1;
+    return JSON.parse(readFileSync(join(contextDir, '.graph', 'wiring.json'), 'utf8')) as GraphV1;
   } catch { return null; }
 }
 

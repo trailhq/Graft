@@ -18,6 +18,7 @@ export {
   emptyStats,
   patchStats,
   readStats,
+  readStatsIn,
   releaseLock,
   resolveContextDir,
   writeJsonAtomic,
