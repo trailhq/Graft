@@ -220,11 +220,11 @@ export class OpenAIChatModel implements ChatModel {
   }
 
   /**
-   * Some OpenAI-compatible servers (observed with GLM-5.3 hosted on Mistral's
-   * platform) return `message.content` as a structured array of content parts
-   * (e.g. `[{ type: "text", text: "..." }]`) instead of the plain string the
-   * OpenAI spec — and the rest of this file — assumes. Normalize defensively
-   * so a `.trim()` downstream never explodes on a non-string value.
+   * Normalize provider message content to the plain text representation
+   * expected by the rest of Graft. Some OpenAI-compatible providers
+   * (observed with GLM-5.3 hosted on Mistral's platform) return content as
+   * structured content parts, e.g. `[{ type: "text", text: "..." }]`,
+   * instead of a plain string — this path in Graft assumed the latter.
    */
   private static contentToText(content: unknown): string {
     if (typeof content === "string") return content;
