@@ -34,13 +34,29 @@ export function underGraft(dir: string, file: string): boolean {
   return rel.replace(/^[/\\]+/, '').replace(/\\/g, '/').startsWith('graft/');
 }
 /** Default budget for a graft child process invoked from a hook, matching the 8s
- * the installed hook entries carry. */
+ * the installed hook entries carry. Always milliseconds — this is `execFileSync`'s
+ * unit, not the seconds Claude Code stores on the hook entry. */
 const CHILD_TIMEOUT_MS = 8000;
 /** Headroom left for the hook's own work (read stdin, score, write session, emit)
  * after its `graft ask` child returns. */
 const HOOK_OVERHEAD_MS = 2000;
 /** Floor, so a hand-edited tiny timeout can't leave the child no time at all. */
 const MIN_CHILD_TIMEOUT_MS = 4000;
+/**
+ * Claude Code documents hook `timeout` as seconds. Values at or above this were
+ * written by 0.16.0 as milliseconds (8000 / 10000 / 15000) and are left as-is
+ * until SessionStart rewrites the file, so a child isn't given an hours-long
+ * budget — and so treating `8` as milliseconds can't shrink it to 6ms.
+ */
+const LEGACY_HOOK_TIMEOUT_MS = 1000;
+
+/**
+ * Claude Code's hook `timeout` field is seconds. Convert to milliseconds for
+ * `execFileSync`, keeping leftover 0.16.0 millisecond values as milliseconds.
+ */
+function hookTimeoutMs(timeout: number): number {
+  return timeout >= LEGACY_HOOK_TIMEOUT_MS ? timeout : timeout * 1000;
+}
 
 /**
  * How long the prompt hook may let `graft ask` run — derived from the budget that is
@@ -55,6 +71,10 @@ const MIN_CHILD_TIMEOUT_MS = 4000;
  * `writeSession()` never run, the turn gets no retrieval pack at all, and the SIGKILLed
  * child can't even release the build lock. Reading the installed number keeps the child
  * strictly inside whatever budget this repo really has.
+ *
+ * The return value is always milliseconds. The installed JSON is seconds (or a
+ * leftover millisecond value from 0.16.0); converting here is what keeps
+ * `timeout: 8` at a 6s child instead of 6ms.
  */
 export function promptAskTimeout(dir: string): number {
   const installed = installedHookTimeout(dir, 'UserPromptSubmit');
@@ -98,22 +118,25 @@ function hookTimeoutIn(file: string, event: string): number | null {
 }
 
 /**
- * The budget this hook is actually running under, or null when no settings file
- * declares one.
+ * The budget this hook is actually running under, in milliseconds, or null when
+ * no settings file declares one.
  *
  * The smallest declared timeout wins rather than the nearest, because when more
  * than one file declares the hook Claude Code runs every matching entry and this
  * process cannot tell which one launched it. Guessing high is the expensive
  * mistake: an overrunning child gets the whole hook SIGKILLed, so `emit()` and
  * `writeSession()` never run and the turn silently gets no retrieval at all.
- * Guessing low only shortens one query.
+ * Guessing low only shortens one query. Conversion to milliseconds happens
+ * *before* the min, so a leftover `8000` (ms) is not treated as smaller than a
+ * current `15` (seconds).
  */
 function installedHookTimeout(dir: string, event: string): number | null {
   let smallest: number | null = null;
   for (const file of hookSettingsFiles(dir)) {
     const timeout = hookTimeoutIn(file, event);
     if (timeout === null) continue;
-    if (smallest === null || timeout < smallest) smallest = timeout;
+    const ms = hookTimeoutMs(timeout);
+    if (smallest === null || ms < smallest) smallest = ms;
   }
   return smallest;
 }

@@ -579,6 +579,9 @@ test('cursor-session-end force-closes THIS conversation even though its file was
  * only during `graft init`, so an npm upgrade leaves every already-wired repo on its
  * old `timeout` — and a child that outlives it gets the whole hook killed by Claude
  * Code, which means no retrieval pack and no session write at all.
+ *
+ * Claude Code stores hook timeout in seconds. The child budget is still milliseconds
+ * (`execFileSync`), with the same headroom as before: a 8s hook → 6000ms child.
  */
 function withSettings(timeout: unknown): string {
   const d = mkdtempSync(join(tmpdir(), 'graft-hooktimeout-'));
@@ -597,12 +600,15 @@ test('promptAskTimeout is derived from the installed hook budget', () => {
   const previous = process.env.CLAUDE_CONFIG_DIR;
   process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'graft-nouser-'));
   try {
-    // A repo wired before the budget was raised.
+    // Seconds, as Claude Code documents the field. 8s hook → 6s child, not 6ms.
+    assert.equal(promptAskTimeout(withSettings(8)), 6000);
+    // A repo wired after the prompt budget was raised to 15s.
+    assert.equal(promptAskTimeout(withSettings(15)), 13000);
+    // Leftover 0.16.0 millisecond values until SessionStart rewrites the file.
     assert.equal(promptAskTimeout(withSettings(8000)), 6000);
-    // A repo wired after.
     assert.equal(promptAskTimeout(withSettings(15000)), 13000);
     // Never so small the child has no chance.
-    assert.equal(promptAskTimeout(withSettings(1000)), 4000);
+    assert.equal(promptAskTimeout(withSettings(1)), 4000);
 
     // Nothing readable: assume the conservative 8s budget the other hooks carry.
     assert.equal(promptAskTimeout(withSettings(undefined)), 6000);
@@ -632,16 +638,21 @@ function withUserSettings(timeout: unknown): string {
 test('promptAskTimeout reads a user-level hook when the repo declares none', () => {
   const previous = process.env.CLAUDE_CONFIG_DIR;
   try {
-    process.env.CLAUDE_CONFIG_DIR = withUserSettings(15000);
+    process.env.CLAUDE_CONFIG_DIR = withUserSettings(15);
     // A repo with no .claude/ of its own still gets the budget it truly runs under.
     assert.equal(promptAskTimeout(mkdtempSync(join(tmpdir(), 'graft-nosettings-'))), 13000);
 
     // Declared in both places: Claude Code fires both entries and this process
     // cannot tell which launched it, so the smallest budget is the only safe one.
-    assert.equal(promptAskTimeout(withSettings(8000)), 6000);
+    assert.equal(promptAskTimeout(withSettings(8)), 6000);
 
+    process.env.CLAUDE_CONFIG_DIR = withUserSettings(8);
+    assert.equal(promptAskTimeout(withSettings(15)), 6000);
+
+    // Leftover millisecond user settings vs current seconds in the repo: compare
+    // after converting, so 8000ms is not treated as smaller than 15s.
     process.env.CLAUDE_CONFIG_DIR = withUserSettings(8000);
-    assert.equal(promptAskTimeout(withSettings(15000)), 6000);
+    assert.equal(promptAskTimeout(withSettings(15)), 6000);
 
     // Nothing anywhere still means the conservative default.
     process.env.CLAUDE_CONFIG_DIR = withUserSettings(undefined);

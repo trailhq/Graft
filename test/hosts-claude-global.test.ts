@@ -131,10 +131,26 @@ test('an existing settings.json keeps every key graft does not own', () => {
   assert.equal(s.theme, 'light');
   assert.equal(s.effortLevel, 'high');
   assert.ok(s.hooks.Stop);
-  // Hooks only: the statusline is a single per-session slot and taking it for every
-  // repo would silently outrank the user's own.
+  // Hooks (and footer regexes, which Claude Code ignores in project settings):
+  // the statusline is a single per-session slot and taking it for every repo
+  // would silently outrank the user's own. The footer badge only works here.
   assert.equal(s.statusLine, undefined, 'no global statusline');
   assert.equal(s.permissions, undefined, 'no global allowlist');
+  assert.deepEqual(s.footerLinksRegexes, ['graft/[\\w./-]+\\.md']);
+});
+
+test('an existing user footer regex is kept next to graft\'s', () => {
+  const home = tmpRepo('cgfooter');
+  mkdirSync(join(home, '.claude'), { recursive: true });
+  writeFileSync(settingsOf(home), JSON.stringify({ footerLinksRegexes: ['docs/.*'] }, null, 2));
+
+  installClaudeGlobal(home);
+
+  const s = readJson(settingsOf(home));
+  assert.deepEqual(s.footerLinksRegexes, ['docs/.*', 'graft/[\\w./-]+\\.md']);
+  const again = installClaudeGlobal(home);
+  assert.ok(again.every((w) => w.action === 'unchanged'), `idempotent footer, got ${JSON.stringify(again)}`);
+  assert.deepEqual(readJson(settingsOf(home)).footerLinksRegexes, ['docs/.*', 'graft/[\\w./-]+\\.md']);
 });
 
 test('an existing user-scope MCP server survives, and re-running converges', () => {
@@ -208,6 +224,7 @@ test('uninstall removes exactly what the global install added', () => {
   assert.equal(existsSync(shimOf(home)), false, 'shim gone');
   const s = readJson(settingsOf(home));
   assert.equal(s.hooks, undefined, 'graft hooks gone');
+  assert.equal(s.footerLinksRegexes, undefined, 'graft footer gone');
   assert.equal(s.theme, 'light', "the user's own settings survive");
   const mcp = readJson(userMcpOf(home));
   assert.equal(mcp.mcpServers.graft, undefined, 'graft server gone');
