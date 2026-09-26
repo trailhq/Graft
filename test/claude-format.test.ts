@@ -9,6 +9,24 @@ test('not-built state', () => {
   const lines = renderStatusline(null, null, { ctxPct: null });
   assert.match(strip(lines[0]), /not built/);
   assert.match(strip(lines[0]), /graft build/);
+  assert.equal(lines.length, 1, 'no ctx reading from the host, so no second line');
+});
+
+test('not-built state still shows the context meter (#461)', () => {
+  // The ctx reading comes from the host's statusline stdin, not the graph, so a
+  // missing graph must not hide it.
+  const lines = renderStatusline(null, null, { ctxPct: 57 }).map(strip);
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /not built/);
+  assert.match(lines[0], /graft build/);
+  assert.match(lines[1], /ctx 57%/);
+  assert.doesNotMatch(lines[1], /last:/, 'no graph, so no last-file segment');
+});
+
+test('not-built state keeps a 0% context reading', () => {
+  // 0 is a real reading (fresh session), not a missing one.
+  const lines = renderStatusline(null, null, { ctxPct: 0 }).map(strip);
+  assert.match(lines[1] ?? '', /ctx 0%/);
 });
 
 test('empty graph (0 nodes) is built, not "not built"', () => {
