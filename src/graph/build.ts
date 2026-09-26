@@ -17,7 +17,13 @@ import { readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { contextDirFor, ensureGitignored, ensureSearchable } from "../context/node-file.js";
-import { extractFile, languageLabelOf, languageOf, type RawEdge } from "./extract.js";
+import {
+  extractFile,
+  kotlinParserUnavailableMessage,
+  languageLabelOf,
+  languageOf,
+  type RawEdge,
+} from "./extract.js";
 import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
 import { containerLangOf, extractContainer, warmContainerGrammars } from "./container.js";
 import { contentHash } from "../util/id.js";
@@ -173,6 +179,13 @@ export async function buildGraph(
    * javascript, or the banner claims a repo's JavaScript went unindexed. */
   const langs = new Set<string>();
   const errors: string[] = [];
+  // Kotlin is the only optional depth-tier grammar. Probe it once, and only when
+  // the repository actually contains Kotlin, so a failed native install cannot
+  // affect a TypeScript/JavaScript-only build or produce startup noise.
+  const kotlinUnavailable = files.some((f) => languageOf(f.abs) === "kotlin")
+    ? kotlinParserUnavailableMessage()
+    : null;
+  if (kotlinUnavailable) errors.push(kotlinUnavailable);
 
   // In a git worktree there is nothing to reuse *yet* — `graft/` is gitignored, so
   // git never checked it out — but the parent checkout's graph is one directory away.
@@ -244,7 +257,14 @@ export async function buildGraph(
     }
 
     const hash = contentHash(source);
-    if (cached && hash === cached.hash) {
+    if (lang === "kotlin" && kotlinUnavailable) {
+      // Keep the source fingerprint current, but don't cache this as a parse
+      // failure: a later install may make the optional addon available.
+      entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, nodes: [], rawEdges: [], skipped: true };
+      return;
+    }
+
+    if (cached && hash === cached.hash && !cached.skipped) {
       entries[rel] = { ...cached, size: f.size, mtimeMs: f.mtimeMs };
       sources.set(rel, source);
       reused++;
