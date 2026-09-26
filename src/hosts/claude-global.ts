@@ -30,7 +30,6 @@ import { dirname, join } from 'node:path';
 import { hooksShim } from '../claude/shim-template.js';
 import { claudeDistDir } from '../claude/paths.js';
 import { mergeGraftHooks } from '../claude/settings-merge.js';
-import { toPosixPath } from '../util/paths.js';
 import { readJsonObject, writeOwned, type ConfigWrite } from './config-write.js';
 import { mergeJsonKey, serverEntry } from './mcp-config.js';
 import type { PlannedWrite } from './plan.js';
@@ -41,6 +40,37 @@ export type GlobalWrite = ConfigWrite;
 /** The directory the user-level shim lives in — the base every hook command names. */
 export function globalHelpersDir(home: string): string {
   return join(home, '.claude', 'helpers');
+}
+
+/**
+ * The same directory as a hook *command* names it: through the shell's home
+ * variable, not the expanded absolute path.
+ *
+ * `~/.claude/settings.json` is a file people keep in version control, so it comes
+ * back on the next machine from a clone. An expanded `/Users/<someone>/.claude/helpers`
+ * is right only for the account that ran `graft init`; on any other one the five
+ * hook commands point at a directory that does not exist. Nothing reports that —
+ * a hook whose command fails is a hook that does not run — so session-start,
+ * prompt, stop, post-edit and tool-savings all go silently inert while graft still
+ * looks wired. `graft init` rewrites those entries on every run, so editing the
+ * file by hand does not stick either.
+ *
+ * `$HOME` is available here where `${CLAUDE_PROJECT_DIR}` is not: Claude Code runs
+ * hook commands through a shell, so the variable expands when the hook fires, and
+ * it is not project-relative — a user-level shim has to work in a project that has
+ * no repo-level copy (see {@link installClaudeGlobal}).
+ *
+ * Windows takes `%USERPROFILE%` because cmd.exe has no `$HOME`. An unexpanded
+ * `$HOME` would point the five hooks at a literal `$HOME` directory, trading the
+ * portability gain for a real regression on the one platform where the expanded
+ * path still works.
+ *
+ * This is only about the string that lands in the generated config. `homedir()` is
+ * still the right thing for where the shim itself is written, which is why
+ * {@link globalHelpersDir} is unchanged and still takes the expanded path.
+ */
+export function globalHelpersCmdDir(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? '%USERPROFILE%/.claude/helpers' : '$HOME/.claude/helpers';
 }
 
 /**
@@ -81,16 +111,23 @@ function upsertGlobalHooks(id: string, path: string, helpers: string): GlobalWri
  * Install the user-level copy: the shim, the hook entries that call it, and the
  * user-scope MCP registration.
  *
- * The shim is written to `home` and the hook commands name it by absolute path, for
- * the reason the repo form can't be reused: `${CLAUDE_PROJECT_DIR}/.claude/helpers/`
- * resolves inside whatever project is open, and the whole point is to work in one
- * that has no such file. `hooksShim(claudeDistDir())` bakes in the installed
- * package's `dist/`, exactly as the Codex install does.
+ * The shim is written to the expanded `home`, but the hook *commands* name it
+ * through the shell's home variable ({@link globalHelpersCmdDir}) rather than by
+ * absolute path. `${CLAUDE_PROJECT_DIR}/.claude/helpers/` cannot be reused here:
+ * it resolves inside whatever project is open, and the whole point is to work in
+ * one that has no such file — while a literal `/Users/<someone>/…` is correct only
+ * on the machine that ran this, and silently inert on the next one.
+ * `hooksShim(claudeDistDir())` bakes in the installed package's `dist/`, exactly
+ * as the Codex install does.
+ *
+ * `platform` is a parameter for the same reason `home` is: the command form is
+ * the one platform-dependent string in this file, and a test has to be able to
+ * assert the Windows form from a POSIX runner.
  *
  * Best-effort by contract, like every other writer here: a failure is reported as an
  * action, never raised, so a bad `~/.claude.json` can't fail a `graft init`.
  */
-export function installClaudeGlobal(home: string): GlobalWrite[] {
+export function installClaudeGlobal(home: string, platform: NodeJS.Platform = process.platform): GlobalWrite[] {
   const [shim, settings, mcp] = claudeGlobalTargets(home);
   const out: GlobalWrite[] = [];
 
@@ -105,11 +142,10 @@ export function installClaudeGlobal(home: string): GlobalWrite[] {
   // worse failure than not installing.
   if (out[0].action !== 'skipped-unparseable') {
     try {
-      // Posix form in the command string: `join` gives backslashes on Windows and
-      // the template appends `/graft-hooks.cjs`, so the raw path produces a mixed
-      // `C:\Users\…\helpers/graft-hooks.cjs`. Node accepts forward slashes on
-      // Windows, so one separator throughout is both correct and readable.
-      out.push(upsertGlobalHooks(settings.id, settings.path, toPosixPath(globalHelpersDir(home))));
+      // Posix separators throughout: the template appends `/graft-hooks.cjs`, and
+      // `globalHelpersCmdDir` is already posix on every platform, so a Windows
+      // `C:\Users\…` never mixes with a `/`. Node accepts forward slashes there.
+      out.push(upsertGlobalHooks(settings.id, settings.path, globalHelpersCmdDir(platform)));
     } catch {
       out.push({ id: settings.id, path: settings.path, action: 'skipped-unparseable' });
     }
