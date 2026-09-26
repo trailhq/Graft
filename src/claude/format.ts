@@ -22,15 +22,26 @@ export function freshnessSegment(s: Stats): string {
   return C.indigo('✓ synced');
 }
 
+/** How many of a workspace root's listed child repos have a built graph (#455). */
+export interface WorkspaceStatus { built: number; total: number }
+
+export function workspaceSegment(w: WorkspaceStatus): string {
+  const repos = (n: number) => `${n} ${n === 1 ? 'repo' : 'repos'}`;
+  if (w.built >= w.total) return C.text(`workspace ${repos(w.total)}`);
+  return C.amber(`workspace ${w.built}/${repos(w.total)} built`);
+}
+
 export function renderStatusline(
   stats: Stats | null,
   session: SessionState | null,
-  ctx: { ctxPct: number | null },
+  ctx: { ctxPct: number | null; workspace?: WorkspaceStatus },
 ): string[] {
   if (!stats) {
     return [C.muted('◤ graft · not built · run ') + C.text('graft build')];
   }
-  const top = [C.muted('◤ ') + C.indigo('graft'), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];
+  const top = [C.muted('◤ ') + C.indigo('graft')];
+  if (ctx.workspace) top.push(workspaceSegment(ctx.workspace));
+  top.push(C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`));
   top.push(freshnessSegment(stats));
   const saved = session?.savedTokens ?? 0;
   if (saved > 0) {

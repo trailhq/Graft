@@ -78,7 +78,10 @@ export function writeJsonAtomic(p: string, value: unknown, compact = false): voi
   }
 }
 
-export function readStats(d: string): Stats | null { return readJson<Stats>(statsPath(d)); }
+export function readStats(d: string): Stats | null { return readStatsIn(cacheDir(d)); }
+/** Read the stats cache in an explicit cache dir — for callers (a workspace
+ * root's statusline) that resolve another repo's `graft/.cache` themselves. */
+export function readStatsIn(cache: string): Stats | null { return readJson<Stats>(join(cache, 'stats.json')); }
 export function writeStats(d: string, s: Stats): void { writeJsonAtomic(statsPath(d), s); }
 
 /**
