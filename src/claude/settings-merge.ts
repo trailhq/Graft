@@ -23,10 +23,11 @@ const REPO_HELPERS = '${CLAUDE_PROJECT_DIR:-.}/.claude/helpers';
 
 /**
  * `helpers` is the directory holding `graft-hooks.cjs`, and it is a parameter for
- * one reason: the user-level install (see hosts/claude-global.ts) has to name an
- * absolute path. A `${CLAUDE_PROJECT_DIR}` command works only where a previous
+ * one reason: the user-level install (see hosts/claude-global.ts) cannot reuse the
+ * repo form below. A `${CLAUDE_PROJECT_DIR}` command works only where a previous
  * `graft init` wrote a shim into that project — which is exactly the case the
- * global copy exists to cover, so it cannot reuse the repo form.
+ * global copy exists to cover — so it passes its own home-relative directory,
+ * which the shell expands per user rather than baking in one account's name.
  */
 function hookCmd(arg: string, helpers: string = REPO_HELPERS): string {
   return `node "${helpers}/graft-hooks.cjs" ${arg}`;
@@ -153,9 +154,10 @@ export function mergeGraftSettings(
 }
 
 /**
- * The hook blocks alone, merged into a settings file, with the shims addressed by
- * absolute path — `~/.claude/settings.json`, where a write reaches every project on
- * the machine (see hosts/claude-global.ts for why that copy has to exist).
+ * The hook blocks alone, merged into a settings file, with the shims addressed from
+ * the caller's own `helpers` — `~/.claude/settings.json`, where a write reaches
+ * every project on the machine (see hosts/claude-global.ts for why that copy has
+ * to exist).
  *
  * Hooks only, deliberately. `mergeGraftSettings` also claims the statusline, the
  * footer regex and a Bash allowlist, and each of those is a reasonable thing to
