@@ -27,8 +27,13 @@ export function renderStatusline(
   session: SessionState | null,
   ctx: { ctxPct: number | null },
 ): string[] {
+  // The context meter comes from the host (Claude Code's context_window), not the
+  // graph, so it has to survive a missing graph rather than vanish with it (#461).
+  const ctxSegment = typeof ctx.ctxPct === 'number' ? C.text(`ctx ${ctx.ctxPct}%`) : null;
   if (!stats) {
-    return [C.muted('◤ graft · not built · run ') + C.text('graft build')];
+    const lines = [C.muted('◤ graft · not built · run ') + C.text('graft build')];
+    if (ctxSegment) lines.push(C.muted('▸ ') + ctxSegment);
+    return lines;
   }
   const top = [C.muted('◤ ') + C.indigo('graft'), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];
   top.push(freshnessSegment(stats));
@@ -43,7 +48,7 @@ export function renderStatusline(
   }
 
   const bottom: string[] = [];
-  if (typeof ctx.ctxPct === 'number') bottom.push(C.text(`ctx ${ctx.ctxPct}%`));
+  if (ctxSegment) bottom.push(ctxSegment);
   if (stats.lastFile) bottom.push(C.muted('last: ') + C.text(basename(stats.lastFile)));
 
   const lines = [top.join(SEP)];
