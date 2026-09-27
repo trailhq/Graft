@@ -20,13 +20,54 @@ test('post-edit marks dirty and records lastFile', async () => {
   mkdirSync(join(d, 'graft', '.graph'), { recursive: true });
   writeFileSync(join(d, 'graft', '.graph', 'wiring.json'),
     JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));
-  // post-edit no longer runs `graft check` at all (removed: too slow on large repos) — just dirty + lastFile.
   process.env.CLAUDE_PROJECT_DIR = d;
   const stdin = JSON.stringify({ tool_input: { file_path: join(d, 'src', 'auth.ts') } });
   await runWithStdin(stdin, () => main('post-edit'));
   const s = readStats(d)!;
   assert.equal(s.dirty, true);
   assert.equal(s.lastFile, 'auth.ts');
+});
+
+/**
+ * trailhq/Graft#483: on a large repo, `graft check`'s cost comes from walking
+ * the whole tree to fingerprint it, not from how much changed — so a repo
+ * that times out on one edit will time out again on the very next one
+ * regardless of how small that edit is. Once `checkStaleCount` fails/times
+ * out, `handlePostEdit` must stop retrying it on every subsequent edit until
+ * a successful full sync (`sync-run.ts`) gives it one more chance.
+ */
+test('post-edit skips checkStaleCount after it previously timed out, and keeps the last known staleCount (trailhq/Graft#483)', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-hooks-'));
+  mkdirSync(join(d, 'graft', '.graph'), { recursive: true });
+  writeFileSync(join(d, 'graft', '.graph', 'wiring.json'),
+    JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));
+  writeStats(d, { ...emptyStats(), staleCount: 3, checkTimedOut: true });
+  process.env.CLAUDE_PROJECT_DIR = d;
+  process.env.GRAFT_TEST_CLI = join(tmpdir(), 'graft-hooks-nonexistent-cli.js'); // graftJson must never even be asked to run
+  try {
+    const stdin = JSON.stringify({ tool_input: { file_path: join(d, 'src', 'auth.ts') } });
+    await runWithStdin(stdin, () => main('post-edit'));
+  } finally {
+    delete process.env.GRAFT_TEST_CLI;
+  }
+  const s = readStats(d)!;
+  assert.equal(s.dirty, true);
+  assert.equal(s.lastFile, 'auth.ts');
+  assert.equal(s.staleCount, 3, 'the last known count survives — never falsely reset to 0');
+  assert.equal(s.checkTimedOut, true, 'still marked timed-out; only a successful sync clears it');
+});
+
+test('runSync clears checkTimedOut on a successful sync, giving the repo one more chance', () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-sync-'));
+  writeStats(d, { ...emptyStats(), dirty: true, checkTimedOut: true });
+  const fakeBuild = (dir: string) => writeFileSync(join(dir, 'graft', '.graph', 'wiring.json'),
+    JSON.stringify({ meta: { nodeCount: 1, edgeCount: 0, languages: ['typescript'] }, nodes: [{ id: 'a' }], edges: [] }),
+    { flag: 'w' });
+  mkdirSync(join(d, 'graft', '.graph'), { recursive: true });
+  runSync(d, fakeBuild);
+  const s = readStats(d)!;
+  assert.equal(s.dirty, false);
+  assert.equal(s.checkTimedOut, false);
 });
 
 test('post-edit ignores edits inside graft/', async () => {

@@ -193,8 +193,21 @@ function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_
     return null;
   }
 }
-function checkStaleCount(dir: string): number {
+/**
+ * `null` means "didn't run" — either skipped outright (trailhq/Graft#483:
+ * `checkTimedOut` from a previous edit) or the child itself failed/timed out
+ * this time. Callers keep the previous `staleCount` in that case rather than
+ * overwriting a real number with a false 0 — `check`'s cost on a large repo
+ * comes from walking the whole tree to fingerprint it, not from how much
+ * actually changed, so a repo that times out on one edit will time out again
+ * on the next regardless of how small that edit was; retrying on every single
+ * edit is a guaranteed loss, and `sync-run.ts`'s already-detached background
+ * sync is the thing that should own this number for such a repo anyway.
+ */
+function checkStaleCount(dir: string, previouslyTimedOut: boolean): number | null {
+  if (previouslyTimedOut) return null;
   const r = graftJson(dir, withContextDirArg(dir, ['check', '.', '--json']), postEditCheckTimeout(dir));
+  if (r === null) return null;
   const g = r?.graph ?? {};
   return (g.changed?.length ?? 0) + (g.added?.length ?? 0) + (g.removed?.length ?? 0);
 }
@@ -228,7 +241,12 @@ export function editedFilePath(input: any, dir: string): string | null {
 async function handlePostEdit(input: any, dir: string): Promise<void> {
   const file = editedFilePath(input, dir);
   if (!file || underGraft(dir, file)) return;
-  patchStats(dir, { dirty: true, staleCount: checkStaleCount(dir), lastFile: basename(file) });
+  const staleCount = checkStaleCount(dir, readStats(dir)?.checkTimedOut ?? false);
+  patchStats(dir, {
+    dirty: true,
+    lastFile: basename(file),
+    ...(staleCount === null ? { checkTimedOut: true } : { staleCount, checkTimedOut: false }),
+  });
   const w = readWiring(dir);
   if (w) { const br = formatBlastRadius(w, file); if (br) emit('PostToolUse', br); }
 }
