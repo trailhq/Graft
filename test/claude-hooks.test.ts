@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { underGraft, main, lastFileScopeHint, promptAskTimeout } from '../src/claude/hooks.js';
+import { underGraft, main, lastFileScopeHint, promptAskTimeout, postEditCheckTimeout } from '../src/claude/hooks.js';
 import { readStats, readSession } from '../src/claude/state.js';
 import { runSync } from '../src/claude/sync-run.js';
 import { savingsLine } from '../src/context/savings.js';
@@ -646,6 +646,62 @@ test('promptAskTimeout reads a user-level hook when the repo declares none', () 
     // Nothing anywhere still means the conservative default.
     process.env.CLAUDE_CONFIG_DIR = withUserSettings(undefined);
     assert.equal(promptAskTimeout(mkdtempSync(join(tmpdir(), 'graft-nosettings-'))), 6000);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+});
+
+/**
+ * trailhq/Graft#283: post-fix, `settings-merge.ts` writes the SANE (seconds)
+ * value, and this must convert it to ms before subtracting the ms-denominated
+ * overhead — not treat it as already-ms, which is the bug (it floors every
+ * realistic seconds value to MIN_CHILD_TIMEOUT_MS regardless of what's
+ * actually configured).
+ */
+test('promptAskTimeout converts a sane seconds budget to ms (trailhq/Graft#283)', () => {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'graft-nouser-'));
+  try {
+    assert.equal(promptAskTimeout(withSettings(20)), 18000);
+    assert.equal(promptAskTimeout(withSettings(15)), 13000);
+    // Exactly at the legacy/sane boundary: 600 is still sane seconds (Claude
+    // Code's own documented default), not a legacy ms artifact.
+    assert.equal(promptAskTimeout(withSettings(600)), 598000);
+    // One tick over the boundary flips to "this is a leftover ms value" —
+    // used as-is (601ms), which floors to MIN_CHILD_TIMEOUT_MS.
+    assert.equal(promptAskTimeout(withSettings(601)), 4000);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+});
+
+/** Two graft subcommands share the `PostToolUse` event with independent
+ * budgets — see the header comment on `graftBlocks` in settings-merge.ts. */
+function withPostToolUseSettings(postEditTimeout: unknown, toolSavingsTimeout: unknown, swapOrder = false): string {
+  const d = mkdtempSync(join(tmpdir(), 'graft-hooktimeout-'));
+  mkdirSync(join(d, '.claude'), { recursive: true });
+  const postEdit = { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: 'node ".claude/helpers/graft-hooks.cjs" post-edit', timeout: postEditTimeout }] };
+  const toolSavings = { matcher: 'Bash|mcp__graft__|Read|Grep|Glob', hooks: [{ type: 'command', command: 'node ".claude/helpers/graft-hooks.cjs" tool-savings', timeout: toolSavingsTimeout }] };
+  const PostToolUse = swapOrder ? [toolSavings, postEdit] : [postEdit, toolSavings];
+  writeFileSync(join(d, '.claude', 'settings.json'), JSON.stringify({ hooks: { PostToolUse } }));
+  return d;
+}
+
+test('postEditCheckTimeout reads the post-edit subcommand, not tool-savings sharing its event (trailhq/Graft#366)', () => {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'graft-nouser-'));
+  try {
+    // post-edit=20s, tool-savings=8s: picking up the wrong entry would give 6000
+    // (8s legacy-tolerant path) instead of 18000.
+    assert.equal(postEditCheckTimeout(withPostToolUseSettings(20, 8)), 18000);
+    // Array order must not matter — matching is by subcommand name, not position.
+    assert.equal(postEditCheckTimeout(withPostToolUseSettings(20, 8, true)), 18000);
+    // Legacy ms-shaped values still tolerated, same as promptAskTimeout.
+    assert.equal(postEditCheckTimeout(withPostToolUseSettings(10000, 8000)), 8000);
+    // Nothing declared: the same conservative default promptAskTimeout falls back to.
+    assert.equal(postEditCheckTimeout(mkdtempSync(join(tmpdir(), 'graft-nosettings-'))), 6000);
   } finally {
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previous;

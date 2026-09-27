@@ -31,10 +31,16 @@ const REPO_HELPERS = '${CLAUDE_PROJECT_DIR:-.}/.claude/helpers';
 function hookCmd(arg: string, helpers: string = REPO_HELPERS): string {
   return `node "${helpers}/graft-hooks.cjs" ${arg}`;
 }
+// Claude Code's hooks reference documents `timeout` in SECONDS (default 600),
+// not milliseconds — see trailhq/Graft#283. These used to be 10000/8000/15000
+// (read as 2h47m/2h13m/4h10m hook budgets instead of the intended 10s/8s/15s).
+// `claude/hooks.ts` reads these back out of the installed settings.json at
+// runtime (`installedBudgetMs`) and tolerates a pre-fix repo's leftover
+// ms-shaped values until its next `graft init` rewrites them here.
 function graftBlocks(helpers?: string): Record<string, Json[]> {
   return {
     PostToolUse: [
-      { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: hookCmd('post-edit', helpers), timeout: 10000 }] },
+      { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: hookCmd('post-edit', helpers), timeout: 10 }] },
       // Score the usage mix and sum token savings. A graft retrieval (CLI `graft …`
       // via Bash, or the `graft_*` MCP tools) prints a `[graft] tokens saved ≈ N`
       // footer this hook sums into the session total; the same hook classifies
@@ -42,7 +48,7 @@ function graftBlocks(helpers?: string): Record<string, Json[]> {
       // `graft stats` and the `session_summary` graft-vs-grep ratio. Broad matcher,
       // but the handler no-ops instantly unless there is something to record, so an
       // unrelated Bash or a plain Read costs only a stdin read.
-      { matcher: 'Bash|mcp__graft__|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCmd('tool-savings', helpers), timeout: 8000 }] },
+      { matcher: 'Bash|mcp__graft__|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCmd('tool-savings', helpers), timeout: 8 }] },
     ],
     // Longer budget than the other hooks: its `graft ask` is a real query, and a
     // query now brings the graph up to date first (graph/refresh.ts) — usually
@@ -52,10 +58,60 @@ function graftBlocks(helpers?: string): Record<string, Json[]> {
     // this bump (8s) keeps a child that fits inside 8s. Changing the number here is
     // therefore safe on its own — but it only reaches an existing repo when someone
     // re-runs `graft init`, since that is the only caller of this function.
-    UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd('prompt', helpers), timeout: 15000 }] }],
-    SessionStart: [{ hooks: [{ type: 'command', command: hookCmd('session-start', helpers), timeout: 8000 }] }],
-    Stop: [{ hooks: [{ type: 'command', command: hookCmd('stop', helpers), timeout: 8000 }] }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCmd('prompt', helpers), timeout: 15 }] }],
+    SessionStart: [{ hooks: [{ type: 'command', command: hookCmd('session-start', helpers), timeout: 8 }] }],
+    Stop: [{ hooks: [{ type: 'command', command: hookCmd('stop', helpers), timeout: 8 }] }],
   };
+}
+
+/** The trailing argument of a graft hook command — mirrors `hooks.ts`'s
+ * `hookSubcommandOf`; duplicated rather than imported because this module and
+ * `claude/hooks.ts` are each meant to build standalone (the hook shim is a
+ * single generated file, not a bundle with internal imports). */
+function subcommandOf(command: unknown): string | null {
+  if (typeof command !== 'string' || !command.includes('graft-hooks.cjs')) return null;
+  const parts = command.trim().split(/\s+/);
+  return parts[parts.length - 1] || null;
+}
+
+// Mirrors `claude/hooks.ts`'s LEGACY_MS_FLOOR: a prior timeout above this is a
+// pre-#283 ms-shaped artifact, not a value anyone deliberately chose, so it must
+// never be "preserved" as a hand-raise — see `priorTimeoutFor` below.
+const LEGACY_MS_FLOOR = 600;
+
+/** A user-raised timeout on graft's OWN prior entry for `subcommand`, if any —
+ * only when it's already in the sane (seconds) range. `entries` is the set of
+ * prior hook entries `isGraftEntry` recognized as graft's (about to be dropped
+ * and replaced by the fresh template), not the foreign ones left untouched. */
+function priorTimeoutFor(entries: Json[], subcommand: string): number | undefined {
+  for (const e of entries) {
+    for (const h of e?.hooks ?? []) {
+      if (subcommandOf(h?.command) === subcommand && typeof h.timeout === 'number' && h.timeout <= LEGACY_MS_FLOOR) {
+        return h.timeout;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The template blocks for one event, with any hand-raised timeout on graft's
+ * own prior entry preserved (trailhq/Graft#366 part 2): a deliberate raise
+ * (e.g. 10s → 20s) otherwise silently reverts on the next version bump, since
+ * the merge below drops and rewrites graft's entries wholesale to stay
+ * idempotent. Only ever raises — a template bump can still lift everyone's
+ * floor — and a legacy ms-shaped prior value is never eligible (see
+ * `priorTimeoutFor`), so this cannot resurrect the #283 bug it sits beside.
+ */
+function withPriorRaises(blocks: Json[], priorGraftEntries: Json[]): Json[] {
+  return blocks.map((block) => ({
+    ...block,
+    hooks: block.hooks.map((h: Json) => {
+      const sub = subcommandOf(h.command);
+      const prior = sub ? priorTimeoutFor(priorGraftEntries, sub) : undefined;
+      return prior !== undefined && prior > h.timeout ? { ...h, timeout: prior } : h;
+    }),
+  }));
 }
 /**
  * Is this allowlist entry one graft wrote?
@@ -131,8 +187,9 @@ export function mergeGraftSettings(
   merged.hooks = { ...(merged.hooks ?? {}) };
   for (const [event, blocks] of Object.entries(graftBlocks())) {
     const prior = Array.isArray(merged.hooks[event]) ? merged.hooks[event] : [];
+    const priorGraft = prior.filter((e: Json) => isGraftEntry(e));
     const foreign = prior.filter((e: Json) => !isGraftEntry(e)); // drop old Graft entries → idempotent
-    merged.hooks[event] = [...foreign, ...blocks];
+    merged.hooks[event] = [...foreign, ...withPriorRaises(blocks, priorGraft)];
   }
 
   // Drop graft's own prior regex before re-adding, so a change to FOOTER replaces
@@ -172,8 +229,9 @@ export function mergeGraftHooks(existing: Json, helpers: string): { merged: Json
   merged.hooks = { ...(merged.hooks ?? {}) };
   for (const [event, blocks] of Object.entries(graftBlocks(helpers))) {
     const prior = Array.isArray(merged.hooks[event]) ? merged.hooks[event] : [];
+    const priorGraft = prior.filter((e: Json) => isGraftEntry(e));
     const foreign = prior.filter((e: Json) => !isGraftEntry(e));
-    merged.hooks[event] = [...foreign, ...blocks];
+    merged.hooks[event] = [...foreign, ...withPriorRaises(blocks, priorGraft)];
   }
   return { merged };
 }

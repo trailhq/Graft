@@ -43,6 +43,25 @@ const HOOK_OVERHEAD_MS = 2000;
 const MIN_CHILD_TIMEOUT_MS = 4000;
 
 /**
+ * Claude Code's `timeout` field is SECONDS (its hooks reference documents a 600s
+ * default) — see trailhq/Graft#283. `settings-merge.ts` writes it that way as of
+ * this fix, but a repo wired by an older graft still carries the pre-fix
+ * milliseconds-shaped template values (8000/10000/15000), and those survive
+ * until that repo's next `graft init`. No real seconds budget this code has ever
+ * installed exceeds this floor, so a value above it is unambiguously a leftover
+ * legacy value, not a deliberately huge seconds budget — use it as-is (it is
+ * already effectively a millisecond count) rather than multiplying it by 1000
+ * into an hours-long child timeout.
+ */
+const LEGACY_MS_FLOOR = 600;
+
+/** `installedHookTimeout`'s raw number, converted to the milliseconds every
+ * caller here needs — tolerating a pre-#283 repo's legacy ms-shaped value. */
+function installedBudgetMs(installed: number): number {
+  return installed > LEGACY_MS_FLOOR ? installed : installed * 1000;
+}
+
+/**
  * How long the prompt hook may let `graft ask` run — derived from the budget that is
  * *actually installed* in this repo's `.claude/settings.json`, not from what the
  * current version of `settings-merge.ts` would install.
@@ -57,9 +76,22 @@ const MIN_CHILD_TIMEOUT_MS = 4000;
  * strictly inside whatever budget this repo really has.
  */
 export function promptAskTimeout(dir: string): number {
-  const installed = installedHookTimeout(dir, 'UserPromptSubmit');
+  const installed = installedHookTimeout(dir, 'UserPromptSubmit', 'prompt');
   if (installed === null) return CHILD_TIMEOUT_MS - HOOK_OVERHEAD_MS;
-  return Math.max(MIN_CHILD_TIMEOUT_MS, installed - HOOK_OVERHEAD_MS);
+  return Math.max(MIN_CHILD_TIMEOUT_MS, installedBudgetMs(installed) - HOOK_OVERHEAD_MS);
+}
+
+/**
+ * The `post-edit` twin of {@link promptAskTimeout} (trailhq/Graft#366): its
+ * `graft check` child previously ran under the fixed {@link CHILD_TIMEOUT_MS}
+ * regardless of what budget `PostToolUse`'s `post-edit` matcher actually has
+ * installed, so an 8s child could sit inside a repo's own smaller hand-set
+ * budget and still get SIGKILLed before `emit()`/`writeSession()` ever run.
+ */
+export function postEditCheckTimeout(dir: string): number {
+  const installed = installedHookTimeout(dir, 'PostToolUse', 'post-edit');
+  if (installed === null) return CHILD_TIMEOUT_MS - HOOK_OVERHEAD_MS;
+  return Math.max(MIN_CHILD_TIMEOUT_MS, installedBudgetMs(installed) - HOOK_OVERHEAD_MS);
 }
 
 /**
@@ -77,16 +109,28 @@ function hookSettingsFiles(dir: string): string[] {
   ];
 }
 
-/** The timeout on one settings file's graft hook entry for `event`, or null if it
- * can't be read (no settings file, hand-edited shape, unparseable JSON). */
-function hookTimeoutIn(file: string, event: string): number | null {
+/** The trailing argument of a graft hook command (`post-edit`, `tool-savings`,
+ * `prompt`, …) — null for anything that isn't a graft-hooks.cjs invocation.
+ * `PostToolUse` in particular carries two graft subcommands (`post-edit` and
+ * `tool-savings`) with independent budgets, so matching on the event name
+ * alone isn't enough to find the one a given caller means. */
+function hookSubcommandOf(command: unknown): string | null {
+  if (typeof command !== 'string' || !command.includes('graft-hooks.cjs')) return null;
+  const parts = command.trim().split(/\s+/);
+  return parts[parts.length - 1] || null;
+}
+
+/** The timeout on one settings file's graft hook entry for `event`/`subcommand`,
+ * or null if it can't be read (no settings file, hand-edited shape, unparseable
+ * JSON, or that subcommand isn't declared under this event in this file). */
+function hookTimeoutIn(file: string, event: string, subcommand: string): number | null {
   try {
     const settings = JSON.parse(readFileSync(file, 'utf8')) as any;
     const blocks = settings?.hooks?.[event];
     if (!Array.isArray(blocks)) return null;
     for (const block of blocks) {
       for (const h of block?.hooks ?? []) {
-        if (typeof h?.command === 'string' && h.command.includes('graft-hooks.cjs') && typeof h.timeout === 'number') {
+        if (hookSubcommandOf(h?.command) === subcommand && typeof h.timeout === 'number') {
           return h.timeout;
         }
       }
@@ -108,10 +152,10 @@ function hookTimeoutIn(file: string, event: string): number | null {
  * `writeSession()` never run and the turn silently gets no retrieval at all.
  * Guessing low only shortens one query.
  */
-function installedHookTimeout(dir: string, event: string): number | null {
+function installedHookTimeout(dir: string, event: string, subcommand: string): number | null {
   let smallest: number | null = null;
   for (const file of hookSettingsFiles(dir)) {
-    const timeout = hookTimeoutIn(file, event);
+    const timeout = hookTimeoutIn(file, event, subcommand);
     if (timeout === null) continue;
     if (smallest === null || timeout < smallest) smallest = timeout;
   }
@@ -150,7 +194,7 @@ function graftJson(dir: string, args: string[], timeout: number = CHILD_TIMEOUT_
   }
 }
 function checkStaleCount(dir: string): number {
-  const r = graftJson(dir, withContextDirArg(dir, ['check', '.', '--json']));
+  const r = graftJson(dir, withContextDirArg(dir, ['check', '.', '--json']), postEditCheckTimeout(dir));
   const g = r?.graph ?? {};
   return (g.changed?.length ?? 0) + (g.added?.length ?? 0) + (g.removed?.length ?? 0);
 }
