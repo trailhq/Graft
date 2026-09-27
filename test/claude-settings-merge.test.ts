@@ -171,6 +171,26 @@ test('a genuine hand-raised sane timeout survives a re-merge (trailhq/Graft#366 
   assert.equal(lowered.hooks.PostToolUse[0].hooks[0].timeout, 10, 'a value below the template floor is not "preserved" downward');
 });
 
+test('the LARGEST of two matching prior blocks survives, not just the first one found (trailhq/Graft#485 review finding 4)', () => {
+  const prior = mergeGraftSettings({}).merged;
+  const postEditCommand = prior.hooks.PostToolUse[0].hooks[0].command;
+  // Simulate a hand-edited prior settings.json with TWO separate post-edit
+  // blocks (distinct matchers, same subcommand) — the template's own is left
+  // at its default 10s, and a second, narrower block carries the operator's
+  // real deliberate raise to 60s. Order matters for the bug: the smaller,
+  // unraised value comes first in the array.
+  prior.hooks.PostToolUse.splice(1, 0, {
+    matcher: 'Edit',
+    hooks: [{ type: 'command', command: postEditCommand, timeout: 60 }],
+  });
+  const { merged } = mergeGraftSettings(prior);
+  assert.equal(
+    merged.hooks.PostToolUse[0].hooks[0].timeout,
+    60,
+    'the larger raise (60) must win, not the first-found entry (10, the unraised template default)',
+  );
+});
+
 test('mergeGraftHooks (the global-install variant) has the same #283/#366 behavior', () => {
   const { merged: fresh } = mergeGraftHooks({}, '/abs/helpers');
   assert.equal(fresh.hooks.PostToolUse[0].hooks[0].timeout, 10);

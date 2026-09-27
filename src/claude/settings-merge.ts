@@ -64,14 +64,26 @@ function graftBlocks(helpers?: string): Record<string, Json[]> {
   };
 }
 
-/** The trailing argument of a graft hook command — mirrors `hooks.ts`'s
+/** Mirrors `hooks.ts`'s `GRAFT_HOOK_SUBCOMMANDS` — see `subcommandOf` below for
+ * why this is duplicated rather than imported. */
+const GRAFT_HOOK_SUBCOMMANDS = ['post-edit', 'tool-savings', 'prompt', 'session-start', 'stop'] as const;
+
+/** The graft subcommand a hook command invokes — mirrors `hooks.ts`'s
  * `hookSubcommandOf`; duplicated rather than imported because this module and
  * `claude/hooks.ts` are each meant to build standalone (the hook shim is a
- * single generated file, not a bundle with internal imports). */
+ * single generated file, not a bundle with internal imports).
+ *
+ * Scans from the end for the last KNOWN subcommand rather than the literal
+ * last whitespace token, so a trailing shell redirect on a hand-written
+ * command (`... prompt 2>/dev/null`) doesn't get mistaken for the
+ * subcommand and silently fail every match below. */
 function subcommandOf(command: unknown): string | null {
   if (typeof command !== 'string' || !command.includes('graft-hooks.cjs')) return null;
   const parts = command.trim().split(/\s+/);
-  return parts[parts.length - 1] || null;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if ((GRAFT_HOOK_SUBCOMMANDS as readonly string[]).includes(parts[i])) return parts[i];
+  }
+  return null;
 }
 
 // Mirrors `claude/hooks.ts`'s LEGACY_MS_FLOOR: a prior timeout above this is a
@@ -82,16 +94,25 @@ const LEGACY_MS_FLOOR = 600;
 /** A user-raised timeout on graft's OWN prior entry for `subcommand`, if any —
  * only when it's already in the sane (seconds) range. `entries` is the set of
  * prior hook entries `isGraftEntry` recognized as graft's (about to be dropped
- * and replaced by the fresh template), not the foreign ones left untouched. */
+ * and replaced by the fresh template), not the foreign ones left untouched.
+ *
+ * The largest matching prior value wins, not the first: a hand-edited prior
+ * settings.json can carry more than one block for the same subcommand (e.g.
+ * separate `Write`/`Edit` matchers, both invoking `post-edit`, raised to
+ * different timeouts) — `withPriorRaises` below only ever raises, so the
+ * generous reading is the correct one; taking the first-found value made an
+ * earlier, smaller raise silently mask a later, larger one depending on
+ * nothing but the two blocks' order in the file. */
 function priorTimeoutFor(entries: Json[], subcommand: string): number | undefined {
+  let max: number | undefined;
   for (const e of entries) {
     for (const h of e?.hooks ?? []) {
       if (subcommandOf(h?.command) === subcommand && typeof h.timeout === 'number' && h.timeout <= LEGACY_MS_FLOOR) {
-        return h.timeout;
+        if (max === undefined || h.timeout > max) max = h.timeout;
       }
     }
   }
-  return undefined;
+  return max;
 }
 
 /**

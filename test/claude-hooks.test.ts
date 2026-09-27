@@ -642,8 +642,11 @@ test('promptAskTimeout is derived from the installed hook budget', () => {
     assert.equal(promptAskTimeout(withSettings(8000)), 6000);
     // A repo wired after.
     assert.equal(promptAskTimeout(withSettings(15000)), 13000);
-    // Never so small the child has no chance.
-    assert.equal(promptAskTimeout(withSettings(1000)), 4000);
+    // A 1000ms installed budget is itself so small there's no room for the
+    // usual MIN_CHILD_TIMEOUT_MS floor without outliving the hook's own
+    // external deadline (trailhq/Graft#485 review finding 1) — capped at
+    // budget minus MIN_WRITE_RESERVE_MS instead.
+    assert.equal(promptAskTimeout(withSettings(1000)), 500);
 
     // Nothing readable: assume the conservative 8s budget the other hooks carry.
     assert.equal(promptAskTimeout(withSettings(undefined)), 6000);
@@ -710,8 +713,11 @@ test('promptAskTimeout converts a sane seconds budget to ms (trailhq/Graft#283)'
     // Code's own documented default), not a legacy ms artifact.
     assert.equal(promptAskTimeout(withSettings(600)), 598000);
     // One tick over the boundary flips to "this is a leftover ms value" —
-    // used as-is (601ms), which floors to MIN_CHILD_TIMEOUT_MS.
-    assert.equal(promptAskTimeout(withSettings(601)), 4000);
+    // used as-is (601ms), which is itself too small to leave any room for the
+    // MIN_CHILD_TIMEOUT_MS floor (trailhq/Graft#485 review finding 1): capped
+    // at 601 - MIN_WRITE_RESERVE_MS instead of overshooting the hook's own
+    // 601ms external deadline.
+    assert.equal(promptAskTimeout(withSettings(601)), 101);
   } finally {
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previous;
@@ -743,6 +749,70 @@ test('postEditCheckTimeout reads the post-edit subcommand, not tool-savings shar
     assert.equal(postEditCheckTimeout(withPostToolUseSettings(10000, 8000)), 8000);
     // Nothing declared: the same conservative default promptAskTimeout falls back to.
     assert.equal(postEditCheckTimeout(mkdtempSync(join(tmpdir(), 'graft-nosettings-'))), 6000);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+});
+
+// ── trailhq/Graft#485 review findings ─────────────────────────────────────
+
+test('postEditCheckTimeout never gives the child more time than the hook itself has left (review finding 1)', () => {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'graft-nouser-'));
+  try {
+    // A hand-set 3-second post-edit budget used to still get MIN_CHILD_TIMEOUT_MS
+    // (4000ms) from the floor alone — outliving the hook's own 3000ms external
+    // deadline, so Claude Code's SIGKILL fired before the check could ever write
+    // `dirty`/`checkTimedOut` back, and every subsequent edit retried a doomed
+    // check forever. Must now stay under 3000 - MIN_WRITE_RESERVE_MS.
+    assert.equal(postEditCheckTimeout(withPostToolUseSettings(3, 8)), 2500);
+    // Ordinary values are unaffected: still well above the floor either way.
+    assert.equal(postEditCheckTimeout(withPostToolUseSettings(10, 8)), 8000);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+});
+
+test('promptAskTimeout matches a hand-written command with a trailing shell redirect (review finding 2)', () => {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'graft-nouser-'));
+  try {
+    const d = mkdtempSync(join(tmpdir(), 'graft-redirect-'));
+    mkdirSync(join(d, '.claude'), { recursive: true });
+    const command = 'node ".claude/helpers/graft-hooks.cjs" prompt 2>/dev/null';
+    const hooks = { UserPromptSubmit: [{ hooks: [{ type: 'command', command, timeout: 20 }] }] };
+    writeFileSync(join(d, '.claude', 'settings.json'), JSON.stringify({ hooks }));
+    // Naively taking the literal last whitespace token would read "2>/dev/null"
+    // as the subcommand, fail to match "prompt", and silently fall back to the
+    // conservative 6000 default instead of the real 18000 the repo configured.
+    assert.equal(promptAskTimeout(d), 18000);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+});
+
+test('promptAskTimeout takes the smallest of two matching entries in one file (review finding 3)', () => {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'graft-nouser-'));
+  try {
+    const d = mkdtempSync(join(tmpdir(), 'graft-twoprompts-'));
+    mkdirSync(join(d, '.claude'), { recursive: true });
+    // Two distinct commands (different shim paths), both resolving to the
+    // "prompt" subcommand, with different timeouts. Claude Code runs both;
+    // this process can't tell which one launched it, so — same reasoning as
+    // installedHookTimeout's cross-FILE minimum — the smaller must win even
+    // when both entries are in the SAME file.
+    const hooks = {
+      UserPromptSubmit: [
+        { hooks: [{ type: 'command', command: 'node ".claude/helpers/graft-hooks.cjs" prompt', timeout: 60 }] },
+        { hooks: [{ type: 'command', command: 'node "/some/other/graft-hooks.cjs" prompt', timeout: 8 }] },
+      ],
+    };
+    writeFileSync(join(d, '.claude', 'settings.json'), JSON.stringify({ hooks }));
+    assert.equal(promptAskTimeout(d), 6000);
   } finally {
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previous;

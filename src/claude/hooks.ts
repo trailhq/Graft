@@ -41,6 +41,29 @@ const CHILD_TIMEOUT_MS = 8000;
 const HOOK_OVERHEAD_MS = 2000;
 /** Floor, so a hand-edited tiny timeout can't leave the child no time at all. */
 const MIN_CHILD_TIMEOUT_MS = 4000;
+/** Reserved regardless of how small the installed budget is: the child's
+ * timeout must never be set so close to the hook's own external deadline that
+ * there's no time left afterward to write back (`emit()`/`writeSession()`, or
+ * post-edit's `dirty`/`checkTimedOut` patch). Deliberately smaller than
+ * {@link HOOK_OVERHEAD_MS}, which assumes a normal-sized budget — a 3s
+ * hand-set timeout has no room to spare 2s of it and still give the child
+ * anything to work with. */
+const MIN_WRITE_RESERVE_MS = 500;
+
+/** Shared by {@link promptAskTimeout} and {@link postEditCheckTimeout}: the
+ * child's budget, floored at {@link MIN_CHILD_TIMEOUT_MS} for the common case
+ * but never allowed past the installed budget minus
+ * {@link MIN_WRITE_RESERVE_MS} — trailhq/Graft#485 review finding 1: the
+ * floor alone let a hand-set tiny timeout (e.g. `"timeout": 3`) give the
+ * child MORE time than the hook itself has left to live, so Claude Code's own
+ * external SIGKILL fired before the child's timeout ever could, and nothing
+ * got written back. */
+function childTimeoutFor(installed: number | null): number {
+  if (installed === null) return CHILD_TIMEOUT_MS - HOOK_OVERHEAD_MS;
+  const budgetMs = installedBudgetMs(installed);
+  const ceiling = Math.max(0, budgetMs - MIN_WRITE_RESERVE_MS);
+  return Math.min(Math.max(MIN_CHILD_TIMEOUT_MS, budgetMs - HOOK_OVERHEAD_MS), ceiling);
+}
 
 /**
  * Claude Code's `timeout` field is SECONDS (its hooks reference documents a 600s
@@ -76,9 +99,7 @@ function installedBudgetMs(installed: number): number {
  * strictly inside whatever budget this repo really has.
  */
 export function promptAskTimeout(dir: string): number {
-  const installed = installedHookTimeout(dir, 'UserPromptSubmit', 'prompt');
-  if (installed === null) return CHILD_TIMEOUT_MS - HOOK_OVERHEAD_MS;
-  return Math.max(MIN_CHILD_TIMEOUT_MS, installedBudgetMs(installed) - HOOK_OVERHEAD_MS);
+  return childTimeoutFor(installedHookTimeout(dir, 'UserPromptSubmit', 'prompt'));
 }
 
 /**
@@ -89,9 +110,7 @@ export function promptAskTimeout(dir: string): number {
  * budget and still get SIGKILLed before `emit()`/`writeSession()` ever run.
  */
 export function postEditCheckTimeout(dir: string): number {
-  const installed = installedHookTimeout(dir, 'PostToolUse', 'post-edit');
-  if (installed === null) return CHILD_TIMEOUT_MS - HOOK_OVERHEAD_MS;
-  return Math.max(MIN_CHILD_TIMEOUT_MS, installedBudgetMs(installed) - HOOK_OVERHEAD_MS);
+  return childTimeoutFor(installedHookTimeout(dir, 'PostToolUse', 'post-edit'));
 }
 
 /**
@@ -109,33 +128,57 @@ function hookSettingsFiles(dir: string): string[] {
   ];
 }
 
-/** The trailing argument of a graft hook command (`post-edit`, `tool-savings`,
+/** Every subcommand `graftBlocks()` (settings-merge.ts) ever installs as a hook
+ * argument — mirrored there as the same-named constant, duplicated rather than
+ * imported for the reason `subcommandOf` there explains. */
+const GRAFT_HOOK_SUBCOMMANDS = ['post-edit', 'tool-savings', 'prompt', 'session-start', 'stop'] as const;
+
+/** The graft subcommand a hook command invokes (`post-edit`, `tool-savings`,
  * `prompt`, …) — null for anything that isn't a graft-hooks.cjs invocation.
  * `PostToolUse` in particular carries two graft subcommands (`post-edit` and
  * `tool-savings`) with independent budgets, so matching on the event name
- * alone isn't enough to find the one a given caller means. */
+ * alone isn't enough to find the one a given caller means.
+ *
+ * Scans from the end for the last token that is actually a known subcommand,
+ * rather than blindly taking the last whitespace-split token: a hand-written
+ * command can carry a trailing shell redirect or pipe (`... prompt
+ * 2>/dev/null`), and naively taking the literal last token would return
+ * `2>/dev/null` instead of `prompt`, silently failing to match this entry at
+ * all in `hookTimeoutIn` below. */
 function hookSubcommandOf(command: unknown): string | null {
   if (typeof command !== 'string' || !command.includes('graft-hooks.cjs')) return null;
   const parts = command.trim().split(/\s+/);
-  return parts[parts.length - 1] || null;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if ((GRAFT_HOOK_SUBCOMMANDS as readonly string[]).includes(parts[i])) return parts[i];
+  }
+  return null;
 }
 
 /** The timeout on one settings file's graft hook entry for `event`/`subcommand`,
  * or null if it can't be read (no settings file, hand-edited shape, unparseable
- * JSON, or that subcommand isn't declared under this event in this file). */
+ * JSON, or that subcommand isn't declared under this event in this file).
+ *
+ * The smallest matching entry wins, same reasoning as `installedHookTimeout`
+ * below (which this feeds): a hand-edited file can declare more than one
+ * block whose command resolves to the same subcommand (distinct matchers,
+ * distinct shim paths, distinct timeouts) — Claude Code runs all of them, this
+ * process cannot tell which literal invocation it's running under, and
+ * guessing too high risks the whole hook getting SIGKILLed before it writes
+ * anything back. */
 function hookTimeoutIn(file: string, event: string, subcommand: string): number | null {
   try {
     const settings = JSON.parse(readFileSync(file, 'utf8')) as any;
     const blocks = settings?.hooks?.[event];
     if (!Array.isArray(blocks)) return null;
+    let smallest: number | null = null;
     for (const block of blocks) {
       for (const h of block?.hooks ?? []) {
         if (hookSubcommandOf(h?.command) === subcommand && typeof h.timeout === 'number') {
-          return h.timeout;
+          if (smallest === null || h.timeout < smallest) smallest = h.timeout;
         }
       }
     }
-    return null;
+    return smallest;
   } catch {
     return null;
   }
