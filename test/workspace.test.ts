@@ -17,6 +17,7 @@ import {
   federateCheck,
   federateCallers,
   federateGrep,
+  federateSkeleton,
   isWorkspaceBuildRoot,
 } from "../src/graph/workspace.js";
 import { formatAsk } from "../src/ask/ask.js";
@@ -531,5 +532,61 @@ test("readWorkspace: rejects foreign/invalid json as not-a-workspace", () => {
   assert.equal(readWorkspace(p), null);
   writeWorkspace(p, { version: 1, children: ["x", "a"] });
   assert.deepEqual(readWorkspace(p), { version: 1, children: ["a", "x"] });
+  rmSync(p, { recursive: true, force: true });
+});
+
+/**
+ * `skeleton` at the parent (#433): before this it loaded the parent's own graph,
+ * which a workspace never has, and answered "no wiring graph — run graft build"
+ * for a repo that had just been built.
+ */
+test("federateSkeleton: <child>/path addresses that child directly, and the answer keeps the prefix", async () => {
+  const p = workspaceFx(REPOS);
+  await buildWorkspace(p);
+  const r = federateSkeleton(p, undefined, "repoA/a.ts");
+  assert.equal(r.file, "repoA/a.ts", "openable from the parent, like every federated pointer");
+  assert.deepEqual(r.entries.map((e) => e.name).sort(), ["alphaHandler", "helperThing"]);
+  assert.equal(r.note, undefined);
+  rmSync(p, { recursive: true, force: true });
+});
+
+test("federateSkeleton: a bare path or basename is looked up in every child", async () => {
+  const p = workspaceFx(REPOS);
+  await buildWorkspace(p);
+  const r = federateSkeleton(p, undefined, "b.ts");
+  assert.equal(r.file, "repoB/b.ts");
+  assert.deepEqual(r.entries.map((e) => e.name), ["betaHandler"]);
+  rmSync(p, { recursive: true, force: true });
+});
+
+test("federateSkeleton: the same basename in two children is ambiguous, and the note names both with their child", async () => {
+  const p = workspaceFx({
+    repoA: { "src/util.ts": "export function fromA() { return 1; }\n" },
+    repoB: { "src/util.ts": "export function fromB() { return 2; }\n" },
+  });
+  await buildWorkspace(p);
+  const r = federateSkeleton(p, undefined, "util.ts");
+  assert.equal(r.entries.length, 0);
+  assert.equal(r.note, "ambiguous — matches: repoA/src/util.ts, repoB/src/util.ts");
+  // …and the child prefix disambiguates.
+  assert.deepEqual(federateSkeleton(p, undefined, "repoB/src/util.ts").entries.map((e) => e.name), ["fromB"]);
+  rmSync(p, { recursive: true, force: true });
+});
+
+test("federateSkeleton: a file no child knows, and a child that has no graph yet", async () => {
+  const p = workspaceFx(REPOS);
+  await buildWorkspace(p);
+  const miss = federateSkeleton(p, undefined, "nope.ts");
+  assert.equal(miss.entries.length, 0);
+  assert.match(miss.note ?? "", /^no definitions indexed for this file in any of the 2 workspace repo\(s\)$/);
+
+  // A third child listed in workspace.json but never built: addressing it
+  // says so, instead of "no definitions", and the coverage line appears on a miss.
+  mkdirSync(join(p, "repoC", ".git"), { recursive: true });
+  writeWorkspace(p, { version: 1, children: ["repoA", "repoB", "repoC"] });
+  const unbuilt = federateSkeleton(p, undefined, "repoC/x.ts");
+  assert.equal(unbuilt.note, "repoC/ has no graph yet — run graft build");
+  const missWithCoverage = federateSkeleton(p, undefined, "nope.ts");
+  assert.match(missWithCoverage.note ?? "", /run graft build to cover repoC/);
   rmSync(p, { recursive: true, force: true });
 });

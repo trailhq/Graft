@@ -22,6 +22,7 @@ import {
   federateCheck,
   federateGrep,
   federateMap,
+  federateSkeleton,
   readWorkspace,
 } from '../graph/workspace.js';
 import type { NodeV1 } from '../graph/types.js';
@@ -147,9 +148,9 @@ function renderMatches(
 }
 
 /** When the MCP server is rooted at a workspace parent, the ask/callers/grep/
- * map/check tools federate across the children — identical to the CLI. Returns
- * null for tools that don't federate (skeleton is per-file), so the caller
- * falls through to the normal single-graph path. */
+ * map/check/file_api tools federate across the children — identical to the
+ * CLI. Returns null for a tool that doesn't, so the caller falls through to the
+ * normal single-graph path. */
 async function callWorkspaceTool(
   root: string,
   dirOverride: string | undefined,
@@ -192,6 +193,12 @@ async function callWorkspaceTool(
     case 'graft_check_freshness': {
       const { text } = await federateCheck(root, dirOverride);
       return { text, isError: false };
+    }
+    case 'graft_file_api': {
+      const file = String(args.file ?? '');
+      if (!file) return { text: 'graft_file_api requires a file', isError: true };
+      const r = federateSkeleton(root, dirOverride, file);
+      return { text: formatSkeleton(r), isError: !r.entries.length && !!r.note };
     }
     default:
       return null;
