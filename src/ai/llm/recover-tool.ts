@@ -1,13 +1,16 @@
 /**
  * Recover a forced-tool payload from assistant `content` when a gateway ignored
- * `tool_choice` and wrote JSON text instead of `tool_calls` (#129).
+ * `tool_choice` and wrote JSON text instead of `tool_calls` (#129, #253).
  *
  * Conservative: only succeeds when `text` parses as JSON matching one of:
  *   - `[{ name, parameters|arguments|args }]`
  *   - `{ name, parameters|arguments|args }`
  *   - a fenced ```json block wrapping either
  *   - a bare object whose `payloadKey` is an array
- * Anything else (prose, truncated JSON, a guessed shape) returns undefined.
+ *   - a bare array of payload items (no tool envelope) — items may carry `name`
+ * Truncated JSON is repaired only by closing unmatched `[`/`{` after the last
+ * complete object (linear scan, bounded closers). Anything else (prose,
+ * unrepairable truncation, a guessed shape) returns undefined.
  * Callers MUST run the same schema validation they use for real tool calls.
  */
 
@@ -21,6 +24,99 @@ function unwrapMarkdownFence(raw: string): string {
   }
   if (s.endsWith("```")) s = s.slice(0, -3).trimEnd();
   return s.trim();
+}
+
+/** Walk back at most this many complete `}` when repairing a truncated prefix. */
+const MAX_REPAIR_CUTS = 64;
+/** Refuse to invent a deep wrapper — typical payloads need 1–3 closers. */
+const MAX_REPAIR_CLOSERS = 8;
+
+type PayloadFn = (value: unknown) => Record<string, unknown> | undefined;
+
+/**
+ * Closers that would finish `head` as JSON, or `undefined` if the prefix is
+ * already balanced, still inside a string, mismatched, or too deep to close.
+ * Linear in `head.length`; no regex.
+ */
+function closersFor(head: string): string | undefined {
+  const stack: Array<"}" | "]"> = [];
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < head.length; i++) {
+    const c = head[i]!;
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (c === "\\") {
+        escape = true;
+        continue;
+      }
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === "{") stack.push("}");
+    else if (c === "[") stack.push("]");
+    else if (c === "}" || c === "]") {
+      const want = stack.pop();
+      if (want !== c) return undefined;
+    }
+  }
+  if (inString) return undefined;
+  if (stack.length === 0 || stack.length > MAX_REPAIR_CLOSERS) return undefined;
+  let closers = "";
+  for (let i = stack.length - 1; i >= 0; i--) closers += stack[i];
+  return closers;
+}
+
+/**
+ * After `JSON.parse` of the whole string / `{…}` / `[…]` slices fail, keep
+ * complete objects by cutting at a `}` that is not inside a string and
+ * appending only `]` / `}`. Does not close dangling quotes (that would guess
+ * a truncated value). Linear scans; at most {@link MAX_REPAIR_CUTS} parses.
+ */
+function tryRepairedPayload(stripped: string, asPayload: PayloadFn): Record<string, unknown> | undefined {
+  const cuts: number[] = [];
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < stripped.length; i++) {
+    const c = stripped[i]!;
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (c === "\\") {
+        escape = true;
+        continue;
+      }
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === "}") cuts.push(i);
+  }
+  const from = Math.max(0, cuts.length - MAX_REPAIR_CUTS);
+  for (let k = cuts.length - 1; k >= from; k--) {
+    const head = stripped.slice(0, cuts[k]! + 1);
+    const closers = closersFor(head);
+    if (closers === undefined) continue;
+    try {
+      const hit = asPayload(JSON.parse(head + closers));
+      if (hit) return hit;
+    } catch {
+      /* earlier complete object */
+    }
+  }
+  return undefined;
 }
 
 export function recoverToolArgsFromContent(
@@ -38,6 +134,22 @@ export function recoverToolArgsFromContent(
       for (const item of value) {
         const hit = asPayload(item);
         if (hit) return hit;
+      }
+      // Bare item array: only parameters|arguments|args mark a tool wrapper —
+      // synth nodes legitimately carry `name` (#253).
+      if (
+        value.length > 0 &&
+        value.every(
+          (it) =>
+            it !== null &&
+            typeof it === "object" &&
+            !Array.isArray(it) &&
+            !("parameters" in it) &&
+            !("arguments" in it) &&
+            !("args" in it),
+        )
+      ) {
+        return { [opts.payloadKey]: value };
       }
       return undefined;
     }
@@ -85,12 +197,13 @@ export function recoverToolArgsFromContent(
   const arrEnd = stripped.lastIndexOf("]");
   if (arrStart >= 0 && arrEnd > arrStart) {
     try {
-      return asPayload(JSON.parse(stripped.slice(arrStart, arrEnd + 1)));
+      const hit = asPayload(JSON.parse(stripped.slice(arrStart, arrEnd + 1)));
+      if (hit) return hit;
     } catch {
-      return undefined;
+      /* truncated — repair below */
     }
   }
-  return undefined;
+  return tryRepairedPayload(stripped, asPayload);
 }
 
 /** One stderr line when a structured op got neither a tool call nor recoverable JSON. */
