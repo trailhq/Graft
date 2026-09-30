@@ -365,6 +365,11 @@ program
   .option("--deep", "run the LLM pass: concept nodes (graft/*.md) + per-symbol summary/crux")
   .option("-e, --extensions <exts...>", 'code extensions to include (e.g. ".ts" ".py"); an extension with no parser is ignored with a warning that lists the supported set')
   .option("-j, --concurrency <n>", "files summarized in parallel during --deep (default 5)")
+  .option(
+    "--synth-concurrency <n>",
+    "concept synthesis batches in flight at once during --deep (default 4). Separate from -j: " +
+      "each synthesis call carries a whole batch of summaries, not one file",
+  )
   .option("--no-reuse", "re-parse every file instead of replaying unchanged ones from the extraction cache")
   .option("--lsp", "add compiler-grade call edges via a language server if one is installed (opt-in, slower; e.g. rust-analyzer, clangd)")
   .option("--allow-partial", "with --deep: exit 0 even when some files' summaries failed (default: a degraded meaning tier exits 1)")
@@ -411,6 +416,7 @@ program
       reuse?: boolean;
       lsp?: boolean;
       allowPartial?: boolean;
+      synthConcurrency?: string;
       includeDir?: string[];
       onlyDir?: string[];
       followSubmodules?: boolean;
@@ -426,6 +432,11 @@ program
     const concurrency = opts.concurrency ? Math.max(1, Number(opts.concurrency)) : undefined;
     if (opts.concurrency && !Number.isFinite(concurrency)) {
       console.error(`✗ --concurrency must be a number, got "${opts.concurrency}"`);
+      process.exit(1);
+    }
+    const synthConcurrency = opts.synthConcurrency ? Math.max(1, Number(opts.synthConcurrency)) : undefined;
+    if (opts.synthConcurrency && !Number.isFinite(synthConcurrency)) {
+      console.error(`✗ --synth-concurrency must be a number, got "${opts.synthConcurrency}"`);
       process.exit(1);
     }
     warnUnsupportedExtensions(opts.extensions);
@@ -511,6 +522,7 @@ program
         deep: !!deep,
         extensions: opts.extensions,
         concurrency,
+        synthConcurrency,
         childConfig: cliConfig(),
         override: buildGlobalDir,
         includeDirs: opts.includeDir,
@@ -527,6 +539,7 @@ program
       const c = await engine.init(dir, {
         extensions: opts.extensions,
         onlyDirs,
+        synthConcurrency,
         onProgress: ({ phase, index, total, file }) =>
           process.stderr.write(
             `\r${phase === "summarize" ? "reading" : "writing"} concepts ${index + 1}/${total}: ${file.slice(0, 40).padEnd(40)}`,
