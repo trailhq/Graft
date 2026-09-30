@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readJsonObject, isGraftEntry, writeOwned } from '../src/hosts/config-write.js';
@@ -56,4 +56,30 @@ test('writeOwned is idempotent: created, then unchanged', () => {
   assert.equal(writeOwned('x', p, 'hello').action, 'unchanged');
   assert.equal(writeOwned('x', p, 'world').action, 'updated');
   assert.equal(readFileSync(p, 'utf8'), 'world');
+});
+
+test('writeOwned replaces the file instead of truncating it in place', () => {
+  // A host config is written by one entry point while another reads it (project
+  // hook / user-level hook / MCP boot all converge on `runInit` on a fresh
+  // checkout). An in-place write hands that reader an empty file mid-save, which
+  // its own reader then treats as "no settings". Asserting the inode moves is the
+  // observable form of "the rename happened" — a truncate-in-place keeps it.
+  const dir = fresh();
+  const p = join(dir, 'settings.json');
+  assert.equal(writeOwned('x', p, '{"a":1}').action, 'created');
+  // The inode is the observable form of "the rename happened" — a truncate-in-place
+  // keeps it. Not a property Windows reports reliably, so the identity check is
+  // POSIX-only and the content assertions below cover every platform.
+  const before = process.platform === 'win32' ? undefined : statSync(p);
+  assert.equal(writeOwned('x', p, '{"a":2}').action, 'updated');
+  if (before) assert.notEqual(statSync(p).ino, before.ino, 'the target was replaced, not truncated');
+  assert.equal(readFileSync(p, 'utf8'), '{"a":2}');
+  // And the scratch file is not left behind for something to clean up later.
+  assert.deepEqual(readdirSync(dir), ['settings.json']);
+});
+
+test('writeOwned creates missing parent directories before staging the scratch file', () => {
+  const p = join(fresh(), 'nested', 'deeper', 'settings.json');
+  assert.equal(writeOwned('x', p, '{"a":1}').action, 'created');
+  assert.equal(readFileSync(p, 'utf8'), '{"a":1}');
 });

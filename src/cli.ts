@@ -1279,7 +1279,15 @@ function wireTarget(
       // writes under `~/.claude` now (hosts/claude-global.ts), so --no-global has to
       // reach it or the flag would silently mean "no out-of-repo writes, except three".
       const res = runInit(repo, { build: opts.build, cliPath, statusline: wantStatusline, global: opts.global, home });
-      say(`✓ wrote ${res.settingsPath}`);
+      // Same three-way report the `.mcp.json` write below gets: a settings.json
+      // graft could not parse is left alone, and saying "✓ wrote" there would claim
+      // a wiring the repo does not have.
+      if (res.settings.action === "skipped-unparseable")
+        say(`⚠ .claude/settings.json: ${res.settings.path} left unchanged (not valid JSON) — fix it, then re-run graft init`);
+      else if (res.settings.action === "unchanged")
+        say(`· .claude/settings.json: ${res.settings.path} (already wired)`);
+      else
+        say(`✓ wrote ${res.settingsPath}`);
       for (const s of res.shims) say(`✓ wrote ${s}`);
       say(`✓ wrote ${res.skill}`);
       if (res.mcp.action === "skipped-unparseable")
