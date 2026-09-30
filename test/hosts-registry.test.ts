@@ -15,7 +15,7 @@ function probeFor(home: string, repo: string): DetectProbe {
 function fresh(): string { return mkdtempSync(join(tmpdir(), 'graft-registry-')); }
 
 test('registry exposes the known hosts', () => {
-  assert.deepEqual(hostIds().sort(), ['adal', 'agents', 'antigravity', 'copilot', 'cursor', 'gemini', 'grok', 'hermes', 'kiro', 'windsurf']);
+  assert.deepEqual(hostIds().sort(), ['adal', 'agents', 'antigravity', 'copilot', 'cursor', 'droid', 'gemini', 'grok', 'hermes', 'kiro', 'pi', 'project-agents', 'windsurf']);
   for (const h of HOSTS) {
     assert.ok(h.relPath.length > 0);
     assert.ok(h.content().length > 0);
@@ -32,7 +32,22 @@ test('home config dirs light up their hosts', () => {
   mkdirSync(join(home, '.gemini'));
   mkdirSync(join(home, '.codex'));
   const ids = detectHosts(probeFor(home, repo)).map((h) => h.id).sort();
-  assert.deepEqual(ids, ['agents', 'cursor', 'gemini']);
+  assert.deepEqual(ids, ['agents', 'cursor', 'gemini', 'project-agents']);
+});
+
+test('project-agents lights up from any standard-reader home dir or a repo .agents dir', () => {
+  const repo = fresh();
+  for (const dir of [['.codex'], ['.config', 'opencode'], ['.factory'], ['.pi']] as const) {
+    const home = fresh();
+    mkdirSync(join(home, ...dir), { recursive: true });
+    assert.ok(
+      detectHosts(probeFor(home, repo)).some((h) => h.id === 'project-agents'),
+      `~/${join(...dir)} should detect project-agents`,
+    );
+  }
+  const home = fresh();
+  mkdirSync(join(repo, '.agents'));
+  assert.ok(detectHosts(probeFor(home, repo)).some((h) => h.id === 'project-agents'), 'repo .agents/ detects');
 });
 
 test('repo-local markers also light up hosts', () => {

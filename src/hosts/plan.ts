@@ -15,6 +15,7 @@ import { mcpTargets } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
 import { cursorHookTargets } from './cursor-hooks.js';
 import { antigravitySkillTargets } from './antigravity.js';
+import { projectAgentSkillTargets } from './project-agents.js';
 import { claudeTargets } from '../claude/init.js';
 import { claudeGlobalTargets } from './claude-global.js';
 
@@ -85,6 +86,7 @@ export function planInit(repo: string, opts: { home?: string; ids?: string[] } =
         ...(host.id === 'agents' ? hookTargets(home) : []),
         ...(host.id === 'cursor' ? cursorHookTargets(repo) : []),
         ...(host.id === 'antigravity' ? antigravitySkillTargets(home) : []),
+        ...(host.id === 'project-agents' ? projectAgentSkillTargets(repo) : []),
       ],
     })),
   ];

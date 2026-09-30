@@ -13,6 +13,7 @@ import { installCodexHooks } from './codex-hooks.js';
 import { installCursorHooks } from './cursor-hooks.js';
 import type { ConfigWrite } from './config-write.js';
 import { installAntigravitySkill } from './antigravity.js';
+import { installProjectAgentSkill } from './project-agents.js';
 
 export interface HostsInitResult {
   written: { id: string; path: string; action: string }[];
@@ -94,5 +95,10 @@ export function runHostsInit(
     opts.global === false || !selected.some((h) => h.id === 'antigravity')
       ? []
       : installAntigravitySkill(home);
-  return { written, skipped, unknown, mcp, hooks: [...hooks, ...cursorHooks, ...antigravitySkill] };
+  // The project-agents skill is repo-local (.agents/skills/) — --no-global does
+  // NOT suppress it; there is no out-of-repo write in the row at all.
+  const projectAgentSkill = !selected.some((h) => h.id === 'project-agents')
+    ? []
+    : installProjectAgentSkill(repo);
+  return { written, skipped, unknown, mcp, hooks: [...hooks, ...cursorHooks, ...antigravitySkill, ...projectAgentSkill] };
 }
