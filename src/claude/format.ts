@@ -39,7 +39,7 @@ export function renderStatusline(
     // stands alone rather than carrying a rate nobody measured.
     const usd = dollarsSaved(saved, session?.inputCostMicros, session?.inputTokensBilled);
     const money = usd === null ? '' : ` · ~${formatDollars(usd)}`;
-    top.push(C.indigo(`~${saved.toLocaleString()} tok saved${money}`));
+    top.push(C.indigo(`~${saved.toLocaleString("en-US")} tok saved${money}`));
   }
 
   const bottom: string[] = [];
@@ -133,9 +133,9 @@ export function formatRetrieval(ask: AskJson, cap = 5): string | null {
   const base = tokensOf(ask.saved!.baselineChars);
   const pct = Math.round((saved / base) * 100);
   return (
-    `${body}\n[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%); this pack ≈ ` +
-    `${tokensOf(body.length).toLocaleString()} tok vs reading the ${ask.saved!.files} file(s) whole ≈ ` +
-    `${base.toLocaleString()} tok (estimate).`
+    `${body}\n[graft] tokens saved ≈ ${saved.toLocaleString("en-US")} (${pct}%); this pack ≈ ` +
+    `${tokensOf(body.length).toLocaleString("en-US")} tok vs reading the ${ask.saved!.files} file(s) whole ≈ ` +
+    `${base.toLocaleString("en-US")} tok (estimate).`
   );
 }
 
