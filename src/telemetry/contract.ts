@@ -74,14 +74,8 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
    *  `skipped` with a `reason` from a closed set (TRAIL_AUTOPUSH_SKIPS). Only for
    *  a repo with a trail attached — every other repo sends nothing. */
   trail_autopush: new Set<string>(['outcome', 'reason']),
-  /** One closed agent session, summarised. `graft_reads` vs `source_reads` is
-   *  the single number that says whether an agent prefers graft to grep; the two
-   *  `*_turns` buckets are the follow-up question — of the turns that used graft,
-   *  how many told the user what it saved. Both are counts of turns, never text. */
-  session_summary: new Set<string>([
-    'graft_reads_bucket', 'source_reads_bucket', 'saved_tokens_bucket',
-    'graft_turns_bucket', 'reported_turns_bucket',
-  ]),
+  /** One closed agent session, summarised as its graft-vs-source usage mix. */
+  session_summary: new Set<string>(['graft_reads_bucket', 'source_reads_bucket']),
 };
 
 /** Stamped on every event by `track()`; not listed per event above. */
@@ -233,17 +227,6 @@ export function countBucket(n: number): string {
   if (n < 50) return '20-49';
   if (n < 200) return '50-199';
   return '200+';
-}
-
-/** Estimated tokens saved in one session — the README's central claim, in the
- *  only resolution we need to defend it. */
-export function savedTokensBucket(n: number): string {
-  if (n <= 0) return '0';
-  if (n < 1000) return '<1k';
-  if (n < 5000) return '1-5k';
-  if (n < 20000) return '5-20k';
-  if (n < 100000) return '20-100k';
-  return '100k+';
 }
 
 /**

@@ -1,21 +1,7 @@
-/**
- * What a saved token was actually worth, in dollars.
- *
- * `savings.ts` answers "how many input tokens did graft keep out of the
- * context"; this answers "what does an input token cost here". The two are
- * deliberately separate: the token count is arithmetic over file sizes and is
- * true everywhere, while the price depends on which model the session ran and
- * how much of its context was served from cache — facts only the host's
- * transcript knows.
- *
- * Nothing here guesses. There is no default rate and no env override: a model
- * we don't have a price for yields null, and the callers then render the token
- * count alone rather than a dollar figure we made up. A wrong number on the
- * statusline is worse than no number.
- */
+/** Pricing helpers for sampled host-reported input usage. They support internal
+ * billing observations only; they do not price the file-size baseline. */
 
-/** Input $/Mtok, list price, per model family. Output tokens are irrelevant —
- * what graft saves is context the agent would otherwise have read IN. */
+/** Input $/Mtok, list price, per model family. */
 const INPUT_USD_PER_MTOK: ReadonlyArray<readonly [RegExp, number]> = [
   [/^claude-(fable|mythos)-5/, 10],
   [/^claude-opus-(5|4-[678])/, 5],
@@ -24,9 +10,7 @@ const INPUT_USD_PER_MTOK: ReadonlyArray<readonly [RegExp, number]> = [
   [/^claude-haiku-4-5/, 1],
 ];
 
-/** List input price for a model id, or null when we don't know it — a model
- * released after this table was written, or a host reporting something else
- * entirely. Null propagates all the way to "render tokens only". */
+/** List input price for a model id, or null when we do not know it. */
 export function inputUsdPerMtok(model: unknown): number | null {
   if (typeof model !== 'string') return null;
   for (const [pattern, usd] of INPUT_USD_PER_MTOK) if (pattern.test(model)) return usd;
@@ -71,30 +55,3 @@ export function turnInputTokens(usage: TurnUsage): number {
   return usage.input + usage.cacheCreate + usage.cacheRead;
 }
 
-/**
- * Dollars saved, at the rate the session has actually been paying.
- *
- * `costMicros / tokensBilled` is the blended price of one input token here —
- * model and cache-hit ratio already folded in — so this re-blends as the
- * session goes rather than freezing turn one's rate. Returns null when nothing
- * has been sampled yet (turn one, or a host whose hooks name no transcript).
- */
-export function dollarsSaved(
-  savedTokens: number,
-  costMicros: number | undefined,
-  tokensBilled: number | undefined,
-): number | null {
-  if (!costMicros || !tokensBilled || savedTokens <= 0) return null;
-  const usd = (savedTokens * (costMicros / tokensBilled)) / MICROS_PER_USD;
-  // Belt and braces against a non-finite accumulator reaching a rendered
-  // surface: "$NaN" on the statusline is worse than no dollar figure at all.
-  return Number.isFinite(usd) ? usd : null;
-}
-
-/** `$1.23`, or `<$0.01` for a real but sub-cent saving. Never `$0.00`: a
- * rounded-to-nothing number reads as "graft saved you nothing", which is a
- * different claim from "graft saved you less than a cent". */
-export function formatDollars(usd: number): string {
-  if (usd < 0.01) return '<$0.01';
-  return `$${usd.toFixed(2)}`;
-}

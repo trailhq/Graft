@@ -10,9 +10,9 @@ import { graftCliPath, claudeScriptPath } from './paths.js';
 import { runUpkeep } from '../upkeep-run.js';
 import { runningVersion } from '../upkeep.js';
 import { flushClosedSessions, summarizeSession } from '../telemetry/sessions.js';
-import { hasSavingsTally, lastAssistantTurn, lastTurnBilling } from './tally.js';
+import { lastTurnBilling } from './tally.js';
 import { scopeOf, scopesOfGraph } from '../graph/scopes.js';
-import { classifyToolUse, isMcpToolName, isGraftMcpTool, parseSavings, recordToolUse, type ToolKind } from './session-metrics.js';
+import { classifyToolUse, isMcpToolName, isGraftMcpTool, recordToolUse } from './session-metrics.js';
 import { readLink } from '../brain/link.js';
 import { pickedAgents } from '../brain/push.js';
 import { readTrailSnapshot, trailContextLine } from '../brain/watch-trail.js';
@@ -236,58 +236,19 @@ export function lastFileScopeHint(dir: string, lastFile: string | null | undefin
 }
 
 /**
- * PostToolUse on a retrieval tool. Two jobs, both a pure parse of the payload the
- * hook already received (no re-run):
- *
- *   1. Score the usage mix: classify the tool as a graft retrieval or a source
- *      read (Read/Grep/Glob) and bump the session's `graftReads`/`sourceReads`.
- *      Until this ran, those counters were never incremented, so
- *      `session_summary` telemetry shipped 0/0 for every session.
- *   2. Sum any `[graft] tokens saved ≈ N` footers in the output into the running
- *      `savedTokens` total, so the statusline's `~N tok saved` reflects the
- *      session across CLI and MCP.
- *
- * A `[graft]` footer is itself proof graft ran, so it also counts as a graft
- * read even when the tool name alone (a bare `Bash`) couldn't say so. A graft use
- * also flags the turn (`turnUsedGraft`) so the Stop hook's tally can resolve
- * whether the reply told the user what it saved. Stays a no-op on the
- * Write/Edit/unrelated-Bash majority: nothing to classify and no footer means
- * nothing is written.
+ * PostToolUse on a retrieval tool: classify the tool as a graft retrieval or a
+ * source read (Read/Grep/Glob) and bump the corresponding usage-mix counter.
+ * It stays a no-op on the Write/Edit/unrelated-Bash majority.
  */
 function handleToolUse(input: any, dir: string): void {
   recordToolUse(dir, input?.session_id || 'default',
-    { ...classifyAndScore(input?.tool_name, input?.tool_input?.command, () => input?.tool_response ?? input), host: 'claude-code' });
-}
-
-/**
- * Classify a tool use and, only when it could carry a graft footer, parse the
- * savings out of its (lazily-serialised) output.
- *
- * Source reads (Read/Grep/Glob) never print a `[graft]` footer, and their output
- * is a whole file or every match — serialising and regexing that on every read
- * is the expensive, pointless case the widened PostToolUse matcher would
- * otherwise hit. So skip `payload()` entirely for them. For anything else, a
- * footer is itself proof graft ran (a bare `Bash graft …` the name couldn't
- * classify), so its presence upgrades the kind to 'graft'.
- */
-function classifyAndScore(
-  toolName: string | undefined,
-  command: string | undefined,
-  payload: () => unknown,
-): { kind: ToolKind | null; savedTokens: number } {
-  let kind = classifyToolUse(toolName, command);
-  if (kind === 'source') return { kind, savedTokens: 0 };
-  const savedTokens = parseSavings(JSON.stringify(payload() ?? ''));
-  if (savedTokens > 0) kind = 'graft';
-  return { kind, savedTokens };
+    { kind: classifyToolUse(input?.tool_name, input?.tool_input?.command), host: 'claude-code' });
 }
 
 /**
  * Cursor `postToolUse` (https://cursor.com/docs/hooks). Same job as
- * {@link handleToolUse} but over Cursor's payload shape: `tool_output` holds the
- * JSON-stringified result (a Shell `graft …` call's footer lives in its stdout),
- * and the session key is `conversation_id`. MCP graft calls are skipped here —
- * `afterMCPExecution` owns them, and counting both would double the graft tally.
+ * {@link handleToolUse}; the session key is `conversation_id`. MCP graft calls are skipped here —
+ * `afterMCPExecution` owns them, and counting both would double the graft count.
  * The skip covers both the prefixed (`MCP:graft_find_code`) and bare
  * (`graft_find_code`) tool-name shapes, so the guard — not just the installed
  * matcher — is what prevents the double count.
@@ -297,19 +258,17 @@ function handleCursorPostTool(input: any, dir: string): void {
   if (isMcpToolName(toolName) || isGraftMcpTool(toolName)) return; // handled by handleCursorMcp
   const command = input?.tool_input?.command ?? input?.tool_input?.cmd;
   recordToolUse(dir, cursorSessionId(input),
-    { ...classifyAndScore(toolName, command, () => input?.tool_output ?? input?.tool_response ?? input), host: 'cursor' });
+    { kind: classifyToolUse(toolName, command), host: 'cursor' });
 }
 
 /**
  * Cursor `afterMCPExecution`: fires only for MCP tools, so a graft tool is
- * recognised by its name and its savings read out of `result_json`. This is the
- * one place graft MCP calls are counted for Cursor.
+ * recognised by its name. This is the one place graft MCP calls are counted.
  */
 function handleCursorMcp(input: any, dir: string): void {
   const toolName = String(input?.tool_name ?? '');
   if (!isGraftMcpTool(toolName)) return;
-  const savedTokens = parseSavings(JSON.stringify(input?.result_json ?? input?.result ?? input ?? ''));
-  recordToolUse(dir, cursorSessionId(input), { kind: 'graft', savedTokens, host: 'cursor' });
+  recordToolUse(dir, cursorSessionId(input), { kind: 'graft', host: 'cursor' });
 }
 
 /** Cursor keys a chat by `conversation_id` (its `session_id` equivalent). */
@@ -320,8 +279,8 @@ function cursorSessionId(input: any): string {
 /**
  * At turn end: what did this turn's input tokens actually cost?
  *
- * Deliberately ungated, unlike {@link countTallyTurn}: the blended rate has to
- * describe the session, and graft turns are not a fair sample of it — they are
+ * Deliberately ungated: the blended rate has to describe the session, and graft
+ * turns are not a fair sample of it — they are
  * the long, tool-heavy, cache-warm ones. Sampling only those would report a
  * cheaper token than the session really pays.
  *
@@ -345,41 +304,8 @@ function sampleTurnCost(input: any, dir: string): void {
   }
 }
 
-/**
- * At turn end: did the reply the user just read say what graft saved?
- *
- * Runs only on turns the tool-savings hook flagged, so a conversational turn
- * costs nothing. A turn we cannot observe — a host whose Stop hook names no
- * transcript, an unreadable file, or a Stop that fires before the final prose
- * is on disk — is counted in NEITHER total: the ratio these two numbers form
- * has to mean "of the turns we could check", not "of the turns we tried to".
- */
-function countTallyTurn(input: any, dir: string): void {
-  try {
-    const id = input?.session_id || 'default';
-    const s = readSession(dir, id);
-    if (!s.turnUsedGraft) return;
-    const turn = lastAssistantTurn(input?.transcript_path);
-    // Same reply as last time we looked: no new prose has landed, so this Stop
-    // is a duplicate or a race with the transcript write. Drop the turn rather
-    // than judge it on a stale message.
-    if (!turn || turn.uuid === s.lastTallyUuid) {
-      writeSession(dir, id, { ...s, turnUsedGraft: false });
-      return;
-    }
-    s.graftTurns = (s.graftTurns ?? 0) + 1;
-    if (hasSavingsTally(turn.text)) s.reportedTurns = (s.reportedTurns ?? 0) + 1;
-    s.turnUsedGraft = false;
-    s.lastTallyUuid = turn.uuid;
-    writeSession(dir, id, s);
-  } catch {
-    // A turn-end metric is never worth failing the graph sync over.
-  }
-}
-
 function handleStop(input: any, dir: string): void {
   sampleTurnCost(input, dir);
-  countTallyTurn(input, dir);
   // sync-run.js ships next to this module inside the package, so it resolves in
   // any repo that installs graft (not just graft's own). Defensive existsSync:
   // if the package is somehow incomplete, skip rather than wedge on syncing:true.

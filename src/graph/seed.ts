@@ -134,7 +134,7 @@ const NOT_SEEDED: SeedResult = { seeded: false };
  *
  * Also absent, because it belongs to the checkout that produced it: `.cache/session/`
  * (another session's transcripts), `.sync.lock` (another process's lock), and
- * `stats.json` (this checkout earns its own savings and dirty flag).
+ * `stats.json` (this checkout earns its own stats and dirty flag).
  */
 function seedable(rel: string): boolean {
   // The dirs themselves, or cpSync would never look inside them.

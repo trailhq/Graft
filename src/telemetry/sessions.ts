@@ -3,11 +3,10 @@
  *
  * This is the event that justifies the whole exercise. Everything else here
  * counts commands; this one answers the question the product actually rests on —
- * when an agent had both graft and grep available, which did it reach for, and
- * how many tokens did that save? The counters already exist: the Claude Code
- * hooks have been writing `graftReads`, `sourceReads` and `savedTokens` per
- * session into `graft/.cache/session/` since well before telemetry did. Nothing
- * new is measured here; a closed session is simply bucketed and queued.
+ * when an agent had both graft and grep available, which did it reach for? The
+ * counters already exist: the Claude Code hooks write `graftReads` and
+ * `sourceReads` per session into `graft/.cache/session/`. Nothing new is
+ * measured here; a closed session is simply bucketed and queued.
  *
  * "Closed" is inferred from mtime by the idle sweep ({@link flushClosedSessions})
  * because Claude Code has no reliable end-of-session hook — `Stop` fires per
@@ -24,7 +23,7 @@
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readSession, writeSession, sessionDir, listSessionIds } from '../claude/state.js';
-import { countBucket, savedTokensBucket, type AgentHost } from './contract.js';
+import { countBucket, type AgentHost } from './contract.js';
 import { track } from './track.js';
 import { telemetryOn } from './gate.js';
 
@@ -64,13 +63,6 @@ export function summarizeSession(
       {
         graft_reads_bucket: countBucket(s.graftReads ?? 0),
         source_reads_bucket: countBucket(s.sourceReads ?? 0),
-        saved_tokens_bucket: savedTokensBucket(s.savedTokens ?? 0),
-        // Saved vs *said*: the gap between these two is value the user never
-        // heard about. Only turns whose reply was actually readable are in
-        // either count (claude/tally.ts), so a host that exposes no transcript
-        // reports 0/0 rather than a misleading 0-out-of-many.
-        graft_turns_bucket: countBucket(s.graftTurns ?? 0),
-        reported_turns_bucket: countBucket(s.reportedTurns ?? 0),
       },
       { repo, host: s.host ?? host, home, env },
     );

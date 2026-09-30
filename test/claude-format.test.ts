@@ -84,12 +84,12 @@ test('formatRetrieval keeps the substitutive header when code is inlined', () =>
   assert.match(strip(formatRetrieval(ask)!), /retrieved context, read these spans/);
 });
 
-test('formatRetrieval appends a tokens-saved line when ask reports a baseline', () => {
+test('formatRetrieval omits savings claims when ask reports a baseline', () => {
   const ask = { query: 'pkce', mode: 'lexical', saved: { files: 1, baselineChars: 8000 }, hits: [
     { kind: 'symbol', title: 'verify', pointer: 'src/pkce.ts:L1-L4', snippet: 's', score: 1, code: 'a\nb' },
   ] } as any;
   const txt = strip(formatRetrieval(ask)!);
-  assert.match(txt, /tokens saved ≈ [\d,]+ \(\d+%\)/);
+  assert.doesNotMatch(txt, /tokens saved|tok saved|\$/i);
 });
 
 test('formatRetrieval returns null for no hits', () => {
@@ -105,7 +105,7 @@ const gateAsk = (over: Record<string, unknown> = {}) => ({
   ],
   ...over,
 }) as any;
-const freshSession = () => ({ lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, savedTokens: 0, injectedPointers: [] as string[] });
+const freshSession = () => ({ lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, injectedPointers: [] as string[] });
 
 test('relevantRetrieval injects on good coverage and records pointers', () => {
   const s = freshSession();
@@ -180,10 +180,11 @@ test('formatOrientation labels and truncates to budget', () => {
   assert.match(out, /Already know the file or symbol to change\?/, 'known-target edit guidance present');
   // index truncated to budget (1500) + the fixed usage directive (per-tool descriptions + discipline).
   assert.match(out, /Refactor, rename, or multi-file change?/, 'refactor blast-radius nudge present');
+  assert.doesNotMatch(out, /tokens saved|graft saved|every turn/i, 'does not request savings reporting');
   // The guard is on the INDEX being trimmed, not on the directive's exact byte
   // count: an untrimmed 3000-char index would land near 5200. The ceiling has
-  // deliberate slack so teaching the directive one more thing (dollar values,
-  // 0.7.x) doesn't fail a test that is watching something else.
+  // deliberate slack so teaching the directive one more thing
+  // doesn't fail a test that is watching something else.
   assert.ok(out.length < 4000, 'index trimmed to budget; only the fixed directive adds to it');
   // Regression: `graft impact` was folded into `graft callers --depth` in 0.6.0 —
   // the always-on directive must teach the current command, not a dead one.
@@ -212,19 +213,16 @@ test('renderSubagent without a query still shows the agent', () => {
   assert.match(out, /Plan/);
 });
 
-test('renderStatusline carries the dollar value once the session has been billed', () => {
+test('renderStatusline omits historical savings values', () => {
   const stats = { ...emptyStats(), nodeCount: 1, edgeCount: 0, totalCount: 1 };
-  const s = { ...freshSession(), savedTokens: 100_000, inputCostMicros: 600_000, inputTokensBilled: 1_000_000 };
+  const s = freshSession();
   const line = strip(renderStatusline(stats, s as any, { ctxPct: null })[0]);
-  assert.match(line, /~100,000 tok saved · ~\$0\.06/);
+  assert.doesNotMatch(line, /saved|\$/i);
 });
 
-test('renderStatusline shows tokens alone until a turn has been billed', () => {
-  // Turn one of every session, and every turn on a host that exposes no
-  // transcript. Tokens are still true; a price nobody measured is not.
+test('renderStatusline stays savings-free on a fresh session', () => {
   const stats = { ...emptyStats(), nodeCount: 1, edgeCount: 0, totalCount: 1 };
-  const s = { ...freshSession(), savedTokens: 100_000 };
+  const s = freshSession();
   const line = strip(renderStatusline(stats, s as any, { ctxPct: null })[0]);
-  assert.match(line, /~100,000 tok saved/);
-  assert.doesNotMatch(line, /\$/);
+  assert.doesNotMatch(line, /saved|\$/i);
 });

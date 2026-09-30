@@ -22,7 +22,7 @@ import type { GraphV1, NodeV1 } from "./types.js";
 import { languageLabelOf } from "./extract.js";
 import { WALK_RELATIONS } from "./relations.js";
 import { scopeLabel, scopeOf, scopesOfGraph } from "./scopes.js";
-import { withSavings, savingsFor, type Savings } from "../context/savings.js";
+import { savingsFor, type Savings } from "../context/savings.js";
 
 export interface Hub {
   name: string;
@@ -75,8 +75,7 @@ export interface RepoMap {
   /** Directory groups beyond the `maxDirs` cap — never silently dropped.
    * Multi-scope repos: always 0 here; see each `ScopeGroup.dropped` instead. */
   dropped: number;
-  /** Tokens-saved baseline: every indexed file read whole — the cost of
-   * orienting by reading the repo instead of this map. */
+  /** Rough whole-file-size baseline for an estimated file-read token equivalent. */
   saved?: Savings;
 }
 
@@ -346,5 +345,5 @@ export function formatRepoMap(map: RepoMap): string {
   lines.push(`hotspots: ${map.hotspots.map(formatHotspot).join("  ")}`);
 
   const body = lines.join("\n");
-  return withSavings(body, map.saved) + "\n";
+  return body + "\n";
 }

@@ -15,7 +15,6 @@ import {
   filesBucket,
   isTrackedCommand,
   langsValue,
-  savedTokensBucket,
 } from '../src/telemetry/contract.js';
 import { track } from '../src/telemetry/track.js';
 import { peek } from '../src/telemetry/queue.js';
@@ -109,15 +108,11 @@ test('durationBucket collapses wall-clock to a label', () => {
   assert.equal(durationBucket(600_000), '10m+');
 });
 
-test('countBucket and savedTokensBucket cover their boundaries', () => {
+test('countBucket covers its boundaries', () => {
   assert.equal(countBucket(0), '0');
   assert.equal(countBucket(4), '1-4');
   assert.equal(countBucket(5), '5-19');
   assert.equal(countBucket(200), '200+');
-  assert.equal(savedTokensBucket(0), '0');
-  assert.equal(savedTokensBucket(999), '<1k');
-  assert.equal(savedTokensBucket(1000), '1-5k');
-  assert.equal(savedTokensBucket(100_000), '100k+');
 });
 
 test('langsValue sorts, dedupes and caps so it cannot fingerprint a repo', () => {

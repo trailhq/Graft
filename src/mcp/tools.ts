@@ -11,8 +11,6 @@ import { ensureFreshChildren, ensureFreshGraph, refreshNote } from '../graph/ref
 import { contextDirFor } from '../context/node-file.js';
 import { resolveSymbol, edgeWalk, type Direction, type EdgeHit } from '../graph/traverse.js';
 import { callersSavings, headerOf, hitLine, looseNoteFor } from '../graph/traverse-cli.js';
-import { withSavings, setInputRate } from '../context/savings.js';
-import { sessionInputRate } from '../claude/session-metrics.js';
 import { grepGraph } from '../search/grep.js';
 import { formatGrepResult, zeroHitNote } from '../search/grep-cli.js';
 import { buildRepoMap, formatRepoMap } from '../graph/map.js';
@@ -225,9 +223,6 @@ export async function callTool(
     // Freshness first: an answer that cites file:line has to be about the code as
     // it is right now, including edits nobody has committed (or even saved through
     // this agent). ~3ms when nothing moved; a structural, $0 rebuild when it did.
-    // Same reason as the CLI's `noteQuery`: price this session's tokens once,
-    // here, so the formatters downstream can put a dollar figure in the nudge.
-    setInputRate(sessionInputRate(root));
     let note: string | null = null;
     if (!NO_REFRESH_TOOLS.has(name)) {
       const r = ws
@@ -300,7 +295,7 @@ async function callSingleTool(
         const results = matches.map((m) => ({ symbol: m, hits: edgeWalk(w, m, direction, depth) }));
         const byId = new Map(results.map((r) => [r.symbol.id, r.hits]));
         const body = renderMatches(direction, depth > 1, matches, (m) => byId.get(m.id) ?? []);
-        const text = withSavings(body, callersSavings(w, results));
+        const text = body;
         return { text, isError: false };
       }
       case 'graft_find_all': {

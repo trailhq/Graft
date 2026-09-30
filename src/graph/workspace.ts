@@ -50,7 +50,7 @@ import {
 import { fuseScopes, STRONG_FLOOR, HIGH_FLOOR, type ScopedDoc } from "../ask/fuse.js";
 import { grepGraph, type GrepGroup, type GrepResult } from "../search/grep.js";
 import { formatGrepResult, zeroHitNote } from "../search/grep-cli.js";
-import { withSavings, type Savings } from "../context/savings.js";
+import { type Savings } from "../context/savings.js";
 
 /** The parent index written to `<parent>/graft/workspace.json`. Nodes/edges
  * never live at the parent — they live in each child's own `graft/`. */
@@ -681,7 +681,7 @@ export function federateCallers(
       else for (const h of hits) lines.push(hitLine(direction, h, showDepth));
     }
     const body = lines.join("\n");
-    blocks.push(withSavings(body, callersSavings(graph, results)));
+    blocks.push(body);
   }
 
   const cov = coverageNote(wg);
