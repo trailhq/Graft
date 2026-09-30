@@ -51,7 +51,7 @@ The events:
 | `trail_pulled` | `outcome` (`written`/`already_present`/`nothing_accepted`/`skipped`/`error`/`dry_run`), `kinds` (which kinds of context file were written: `claude_md`, `folder_claude_md`, `agents_md`, `cursor_rule`, `skill`), `files_bucket`, `changes_bucket`, `skipped_bucket`, `suggested_bucket` (every change Trail has suggested for the wired agents' files, whatever became of it) | `graft trail pull` (or `graft claude-md pull`) finishes |
 | `trail_watch_exit` | `reason` (`suggestions`/`accepted`/`timeout`/`refused`/`no_trail`), `suggested_bucket`, `accepted_bucket`, `duration_bucket` (how long it waited) | `graft trail watch` ends |
 | `trail_autopush` | `outcome` (`started`/`skipped`), `reason` when skipped (`disabled`/`no_head`/`head_unchanged`/`throttled`/`spawn_failed`) | A Claude Code or Codex session starts in a repo with a trail attached, and the hook decides whether to refresh it with a background `graft trail push`. Repos without a trail send nothing |
-| `session_summary` | `graft_reads_bucket`, `source_reads_bucket`, `saved_tokens_bucket`, `graft_turns_bucket`, `reported_turns_bucket` | Once, after an agent session ends |
+| `session_summary` | `graft_reads_bucket`, `source_reads_bucket` | Once, after an agent session ends |
 
 Two rules govern every value above, and both are enforced in code rather than by
 review:
@@ -84,32 +84,12 @@ An example event, in full:
 Run `graft telemetry debug` to print the exact batch your machine would send. It
 sends nothing.
 
-### One thing graft reads locally
-
-Two of those properties — `graft_turns_bucket` and `reported_turns_bucket` — need
-to know something the others don't: whether the reply you actually read said what
-graft saved. graft computes a saving on every retrieval call, but a turn that
-saves 20,000 tokens in silence and a turn that saves nothing look identical in
-`saved_tokens_bucket`, and that difference is the whole question.
-
-The agent's own prose lives in one place a hook can reach: the transcript file
-your editor writes, named on the Stop hook's stdin. So at the end of a turn that
-used graft, graft reads the tail of that file, checks the reply for a "graft saved
-~N tokens" line, and increments one of two counters. Nothing out of the file is
-stored, and nothing out of it is sent — not the reply, not a fragment of it, not
-its length. Two counts of turns cross the wire, as buckets, once per session.
-
-A turn graft cannot check — an editor whose Stop hook names no transcript, an
-unreadable file — is counted in neither total, so the ratio always means "of the
-turns we could read".
-
 ## What is never sent
 
 No source code. No file paths, repo names, organisation names, git remotes, or
 branch names. No symbol names, node summaries, or anything out of the graph. No
-query strings, prompts, or agent output — graft reads the last reply of a
-graft-using turn locally to decide whether it mentioned the saving (see "One
-thing graft reads locally"); only the resulting count is sent, never the text. No error messages or stack traces — a
+query strings, prompts, or agent output � graft reads only local session counters
+to attribute the graft-vs-source usage mix. No error messages or stack traces — a
 failure contributes a code from a fixed list and nothing else. No environment
 variables, API keys, model names, hostnames, usernames, or email addresses.
 

@@ -1,7 +1,7 @@
 /**
  * Cursor project hooks (https://cursor.com/docs/hooks) — the adapter that lets
  * Cursor produce the same session usage mix Claude Code does (graft reads vs
- * Read/Grep, plus token savings), which Cursor otherwise has no way to record.
+ * Read/Grep), which Cursor otherwise has no way to record.
  *
  * Unlike the Codex hooks (which live under `~/.codex` and fire in every repo),
  * Cursor project hooks are **repo-local**: `.cursor/hooks.json` + a shim under
@@ -19,7 +19,7 @@
  *   - `postToolUse` (matcher `Read|Grep|Glob|Search|Shell`) → classify a source read
  *     vs a graft-CLI Shell call; MCP tools are skipped here so they aren't
  *     double-counted against `afterMCPExecution`.
- *   - `afterMCPExecution` → the graft MCP calls, savings parsed from `result_json`.
+ *   - `afterMCPExecution` → the graft MCP calls, recognised by tool name.
  *   - `sessionEnd` → roll the closed session up into `session_summary` as Cursor.
  */
 import { writeFileSync } from 'node:fs';

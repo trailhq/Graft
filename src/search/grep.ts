@@ -58,7 +58,7 @@ export interface GrepResult {
    * couldn't be read from disk. `hits`: matches found beyond `maxHits`,
    * counted but not collected. */
   truncated: { files: number; hits: number };
-  /** Tokens-saved baseline: the files that had hits, read whole. Undefined
+  /** Estimated file-read baseline: the files that had hits, read whole. Undefined
    * when there were no hits or the graph predates file sizing. */
   saved?: Savings;
 }

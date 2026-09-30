@@ -35,10 +35,9 @@ function graftBlocks(helpers?: string): Record<string, Json[]> {
   return {
     PostToolUse: [
       { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: hookCmd('post-edit', helpers), timeout: 10000 }] },
-      // Score the usage mix and sum token savings. A graft retrieval (CLI `graft …`
-      // via Bash, or the `graft_*` MCP tools) prints a `[graft] tokens saved ≈ N`
-      // footer this hook sums into the session total; the same hook classifies
-      // Read/Grep/Glob as source reads vs graft as graft reads, which is what feeds
+      // Score the usage mix. A graft retrieval (CLI `graft …`
+      // via Bash, or the `graft_*` MCP tools) is classified as a graft read; the
+      // same hook classifies Read/Grep/Glob as source reads, which is what feeds
       // `graft stats` and the `session_summary` graft-vs-grep ratio. Broad matcher,
       // but the handler no-ops instantly unless there is something to record, so an
       // unrelated Bash or a plain Read costs only a stdin read.

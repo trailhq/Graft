@@ -17,7 +17,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import matter from "gray-matter";
 import { contextDirFor } from "../context/node-file.js";
-import { withSavings, savingsFor, savingsTurnNudge, type Savings } from "../context/savings.js";
+import { savingsFor, type Savings } from "../context/savings.js";
 import { loadGraphCached, loadAskIndexCached } from "../graph/load.js";
 import {
   assertPrefixIndexed,
@@ -108,7 +108,7 @@ export interface AskResult {
    * callers must not re-sort this list by `score`. */
   hits: AskHit[];
   note?: string;
-  /** Token-saving estimate, set only in `--source` (retriever) mode: the whole
+  /** Estimated file-read token-equivalent baseline, set only in `--source` (retriever) mode: the whole
    * size of the distinct files these hits point into, i.e. the baseline cost of
    * reading them instead of this pack. Computed from file sizes stored at build. */
   saved?: { files: number; baselineChars: number };
@@ -1428,7 +1428,7 @@ export interface SkeletonResult {
   file: string;
   entries: SkeletonEntry[];
   note?: string;
-  /** Tokens-saved baseline: this file read whole vs the signatures-only view. */
+  /** Estimated file-read baseline: this file read whole vs the signatures-only view. */
   saved?: Savings;
 }
 
@@ -1477,12 +1477,7 @@ export function formatSkeleton(r: SkeletonResult): string {
     return `- ${e.span}  ${e.kind} ${e.name}${sig}${sum}`;
   });
   const body = `${head}\n${lines.join("\n")}`;
-  return withSavings(body, r.saved) + "\n";
-}
-
-/** Rough tokens for a byte length (≈ 4 chars/token; good enough for an estimate). */
-function toTokens(chars: number): number {
-  return Math.round(chars / 4);
+  return body + "\n";
 }
 
 /** Render an {@link AskResult} as a compact markdown context pack. */
@@ -1526,12 +1521,9 @@ export function formatAsk(r: AskResult): string {
     });
     lines.push(...scopeFooterLines(r));
   }
-  // Before `body` is joined, so the rules text is counted in the savings line
-  // below rather than claimed as free.
   if (r.rules?.length) lines.push(...formatRules(r.rules));
   const body = lines.join("\n").trimEnd();
-  const savings = askSavingsLine(r, body);
-  return (savings ? `${savings}\n\n${body}` : body) + escalationNudge(r) + "\n";
+  return body + escalationNudge(r) + "\n";
 }
 
 /** When a lexical `ask` returns thin/no results, the productive next move is a
@@ -1545,26 +1537,6 @@ function escalationNudge(r: AskResult): string {
   return (
     `\n\n[graft] ${n === 0 ? "no hits" : `only ${n} hit${n === 1 ? "" : "s"}`} — don't re-ask with new wording; switch tool: ` +
     "`graft grep \"<literal>\"` for every occurrence · `graft skeleton <file>` for a file's full API · `graft callers <symbol>` for who-uses."
-  );
-}
-
-/** The one-line token-saving estimate `ask` prepends in retriever mode, so the
- * agent gets the number for free in the tool output — no extra work on its end.
- * `packChars` is measured from the rendered body: exactly what the agent reads.
- * Header, not footer, for the reason documented on `withSavings`: a trailing
- * line dies to `head -N` and to host output truncation. */
-function askSavingsLine(r: AskResult, body: string): string {
-  if (!r.saved || r.saved.baselineChars <= 0) return "";
-  const pack = toTokens(body.length);
-  const base = toTokens(r.saved.baselineChars);
-  if (base <= pack) return ""; // no saving to claim (tiny files); stay quiet
-  const saved = base - pack;
-  const pct = Math.round((saved / base) * 100);
-  return (
-    `[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%) — this pack ≈ ` +
-    `${pack.toLocaleString()} tok vs reading the ${r.saved.files} source file(s) whole ≈ ` +
-    `${base.toLocaleString()} tok. Estimate (baseline = those files read in full).` +
-    savingsTurnNudge(saved)
   );
 }
 

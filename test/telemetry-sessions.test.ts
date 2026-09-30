@@ -31,13 +31,13 @@ function writeSessionFile(repo: string, id: string, body: object, ageMs: number)
 
 test('a closed session is rolled up into one bucketed event', () => {
   const { repo, home } = fixture('sess-closed');
-  writeSessionFile(repo, 's1', { graftReads: 56, sourceReads: 12, savedTokens: 7400 }, SESSION_IDLE_MS + 1000);
+  writeSessionFile(repo, 's1', { graftReads: 56, sourceReads: 12 }, SESSION_IDLE_MS + 1000);
   assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
   const [ev] = peek(home) as { event: string; properties: Record<string, string> }[];
   assert.equal(ev.event, 'session_summary');
   assert.equal(ev.properties.graft_reads_bucket, '50-199');
   assert.equal(ev.properties.source_reads_bucket, '5-19');
-  assert.equal(ev.properties.saved_tokens_bucket, '5-20k');
+  assert.equal('saved_tokens_bucket' in ev.properties, false);
   // The raw counters must not ride along. Checked against the property VALUES,
   // not a substring of the serialised event: the event carries two random UUIDs,
   // and '56' is two hex digits — a substring check here fails whenever a uuid
@@ -76,7 +76,7 @@ test('a session stamped with a host is attributed to it, even when the idle swee
 test('summarizeSession force-closes a just-touched session — the idle gate is skipped', () => {
   const { repo, home } = fixture('sess-force');
   // mtime = now: flushClosedSessions would skip this, but the end-of-session hook must not.
-  writeSessionFile(repo, 's1', { graftReads: 8, sourceReads: 2, savedTokens: 7400 }, 0);
+  writeSessionFile(repo, 's1', { graftReads: 8, sourceReads: 2 }, 0);
   assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 0, 'the idle sweep skips a fresh file');
   assert.equal(summarizeSession(repo, 's1', { host: 'cursor', home, env: OPEN }), 1);
   const [ev] = peek(home) as { event: string; properties: Record<string, string> }[];
@@ -144,32 +144,9 @@ test('a repo with no sessions is a no-op', () => {
 
 test('an empty session still counts — installed but unused is the signal we want', () => {
   const { repo, home } = fixture('sess-empty');
-  writeSessionFile(repo, 's1', { graftReads: 0, sourceReads: 0, savedTokens: 0 }, SESSION_IDLE_MS + 1000);
+  writeSessionFile(repo, 's1', { graftReads: 0, sourceReads: 0 }, SESSION_IDLE_MS + 1000);
   assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
   const [ev] = peek(home) as { properties: Record<string, string> }[];
   assert.equal(ev.properties.graft_reads_bucket, '0');
 });
 
-test('the saved-vs-said turn counts ride along, bucketed', () => {
-  const { repo, home } = fixture('sess-tally');
-  writeSessionFile(repo, 's1',
-    { graftReads: 6, sourceReads: 1, savedTokens: 7400, graftTurns: 9, reportedTurns: 3 },
-    SESSION_IDLE_MS + 1000);
-  assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
-  const [ev] = peek(home) as { properties: Record<string, string> }[];
-  assert.equal(ev.properties.graft_turns_bucket, '5-19');
-  assert.equal(ev.properties.reported_turns_bucket, '1-4');
-  const values = Object.values(ev.properties);
-  for (const raw of ['9', '3']) {
-    assert.equal(values.includes(raw), false, `the raw turn count ${raw} was sent as a property value`);
-  }
-});
-
-test('a session file written before the turn counters exist reports zero, not undefined', () => {
-  const { repo, home } = fixture('sess-tally-old');
-  writeSessionFile(repo, 's1', { graftReads: 4, sourceReads: 0, savedTokens: 500 }, SESSION_IDLE_MS + 1000);
-  assert.equal(flushClosedSessions(repo, Date.now(), home, OPEN), 1);
-  const [ev] = peek(home) as { properties: Record<string, string> }[];
-  assert.equal(ev.properties.graft_turns_bucket, '0');
-  assert.equal(ev.properties.reported_turns_bucket, '0');
-});

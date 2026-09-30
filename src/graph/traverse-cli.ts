@@ -14,7 +14,7 @@
 import { resolve } from "node:path";
 import { fileReader, referenceLine, wordRe } from "../blast/evidence.js";
 import { contextDirFor } from "../context/node-file.js";
-import { withSavings, savingsFor, type Savings } from "../context/savings.js";
+import { savingsFor, type Savings } from "../context/savings.js";
 import { loadGraphCached } from "./load.js";
 import { resolveSymbol, edgeWalk, type Direction, type EdgeHit } from "./traverse.js";
 import type { GraphV1, NodeV1 } from "./types.js";
@@ -77,10 +77,9 @@ function quoteFor(
   return referenceLine(hit.node.path, hit.node.span, [wordRe(name)], read) ?? undefined;
 }
 
-/** Tokens-saved baseline for a callers/callees walk: the files of the matched
- * symbols plus every resolved edge endpoint, read whole — the files you'd open
- * to trace these edges by hand. Shared by the CLI and the MCP tool so both
- * surfaces report the same number. */
+/** Rough whole-file-size baseline for a callers/callees walk: the matched
+ * symbols plus every resolved edge endpoint. Shared by the CLI and MCP tool
+ * as structured estimated file-read token-equivalent data. */
 export function callersSavings(
   graph: GraphV1,
   results: { symbol: NodeV1; hits: EdgeHit[] }[],
@@ -238,5 +237,5 @@ export function runCallersCommand(query: string, dir: string, opts: CallersCliOp
     lines.push("");
   }
   const body = lines.join("\n").replace(/\n+$/, "\n");
-  process.stdout.write(withSavings(body, saved));
+  process.stdout.write(body);
 }

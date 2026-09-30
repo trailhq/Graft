@@ -9,7 +9,6 @@
  */
 import { resolve } from "node:path";
 import { contextDirFor } from "../context/node-file.js";
-import { withSavings } from "../context/savings.js";
 import { loadGraphCached } from "../graph/load.js";
 import { grepGraph, type GrepGroup, type GrepResult } from "./grep.js";
 
@@ -52,14 +51,13 @@ function truncationNote(result: GrepResult): string | null {
 /** Full human report: header, blank line, then one block per group (header +
  * indented hit lines), each block separated by a blank line. */
 export function formatGrepResult(result: GrepResult): string {
-  // The truncation note rides directly under the header, not at the bottom:
-  // "never silent" has to survive a `head -N` too (same reason the savings
-  // line is a header — see withSavings).
+  // The truncation note rides directly under the header so it stays visible
+  // when a host clips long output.
   const note = truncationNote(result);
   const head = note ? `${formatGrepHeader(result)}\n${note}` : formatGrepHeader(result);
   const blocks = [head, "", ...result.groups.map((g) => formatGroup(g) + "\n")];
   const out = blocks.join("\n").replace(/\n+$/, "\n");
-  return withSavings(out, result.saved);
+  return out;
 }
 
 /** Loud, actionable zero-hit note (never a bare empty result) — printed to

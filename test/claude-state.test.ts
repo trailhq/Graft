@@ -24,7 +24,7 @@ test('stats round-trip and patch merge', () => {
 test('session defaults and round-trip', () => {
   const d = fresh();
   const s = readSession(d, 'abc');
-  assert.deepEqual(s, { lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, savedTokens: 0, injectedPointers: [], nudges: 0 });
+  assert.deepEqual(s, { lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, injectedPointers: [], nudges: 0 });
   s.lastQuery = 'pkce'; s.graftReads = 2;
   writeSession(d, 'abc', s);
   assert.equal(readSession(d, 'abc').lastQuery, 'pkce');

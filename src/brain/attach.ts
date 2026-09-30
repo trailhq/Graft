@@ -31,8 +31,7 @@ export const MAX_ATTACHED_RULES = 6;
  * The rules governing the symbols in `pointers`, resolved against `graph`.
  *
  * Scoped to the answer, not the repo: attaching every rule a brain holds would
- * turn a token-saving pack into a token-spending one, and `ask` prints the
- * saving it claims. Capped for the same reason.
+ * turn a compact pack into a token-spending one. Capped for the same reason.
  */
 export function rulesForPointers(
   pointers: string[],
@@ -76,8 +75,7 @@ export function rulesForPointers(
  *
  * Deliberately terse. This rides along on every answer, so it has to earn its
  * tokens: one line per rule, the pointer it governs, and a link only when there
- * is one. The `[graft]` prefix is avoided — `sumSavingsFooters` scans for
- * `[graft] tokens saved ≈` and nothing here should look like a savings line.
+ * is one.
  */
 export function formatRules(applied: AppliedRule[]): string[] {
   if (!applied.length) return [];
