@@ -6,6 +6,7 @@ import type { GraphV1, EdgeV1 } from '../graph/types.js';
 // question in both places, and one set of calibrated numbers beats two.
 import { HIGH_FLOOR, STRONG_FLOOR } from '../ask/fuse.js';
 import { dollarsSaved, formatDollars } from '../context/price.js';
+import { groupDigits } from '../context/savings.js';
 
 const C = {
   indigo: (s: string) => `\x1b[38;2;84;111;255m${s}\x1b[0m`,
@@ -39,7 +40,7 @@ export function renderStatusline(
     // stands alone rather than carrying a rate nobody measured.
     const usd = dollarsSaved(saved, session?.inputCostMicros, session?.inputTokensBilled);
     const money = usd === null ? '' : ` · ~${formatDollars(usd)}`;
-    top.push(C.indigo(`~${saved.toLocaleString()} tok saved${money}`));
+    top.push(C.indigo(`~${groupDigits(saved)} tok saved${money}`));
   }
 
   const bottom: string[] = [];
@@ -133,9 +134,9 @@ export function formatRetrieval(ask: AskJson, cap = 5): string | null {
   const base = tokensOf(ask.saved!.baselineChars);
   const pct = Math.round((saved / base) * 100);
   return (
-    `${body}\n[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%); this pack ≈ ` +
-    `${tokensOf(body.length).toLocaleString()} tok vs reading the ${ask.saved!.files} file(s) whole ≈ ` +
-    `${base.toLocaleString()} tok (estimate).`
+    `${body}\n[graft] tokens saved ≈ ${groupDigits(saved)} (${pct}%); this pack ≈ ` +
+    `${groupDigits(tokensOf(body.length))} tok vs reading the ${ask.saved!.files} file(s) whole ≈ ` +
+    `${groupDigits(base)} tok (estimate).`
   );
 }
 
