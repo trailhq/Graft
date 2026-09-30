@@ -20,7 +20,7 @@ import { relPosix } from "../util/paths.js";
 import matter from "gray-matter";
 import type { GraphV1, NodeV1 } from "./types.js";
 import { CACHE_DIR, readNodes } from "../context/node-file.js";
-import { GRAPH_DIR } from "./write.js";
+import { GRAPH_DIR } from "../context/location.js";
 
 const INDEX_FILE = "INDEX.md";
 /** Where a root-level file card goes when `graft/<stem>.md` is already a concept
