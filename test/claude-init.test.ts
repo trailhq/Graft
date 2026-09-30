@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 // The MCP launch command is resolved from PATH at init time; pin it to the npx
 // form so these expectations are the same on every machine.
 process.env.GRAFT_MCP_NPX = '1';
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -111,6 +111,41 @@ test('runInit appends the allowlist to a pre-existing permissions block, preserv
   runInit(d, { build: false, home: fresh() });
   const s = JSON.parse(readFileSync(join(d, '.claude', 'settings.json'), 'utf8'));
   assert.deepEqual(s.permissions.allow, ['Bash(ls)', 'Bash(graft:*)', 'Bash(npx graft:*)', 'Bash(graft-dev:*)', 'Bash(node dist/cli.js:*)']);
+});
+
+test('runInit leaves an unparseable settings.json exactly as it found it', () => {
+  // A file graft cannot read is not a file with nothing in it. Reading it as one
+  // and writing graft's own keys over it took out the user's permissions,
+  // statusLine and hooks, and left the result dirty enough to commit — so the
+  // conflicted case is pinned here, not just the empty one.
+  const d = fresh();
+  mkdirSync(join(d, '.claude'), { recursive: true });
+  const conflicted = '<<<<<<< HEAD\n{"permissions":{"deny":["Bash(rm -rf*)"]}}\n=======\n{"permissions":{"allow":["Bash(ls)"]}}\n>>>>>>> main\n';
+  const p = join(d, '.claude', 'settings.json');
+  writeFileSync(p, conflicted);
+  const r = runInit(d, { build: false, home: fresh() });
+  assert.equal(readFileSync(p, 'utf8'), conflicted, 'the file is byte-for-byte untouched');
+  assert.equal(r.settings.action, 'skipped-unparseable');
+  assert.ok(r.warnings.some((w) => w.includes(p)), 'and the operator is told why it was skipped');
+  // The shims and skill are graft's OWN files, and they are what the (unwritten)
+  // settings entry would have pointed at — so they still get installed.
+  assert.ok(existsSync(join(d, '.claude', 'helpers', 'graft-hooks.cjs')));
+  assert.ok(existsSync(join(d, '.claude', 'skills', 'graft', 'SKILL.md')));
+});
+
+test('runInit does not rewrite a settings.json that already carries the wiring', () => {
+  // Every entry point replays the wiring (project hook, user-level hook, MCP
+  // server boot), so a re-run that rewrote identical bytes would churn a
+  // committed file for nothing — and, on a real conflict, give two writers a
+  // window to interleave in.
+  const d = fresh();
+  const p = join(d, '.claude', 'settings.json');
+  assert.equal(runInit(d, { build: false, home: fresh() }).settings.action, 'created');
+  const first = statSync(p);
+  assert.equal(runInit(d, { build: false, home: fresh() }).settings.action, 'unchanged');
+  const second = statSync(p);
+  assert.equal(second.ino, first.ino, 'same file, not a replaced copy');
+  assert.equal(second.mtimeMs, first.mtimeMs, 'and its mtime is untouched');
 });
 
 test('postinstall prints the nudge in a fresh dir', () => {

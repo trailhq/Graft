@@ -1,8 +1,9 @@
-import { mkdirSync, writeFileSync, readFileSync, chmodSync } from 'node:fs';
+import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { installClaudeGlobal, type GlobalWrite } from '../hosts/claude-global.js';
+import { readJsonObject, writeOwned } from '../hosts/config-write.js';
 import { mergeGraftSettings } from './settings-merge.js';
 import { statuslineShim, hooksShim } from './shim-template.js';
 import { skillTemplate } from './skill-template.js';
@@ -52,6 +53,9 @@ export function buildGraphIfMissing(dir: string, opts: { build?: boolean; cliPat
 
 export interface InitResult {
   settingsPath: string;
+  /** the `.claude/settings.json` write — `skipped-unparseable` when the file was
+   *  left exactly as the user has it because it does not parse. */
+  settings: GlobalWrite;
   shims: string[];
   skill: string;
   /** the `.mcp.json` write registering the graft MCP server for Claude Code. */
@@ -71,11 +75,36 @@ export function runInit(
 
   mkdirSync(dirname(statusline), { recursive: true });
 
+  // `readJsonObject`, NOT a bare `JSON.parse` in a try/catch that falls through to
+  // `{}`. Every other writer in this layer (the Codex/Cursor hook installers, the
+  // MCP key merge, the user-level install) opens through it, and the difference is
+  // the whole bug: a read that fails is not the same as a read of a file with
+  // nothing in it, and treating it as one replaces a file graft cannot parse with
+  // a graft-only file — silently dropping the user's `permissions`, `outputStyle`
+  // and hooks, and leaving the result dirty enough to commit.
   const settingsPath = settings;
-  let existing: Record<string, any> = {};
-  try { existing = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch { /* none/invalid → start fresh */ }
-  const { merged, warnings } = mergeGraftSettings(existing, { statusline: opts.statusline });
-  writeFileSync(settingsPath, `${JSON.stringify(merged, null, 2)}\n`);
+  const loaded = readJsonObject(settingsPath);
+  let settingsWrite: GlobalWrite = {
+    id: 'claude-settings', path: settingsPath, action: 'skipped-unparseable',
+  };
+  const warnings: string[] = [];
+  if (loaded === 'unparseable') {
+    // The shims and the skill below are still written — they are graft's own files
+    // and the wiring they point at is missing precisely when this file is broken.
+    // What must not happen is graft overwriting a file it could not read.
+    warnings.push(
+      `${settingsPath} is not valid JSON — left unchanged. Fix or remove it, then re-run graft init to install the Claude Code wiring.`,
+    );
+  } else {
+    const { root } = loaded;
+    const { merged, warnings: mergeWarnings } = mergeGraftSettings(root, { statusline: opts.statusline });
+    warnings.push(...mergeWarnings);
+    // `writeOwned` skips the write when the bytes already match, so a wiring replay
+    // on an already-wired repo leaves the file (and its mtime) alone, and its
+    // scratch-file-and-rename write means a concurrent reader never sees the
+    // truncated prefix a plain `writeFileSync` would hand it.
+    settingsWrite = writeOwned('claude-settings', settingsPath, `${JSON.stringify(merged, null, 2)}\n`);
+  }
 
   const sl = statusline;
   const hk = hooks;
@@ -102,5 +131,5 @@ export function runInit(
   const global = opts.global === false ? [] : installClaudeGlobal(opts.home ?? homedir());
 
   const built = buildGraphIfMissing(dir, opts);
-  return { settingsPath, shims: [sl, hk], skill: skillPath, mcp, global, warnings, built };
+  return { settingsPath, settings: settingsWrite, shims: [sl, hk], skill: skillPath, mcp, global, warnings, built };
 }
