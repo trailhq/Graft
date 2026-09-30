@@ -598,11 +598,14 @@ test('promptAskTimeout is derived from the installed hook budget', () => {
   process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'graft-nouser-'));
   try {
     // A repo wired before the budget was raised.
-    assert.equal(promptAskTimeout(withSettings(8000)), 6000);
+    assert.equal(promptAskTimeout(withSettings(8)), 6000);
     // A repo wired after.
+    assert.equal(promptAskTimeout(withSettings(15)), 13000);
+    // Older graft versions wrote milliseconds; those still read the same.
+    assert.equal(promptAskTimeout(withSettings(8000)), 6000);
     assert.equal(promptAskTimeout(withSettings(15000)), 13000);
     // Never so small the child has no chance.
-    assert.equal(promptAskTimeout(withSettings(1000)), 4000);
+    assert.equal(promptAskTimeout(withSettings(1)), 4000);
 
     // Nothing readable: assume the conservative 8s budget the other hooks carry.
     assert.equal(promptAskTimeout(withSettings(undefined)), 6000);
