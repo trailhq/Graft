@@ -484,12 +484,13 @@ export function planRetract(repo: string, opts: RetractOpts = {}): Retraction[] 
 }
 
 /**
- * Remove graft's contribution from every target. Reports every target it
+ * Report graft's contribution by default; remove it only with `apply: true`.
+ * Reports every target it
  * considered, including the ones that were already clean, so a caller can show
  * either the full sweep or just what changed.
  */
 export function runRetract(repo: string, opts: RetractOpts = {}): Retraction[] {
-  const apply = opts.apply !== false;
+  const apply = opts.apply === true;
   return targets(repo, opts).map(({ run, ...t }) => ({ ...t, action: run(apply) }));
 }
 
