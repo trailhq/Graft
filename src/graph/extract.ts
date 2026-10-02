@@ -92,7 +92,10 @@ export interface RawEdge {
   relation: Relation;
   file: string; // the file this edge originates in (scopes name resolution)
   targetId?: string; // already-resolved target (contains)
-  specifier?: string; // module path to resolve (imports / imported-symbol references)
+  /** Module path to resolve (imports / imported-symbol references). Also set on a
+   * Gleam `calls`, where the import table names the callee's module exactly — the
+   * name is then looked up in that file alone rather than across the repo. */
+  specifier?: string;
   name?: string; // symbol name to resolve (extends/implements/calls)
   viaMember?: boolean; // calls: was it `obj.foo()` (→ prefer method targets)?
   /** calls with viaMember: the receiver's resolved type name (from bindings /
