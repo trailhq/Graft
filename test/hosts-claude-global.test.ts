@@ -10,9 +10,11 @@
  * `git worktree add` rather than faking it, because the whole failure lives in what
  * git chooses to carry across.
  *
- * The rest hold the two properties that keep the fix safe to ship: nothing lands in
- * `~` when `--no-global` is passed, and `graft uninstall` removes exactly what an
- * init added.
+ * The rest hold the three properties that keep the fix safe to ship: the five hook
+ * commands are addressed through the home variable rather than the absolute path
+ * of whoever ran `graft init` (so a version-controlled `settings.json` survives
+ * being restored on another machine); nothing lands in `~` when `--no-global` is
+ * passed; and `graft uninstall` removes exactly what an init added.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,11 +25,10 @@ process.env.GRAFT_MCP_NPX = '1';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { claudeGlobalTargets, globalHelpersDir, installClaudeGlobal } from '../src/hosts/claude-global.js';
+import { claudeGlobalTargets, globalHelpersCmdDir, globalHelpersDir, installClaudeGlobal } from '../src/hosts/claude-global.js';
 import { runInit } from '../src/claude/init.js';
 import { planRetract, runRetract } from '../src/hosts/retract.js';
 import { planInit } from '../src/hosts/plan.js';
-import { toPosixPath } from '../src/util/paths.js';
 import { tmpRepo } from './helpers.js';
 
 /**
@@ -104,16 +105,83 @@ test('a worktree of a repo that ignores *.json loses both repo-level triggers', 
   assert.ok(readJson(userMcpOf(home)).mcpServers?.graft, 'user-scope MCP registration');
 });
 
-test('the user-level hook commands name the shim absolutely, not via CLAUDE_PROJECT_DIR', () => {
+test('the user-level hook commands name the shim through $HOME, not an absolute path', () => {
   const home = tmpRepo('cgabs');
-  installClaudeGlobal(home);
+  installClaudeGlobal(home, 'linux');
 
   const cmd = readJson(settingsOf(home)).hooks.SessionStart[0].hooks[0].command;
   // The repo form would resolve inside whatever project is open — precisely the
   // project that has no shim, which is the case this install exists to cover.
-  assert.ok(!cmd.includes('CLAUDE_PROJECT_DIR'), `absolute, got: ${cmd}`);
-  // Posix form: the command uses one separator throughout, on every platform.
-  assert.ok(cmd.includes(toPosixPath(shimOf(home))), `names the user-level shim, got: ${cmd}`);
+  assert.ok(!cmd.includes('CLAUDE_PROJECT_DIR'), `not project-relative, got: ${cmd}`);
+  // Home-relative, because ~/.claude/settings.json is a file people version, and an
+  // expanded path is correct only for the account that ran `graft init`.
+  assert.ok(cmd.includes('$HOME/.claude/helpers/graft-hooks.cjs'), `names the shim via $HOME, got: ${cmd}`);
+  assert.ok(!cmd.includes(home), `no machine-specific path, got: ${cmd}`);
+});
+
+test('every one of the five user-level hooks carries the home-relative path', () => {
+  const home = tmpRepo('cgallhooks');
+  installClaudeGlobal(home, 'linux');
+
+  const hooks = readJson(settingsOf(home)).hooks;
+  const cmds: string[] = [
+    ...hooks.SessionStart.map((b: any) => b.hooks[0].command),
+    ...hooks.UserPromptSubmit.map((b: any) => b.hooks[0].command),
+    ...hooks.Stop.map((b: any) => b.hooks[0].command),
+    ...hooks.PostToolUse.flatMap((b: any) => b.hooks.map((h: any) => h.command)),
+  ];
+  assert.equal(cmds.length, 5, `all five hooks are wired, got: ${JSON.stringify(hooks)}`);
+  for (const cmd of cmds) {
+    assert.ok(cmd.includes('$HOME/'), `home-relative, got: ${cmd}`);
+    assert.ok(!cmd.includes(home), `no machine-specific path, got: ${cmd}`);
+  }
+});
+
+test('the home variable follows the platform: cmd.exe has no $HOME', () => {
+  assert.equal(globalHelpersCmdDir('linux'), '$HOME/.claude/helpers');
+  assert.equal(globalHelpersCmdDir('darwin'), '$HOME/.claude/helpers');
+  // A literal `$HOME` under cmd.exe would point the five hooks at a directory named
+  // `$HOME`, which is the same silent no-op on Windows that this change removes.
+  assert.equal(globalHelpersCmdDir('win32'), '%USERPROFILE%/.claude/helpers');
+
+  const home = tmpRepo('cgwin');
+  installClaudeGlobal(home, 'win32');
+  const cmd = readJson(settingsOf(home)).hooks.SessionStart[0].hooks[0].command;
+  assert.ok(cmd.includes('%USERPROFILE%/.claude/helpers/graft-hooks.cjs'), `got: ${cmd}`);
+  assert.ok(!cmd.includes('$HOME'), `no POSIX variable on Windows, got: ${cmd}`);
+});
+
+test('re-running over an install that baked in one user home replaces it', () => {
+  const home = tmpRepo('cgmigrate');
+  mkdirSync(join(home, '.claude'), { recursive: true });
+  // What graft ≤0.20.0 wrote: the shim addressed by the absolute path of whoever ran
+  // `graft init`. A fresh clone of someone's settings.json arrives looking like this.
+  const stale = join('/Users', 'someone-else', '.claude', 'helpers');
+  writeFileSync(settingsOf(home), JSON.stringify({
+    hooks: {
+      SessionStart: [{ hooks: [{ type: 'command', command: `node "${stale}/graft-hooks.cjs" session-start`, timeout: 8000 }] }],
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: `node "${stale}/graft-hooks.cjs" prompt`, timeout: 15000 }] }],
+      Stop: [{ hooks: [{ type: 'command', command: `node "${stale}/graft-hooks.cjs" stop`, timeout: 8000 }] }],
+    },
+  }, null, 2));
+
+  installClaudeGlobal(home, 'linux');
+
+  const raw = readFileSync(settingsOf(home), 'utf8');
+  assert.ok(!raw.includes('someone-else'), `the old absolute path is gone, got: ${raw}`);
+  // `isGraftEntry` keys on the shim filename, so the stale entries are recognised as
+  // graft's own and replaced rather than left stacked beside the new ones.
+  const hooks = readJson(settingsOf(home)).hooks;
+  const graftCmds = Object.values(hooks)
+    .flat()
+    .flatMap((b: any) => b.hooks.map((h: any) => h.command))
+    .filter((c: string) => c.includes('graft-hooks.cjs'));
+  assert.equal(graftCmds.length, 5, `no stacking, got: ${JSON.stringify(graftCmds)}`);
+  for (const cmd of graftCmds) assert.ok(cmd.includes('$HOME/'), `home-relative, got: ${cmd}`);
+
+  // ...and that settles: a second run has nothing left to change.
+  const second = installClaudeGlobal(home, 'linux');
+  assert.ok(second.every((w) => w.action === 'unchanged'), `idempotent, got ${JSON.stringify(second)}`);
 });
 
 /* ------------------------------------------------------------------ *
