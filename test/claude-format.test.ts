@@ -228,3 +228,13 @@ test('renderStatusline shows tokens alone until a turn has been billed', () => {
   assert.match(line, /~100,000 tok saved/);
   assert.doesNotMatch(line, /\$/);
 });
+
+test('renderStatusline names a workspace parent with an unbuilt child, and only then', () => {
+  const stats = { ...emptyStats(), nodeCount: 3, edgeCount: 1, totalCount: 3 };
+  const partial = strip(renderStatusline(stats, null, { ctxPct: null, workspace: { built: 1, total: 2 } })[0]);
+  assert.match(partial, /graft · workspace 1\/2 repos built · 3 nodes \/ 1 edges · /);
+  const all = strip(renderStatusline(stats, null, { ctxPct: null, workspace: { built: 2, total: 2 } })[0]);
+  assert.doesNotMatch(all, /workspace/, 'every child built: the counts are the whole workspace');
+  const plain = strip(renderStatusline(stats, null, { ctxPct: null })[0]);
+  assert.doesNotMatch(plain, /workspace/, 'a plain repo gets no workspace segment');
+});

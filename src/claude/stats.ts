@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GraphV1 } from '../graph/types.js';
 import type { Stats } from './state.js';
@@ -42,14 +42,14 @@ export function computeStats(w: GraphV1): GraphStats {
  * child has a graph yet, which is the one case that really is "not built".
  */
 export function computeWorkspaceStats(projectDir: string): GraphStats | null {
-  const ws = readJson<{ version: number; children: string[] }>(join(resolveContextDir(projectDir), 'workspace.json'));
-  if (!ws || !Array.isArray(ws.children) || ws.children.length === 0) return null;
+  const children = workspaceChildren(projectDir);
+  if (!children) return null;
   const parts: GraphStats[] = [];
-  for (const child of ws.children) {
+  for (const child of children) {
     try {
-      const raw = readFileSync(join(projectDir, child, 'graft', '.graph', 'wiring.json'), 'utf8');
+      const raw = readFileSync(childWiringPath(projectDir, child), 'utf8');
       parts.push(computeStats(JSON.parse(raw) as GraphV1));
-    } catch { /* listed but not built yet — coverageNote's job, not the bar's */ }
+    } catch { /* listed but not built yet — counted by workspaceCoverage, not summed */ }
   }
   if (parts.length === 0) return null;
   const sum = (k: 'nodeCount' | 'edgeCount' | 'totalCount' | 'readyCount') => parts.reduce((n, p) => n + p[k], 0);
@@ -60,4 +60,32 @@ export function computeWorkspaceStats(projectDir: string): GraphStats | null {
     totalCount: sum('totalCount'),
     readyCount: sum('readyCount'),
   };
+}
+
+/**
+ * How many of a workspace parent's listed children have a graph. The summed
+ * counts above cover only the built ones, so without this the bar gives no hint
+ * that a child is missing. Kept apart from the sum because the statusline stops
+ * calling that once the Stop-hook sync has written real counts into the parent's
+ * cache, and a child can still be unbuilt then. A child counts as built when its
+ * `wiring.json` exists; only a stat per child, since this runs on every render.
+ * Null when `projectDir` is not a workspace parent.
+ */
+export function workspaceCoverage(projectDir: string): { built: number; total: number } | null {
+  const children = workspaceChildren(projectDir);
+  if (!children) return null;
+  const built = children.filter((child) => existsSync(childWiringPath(projectDir, child))).length;
+  return { built, total: children.length };
+}
+
+/** The children listed in the parent's `workspace.json`, or null when there are none. */
+function workspaceChildren(projectDir: string): string[] | null {
+  const ws = readJson<{ version: number; children: string[] }>(join(resolveContextDir(projectDir), 'workspace.json'));
+  if (!ws || !Array.isArray(ws.children) || ws.children.length === 0) return null;
+  return ws.children;
+}
+
+/** A child's graph, at `<child>/graft/` with no override (see computeWorkspaceStats). */
+function childWiringPath(projectDir: string, child: string): string {
+  return join(projectDir, child, 'graft', '.graph', 'wiring.json');
 }

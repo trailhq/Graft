@@ -25,12 +25,16 @@ export function freshnessSegment(s: Stats): string {
 export function renderStatusline(
   stats: Stats | null,
   session: SessionState | null,
-  ctx: { ctxPct: number | null },
+  ctx: { ctxPct: number | null; workspace?: { built: number; total: number } | null },
 ): string[] {
   if (!stats) {
     return [C.muted('◤ graft · not built · run ') + C.text('graft build')];
   }
   const top = [C.muted('◤ ') + C.indigo('graft'), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];
+  // At a workspace parent the counts cover only the children built so far. When
+  // that is not all of them, say so; otherwise nothing hints that one is missing.
+  const ws = ctx.workspace;
+  if (ws && ws.built < ws.total) top.splice(1, 0, C.amber(`workspace ${ws.built}/${ws.total} repos built`));
   top.push(freshnessSegment(stats));
   const saved = session?.savedTokens ?? 0;
   if (saved > 0) {
