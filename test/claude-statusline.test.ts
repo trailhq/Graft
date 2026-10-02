@@ -1,13 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { resolveStats } from '../src/claude/statusline.js';
+import { workspaceCoverage } from '../src/claude/stats.js';
 import { renderStatusline } from '../src/claude/format.js';
 import { writeStats, emptyStats } from '../src/claude/state.js';
 
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+// Absolute, so the spawned statusline resolves tsx whatever its cwd.
+const TSX = pathToFileURL(createRequire(join(process.cwd(), 'x.js')).resolve('tsx')).href;
+const STATUSLINE = pathToFileURL(resolve(process.cwd(), 'src/claude/statusline.ts')).href;
 
 function repo(): string { return mkdtempSync(join(tmpdir(), 'graft-sl-')); }
 function writeWiring(dir: string, obj: unknown): void {
@@ -68,4 +75,88 @@ test('a 0-node cache without wiring.json is still not built', () => {
   const line = strip(renderStatusline(null, null, { ctxPct: null })[0]);
   assert.match(line, /not built/);
   assert.match(line, /graft build/);
+});
+
+/**
+ * A workspace parent (#433): its graft/ holds only workspace.json, the graphs
+ * live in each child's graft/. Before this, the bar read "not built" at the
+ * parent although every child had built and every federated query worked.
+ */
+function workspace(children: Record<string, { nodes: number; edges: number; langs: string[] } | null>): string {
+  const p = repo();
+  mkdirSync(join(p, 'graft'), { recursive: true });
+  writeFileSync(join(p, 'graft', 'workspace.json'), JSON.stringify({ version: 1, children: Object.keys(children) }));
+  for (const [child, w] of Object.entries(children)) {
+    if (!w) continue; // listed, not built yet
+    writeWiring(join(p, child), {
+      meta: { nodeCount: w.nodes, edgeCount: w.edges, languages: w.langs },
+      nodes: [{ id: 'a', summary_state: 'ready' }, { id: 'b', summary_state: 'pending' }],
+      edges: [],
+    });
+  }
+  return p;
+}
+
+test('a workspace parent sums its children instead of reading as not built (#433)', () => {
+  const p = workspace({ api: { nodes: 10, edges: 5, langs: ['typescript'] }, web: { nodes: 20, edges: 7, langs: ['python', 'typescript'] } });
+  const s = resolveStats(p)!;
+  assert.equal(s.nodeCount, 30);
+  assert.equal(s.edgeCount, 12);
+  assert.deepEqual(s.languages, ['python', 'typescript'], 'union of the children, sorted');
+  assert.equal(s.readyCount, 2, 'summed across children');
+  assert.equal(s.dirty, false, 'no cache, no drift signal — same as the single-repo wiring fallback');
+  const line = strip(renderStatusline(s, null, { ctxPct: null })[0]);
+  assert.match(line, /30 nodes \/ 12 edges/);
+  assert.doesNotMatch(line, /not built/);
+});
+
+test('a zeroed dirty cache at a workspace parent keeps its flags and takes the counts from the children', () => {
+  // This is the exact state the hooks leave behind: PostToolUse patches a
+  // fresh, all-zero cache with dirty: true, and there is no wiring.json here.
+  const p = workspace({ api: { nodes: 10, edges: 5, langs: ['typescript'] }, web: { nodes: 20, edges: 7, langs: ['go'] } });
+  writeStats(p, { ...emptyStats(), dirty: true, staleCount: 2, lastFile: 'a.ts' });
+  const s = resolveStats(p)!;
+  assert.equal(s.nodeCount, 30, 'counts come from the children');
+  assert.equal(s.dirty, true, 'the live drift state the cache carries survives');
+  assert.equal(s.staleCount, 2);
+  assert.equal(s.lastFile, 'a.ts');
+});
+
+test('a workspace parent whose children are not built yet is still not built', () => {
+  const p = workspace({ api: null, web: null });
+  assert.equal(resolveStats(p), null);
+});
+
+test('an unbuilt child is skipped; the built ones still count', () => {
+  const p = workspace({ api: { nodes: 10, edges: 5, langs: ['typescript'] }, web: null });
+  const s = resolveStats(p)!;
+  assert.equal(s.nodeCount, 10);
+  assert.equal(s.edgeCount, 5);
+});
+
+test('workspaceCoverage counts the built children, and is null for a plain repo', () => {
+  assert.deepEqual(workspaceCoverage(workspace({ api: { nodes: 10, edges: 5, langs: [] }, web: null })), { built: 1, total: 2 });
+  assert.deepEqual(workspaceCoverage(workspace({ api: { nodes: 10, edges: 5, langs: [] }, web: { nodes: 1, edges: 0, langs: [] } })), { built: 2, total: 2 });
+  const plain = repo();
+  writeWiring(plain, { meta: { nodeCount: 1, edgeCount: 0, languages: [] }, nodes: [], edges: [] });
+  assert.equal(workspaceCoverage(plain), null);
+});
+
+test('the statusline at a workspace parent says how many children are built, also after the sync', () => {
+  const p = workspace({ api: { nodes: 10, edges: 5, langs: ['typescript'] }, web: null });
+  const render = () => {
+    const r = spawnSync(process.execPath, ['--import', TSX, '-e', `import(${JSON.stringify(STATUSLINE)}).then((m) => m.main())`], {
+      input: JSON.stringify({ session_id: 't' }),
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDE_PROJECT_DIR: p },
+      timeout: 60_000,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    return strip(r.stdout).split('\n')[0];
+  };
+  assert.match(render(), /workspace 1\/2 repos built · 10 nodes \/ 5 edges/);
+  // Once the Stop-hook sync has written real counts, the bar reads the parent's cache
+  // and never sums the children again; the unbuilt child must still show.
+  writeStats(p, { ...emptyStats(), nodeCount: 10, edgeCount: 5, syncedAt: new Date().toISOString() });
+  assert.match(render(), /workspace 1\/2 repos built · 10 nodes \/ 5 edges · ✓ synced/);
 });

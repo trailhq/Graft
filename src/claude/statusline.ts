@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { renderStatusline, renderSubagent } from './format.js';
 import { readStats, readSession, emptyStats, type Stats } from './state.js';
-import { readWiring, computeStats } from './stats.js';
+import { readWiring, computeStats, computeWorkspaceStats, workspaceCoverage } from './stats.js';
 
 /**
  * The statusline's fast path is the hook-maintained cache (graft/.cache/stats.json).
@@ -12,12 +12,18 @@ import { readWiring, computeStats } from './stats.js';
  * is missing. The graph carries no drift signal, so it reads as synced until the next
  * edit repopulates the cache. Still a pure read (no subprocess): the cache is preferred
  * because it carries live dirty/stale state.
+ *
+ * A workspace parent has neither a graph nor, until the first sync, a non-empty cache:
+ * the hooks write a zeroed `dirty` cache there and the graphs sit in the children. The
+ * counts then come from the children (#433) and the cache still supplies the live flags.
  */
 export function resolveStats(dir: string): Stats | null {
   const cached = readStats(dir);
   if (cached && cached.nodeCount > 0) return cached;
   const wiring = readWiring(dir);
   if (wiring) return { ...emptyStats(), ...computeStats(wiring) };
+  const workspace = computeWorkspaceStats(dir);
+  if (workspace) return { ...(cached ?? emptyStats()), ...workspace };
   return null;
 }
 
@@ -29,7 +35,9 @@ export function main(): void {
   const agent = input?.agent?.name;
   if (agent) { process.stdout.write(renderSubagent(agent, session)); return; }
   const stats = resolveStats(dir);
+  // Read on every render, not from the cache: a child can be unbuilt after the sync.
+  const workspace = stats ? workspaceCoverage(dir) : null;
   const raw = input?.context_window?.used_percentage;
   const ctxPct = typeof raw === 'number' ? Math.round(raw) : null;
-  process.stdout.write(renderStatusline(stats, session, { ctxPct }).join('\n'));
+  process.stdout.write(renderStatusline(stats, session, { ctxPct, workspace }).join('\n'));
 }
