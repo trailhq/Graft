@@ -7,12 +7,12 @@
  * resolved against the whole-repo node index later, in build.ts.
  */
 import Parser from "tree-sitter";
+import { createRequire } from "node:module";
 import TypeScript from "tree-sitter-typescript";
 import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
 import R from "tree-sitter-r";
 import Java from "tree-sitter-java";
-import Kotlin from "tree-sitter-kotlin";
 import Swift from "tree-sitter-swift";
 import PHP from "tree-sitter-php";
 import { basename } from "node:path";
@@ -311,17 +311,59 @@ const FUNCTION_VALUE_TYPES = new Set([
 const EMPTY_SET: ReadonlySet<string> = new Set();
 
 const parser = new Parser();
-const GRAMMARS: Record<Language, unknown> = {
+const require = createRequire(import.meta.url);
+
+const GRAMMARS: Record<Exclude<Language, "kotlin">, unknown> = {
   typescript: TypeScript.typescript,
   tsx: TypeScript.tsx,
   python: Python,
   go: Go,
   r: R,
   java: Java,
-  kotlin: Kotlin,
   swift: Swift,
   php: PHP.php,
 };
+
+const KOTLIN_PARSER_UNAVAILABLE =
+  "Kotlin files were skipped because the optional tree-sitter-kotlin parser is unavailable. " +
+  "Reinstall @nanonets/graft in an environment where tree-sitter-kotlin can build to index .kt and .kts files.";
+
+let kotlinGrammar: unknown | null | undefined;
+let loadKotlinGrammar = (): unknown => require("tree-sitter-kotlin");
+
+/**
+ * Resolve the optional Kotlin native addon only when a Kotlin file is encountered.
+ * A missing or unloadable addon must never prevent another language from building.
+ */
+export function kotlinParserUnavailableMessage(): string | null {
+  if (kotlinGrammar === undefined) {
+    try {
+      kotlinGrammar = loadKotlinGrammar();
+    } catch {
+      kotlinGrammar = null;
+    }
+  }
+  return kotlinGrammar === null ? KOTLIN_PARSER_UNAVAILABLE : null;
+}
+
+/** Test seam for the optional native addon. Not part of Graft's package API. */
+export function swapKotlinGrammarLoaderForTest(loader: () => unknown): () => void {
+  const previousLoader = loadKotlinGrammar;
+  const previousGrammar = kotlinGrammar;
+  loadKotlinGrammar = loader;
+  kotlinGrammar = undefined;
+  return () => {
+    loadKotlinGrammar = previousLoader;
+    kotlinGrammar = previousGrammar;
+  };
+}
+
+function grammarFor(lang: Language): unknown {
+  if (lang !== "kotlin") return GRAMMARS[lang];
+  const unavailable = kotlinParserUnavailableMessage();
+  if (unavailable) throw new Error(unavailable);
+  return kotlinGrammar;
+}
 
 export interface WalkCtx {
   rel: string;
@@ -385,7 +427,7 @@ function parseSource(source: string): Parser.SyntaxNode {
 }
 
 export function extractFile(rel: string, source: string, lang: Language): ExtractResult {
-  parser.setLanguage(GRAMMARS[lang] as never);
+  parser.setLanguage(grammarFor(lang) as never);
   const root = parseSource(source);
   const bindings = collectBindings(root, lang);
   const importedSymbols = collectImportedSymbols(root, lang);

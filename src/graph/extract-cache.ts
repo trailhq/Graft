@@ -48,6 +48,9 @@ export interface ExtractEntry {
    * re-reports the same error and contributes no nodes, exactly as a cold build
    * would. */
   error?: string;
+  /** The optional parser for this file's language was unavailable. Unlike `error`,
+   * this entry is re-parsed if that parser becomes available on a later run. */
+  skipped?: true;
 }
 
 export interface ExtractCache {
