@@ -502,6 +502,26 @@ test("breadth tier: C #include becomes a resolved file→file import (local only
   assert.deepEqual(targetsOf("src/amb.c"), ["util.h"], "ambiguous include kept external, never guessed");
 });
 
+// A C++ header routed to the C grammar misparses a big brace initializer into
+// right-nested comma_expressions: the tree is as deep as the array is long. The
+// walks over it must not recurse per level, or V8's stack overflows (RangeError).
+test("breadth tier: a C header with a 20,000-element initializer extracts without overflowing the stack", async () => {
+  await warmGenericGrammars(["c"]);
+  const n = 20000;
+  const values = Array.from({ length: n }, (_, i) => String(i + 1)).join(", ");
+  const src =
+    '#include "dep.h"\n' +
+    "#include <array>\n" +
+    `std::array<int, ${n}> data = { ${values} };\n` +
+    "int after(void) { return 0; }\n";
+  const { nodes, rawEdges } = extractGeneric("big.h", src, "c");
+  assert.ok(
+    rawEdges.some((e) => e.relation === "imports" && e.specifier === "dep.h"),
+    "the quoted include before the array is captured",
+  );
+  assert.ok(nodes.some((x) => x.kind === "function" && x.name === "after"), "the function after the array is extracted");
+});
+
 // Rust `use crate::…` → a file→module import, resolved against the file's crate root
 // (the lib.rs/main.rs dir). The longest-prefix rule disambiguates a module from an item
 // and a `foo.rs` from a `foo/mod.rs`; std/super/external/glob are skipped, and an

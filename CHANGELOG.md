@@ -17,6 +17,10 @@
   failure no longer needs a manual cache delete to clear.
 - **A `.vue` wrapper grammar that throws is now a build error** for that file,
   not a silently symbol-less file cached as a success.
+- **A deeply nested syntax tree no longer fails with `Maximum call stack size
+  exceeded`.** A C++ header with a large brace initializer misparses under the
+  C grammar into a tree one level deep per element; the breadth-tier walks now
+  use an explicit stack instead of recursing.
 
 ## 0.28.0
 

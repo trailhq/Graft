@@ -406,21 +406,32 @@ export function extractGeneric(rel: string, source: string, langName: string): E
   }
 }
 
+/** Pre-order DFS over `root` and its named descendants, on an explicit stack: a
+ * misparse can nest one level per element (a C++ array initializer under the C
+ * grammar runs thousands deep), which overflows V8's stack if the walk recurses. Children
+ * are pushed in reverse so the visit order matches a recursive walk. */
+function forEachNamedNode(root: TsNode, fn: (n: TsNode) => void): void {
+  const stack: TsNode[] = [root];
+  while (stack.length) {
+    const n = stack.pop()!;
+    fn(n);
+    for (let i = (n.namedChildCount ?? 0) - 1; i >= 0; i--) {
+      const c = n.namedChild?.(i);
+      if (c) stack.push(c);
+    }
+  }
+}
+
 /** PHP `use App\Models\User;` → a file→class-file `imports` raw edge, one per imported
  * name (a `{ … }` group expands to several). `use function`/`use const` are skipped —
  * those name a symbol, not a PSR-4 class file. resolve.ts settles the fully-qualified
  * name to the in-repo file by namespace suffix, and drops it when it can't. */
 function extractPhpUses(root: TsNode, rel: string, rawEdges: RawEdge[]): void {
-  const visit = (n: TsNode): void => {
+  forEachNamedNode(root, (n) => {
     if (n.type === "namespace_use_declaration") {
       for (const fqn of phpUseNames(n.text)) rawEdges.push({ source: rel, relation: "imports", specifier: fqn, file: rel });
     }
-    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
-      const c = n.namedChild?.(i);
-      if (c) visit(c);
-    }
-  };
-  visit(root);
+  });
 }
 
 /** The fully-qualified class names a PHP `use` declaration imports. Handles a plain
@@ -444,17 +455,12 @@ function phpUseNames(text: string): string[] {
  * `super::`, `self::`, external crates, and globs are skipped — resolve.ts settles the
  * path against the file's crate root, and drops it when it can't. */
 function extractUses(root: TsNode, rel: string, rawEdges: RawEdge[]): void {
-  const visit = (n: TsNode): void => {
+  forEachNamedNode(root, (n) => {
     if (n.type === "use_declaration") {
       const spec = rustUseModule(n.text);
       if (spec !== null) rawEdges.push({ source: rel, relation: "imports", specifier: spec ? `crate/${spec}` : "crate", file: rel });
     }
-    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
-      const c = n.namedChild?.(i);
-      if (c) visit(c);
-    }
-  };
-  visit(root);
+  });
 }
 
 /** The crate-relative path a Rust `use crate::…` names (`::`→`/`), or null when it is not
@@ -479,7 +485,7 @@ function rustUseModule(text: string): string | null {
  * in-repo header (relative to the including file, else a unique path-suffix match), and
  * keeps it as an external string when it cannot — never a guessed edge. */
 function extractIncludes(root: TsNode, rel: string, rawEdges: RawEdge[]): void {
-  const visit = (n: TsNode): void => {
+  forEachNamedNode(root, (n) => {
     if (n.type === "preproc_include") {
       const raw = n.childForFieldName?.("path")?.text ?? "";
       if (raw.startsWith('"')) {
@@ -487,12 +493,7 @@ function extractIncludes(root: TsNode, rel: string, rawEdges: RawEdge[]): void {
         if (spec) rawEdges.push({ source: rel, relation: "imports", specifier: spec, file: rel });
       }
     }
-    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
-      const c = n.namedChild?.(i);
-      if (c) visit(c);
-    }
-  };
-  visit(root);
+  });
 }
 
 /**
@@ -769,18 +770,13 @@ function nodeName(node: TsNode): string | null {
 /** Walker fallback: DFS every named node, emit a def for each classified one
  * (symbols only — no call resolution without a query). */
 function walkExtract(root: TsNode, mkDef: (name: string, kind: Kind, whole: TsNode) => void): void {
-  const visit = (n: TsNode): void => {
+  forEachNamedNode(root, (n) => {
     const kind = classifyKind(n.type);
     if (kind) {
       const name = nodeName(n);
       if (name) mkDef(name, kind, n);
     }
-    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
-      const c = n.namedChild?.(i);
-      if (c) visit(c);
-    }
-  };
-  visit(root);
+  });
 }
 
 /** Minimal structural view of a web-tree-sitter node — shared with container.ts. */
