@@ -49,6 +49,9 @@ export interface GraphRunOptions {
   lsp?: boolean;
   /** Repo-relative directory prefixes to limit the build to (`--only-dir`). */
   onlyDirs?: string[];
+  /** Parser child processes for a large cold build (`graft build --workers`);
+   * `"auto"` sizes the pool. Absent/0 parses in-thread. */
+  parseWorkers?: number | "auto";
   onProgress?: GraphBuildOptions["onProgress"];
 }
 
@@ -93,6 +96,7 @@ export class Graft {
       contextDir: this.cfg.contextDir,
       summarizer: opts.llm ? this.cruxSummarizer() : undefined,
       concurrency: opts.concurrency,
+      parseWorkers: opts.parseWorkers,
       reuse: opts.reuse,
       lsp: opts.lsp,
       onlyDirs: opts.onlyDirs,
