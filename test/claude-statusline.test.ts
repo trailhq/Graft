@@ -69,3 +69,60 @@ test('a 0-node cache without wiring.json is still not built', () => {
   assert.match(line, /not built/);
   assert.match(line, /graft build/);
 });
+
+/**
+ * A workspace parent (#433): its graft/ holds only workspace.json, the graphs
+ * live in each child's graft/. Before this, the bar read "not built" at the
+ * parent although every child had built and every federated query worked.
+ */
+function workspace(children: Record<string, { nodes: number; edges: number; langs: string[] } | null>): string {
+  const p = repo();
+  mkdirSync(join(p, 'graft'), { recursive: true });
+  writeFileSync(join(p, 'graft', 'workspace.json'), JSON.stringify({ version: 1, children: Object.keys(children) }));
+  for (const [child, w] of Object.entries(children)) {
+    if (!w) continue; // listed, not built yet
+    writeWiring(join(p, child), {
+      meta: { nodeCount: w.nodes, edgeCount: w.edges, languages: w.langs },
+      nodes: [{ id: 'a', summary_state: 'ready' }, { id: 'b', summary_state: 'pending' }],
+      edges: [],
+    });
+  }
+  return p;
+}
+
+test('a workspace parent sums its children instead of reading as not built (#433)', () => {
+  const p = workspace({ api: { nodes: 10, edges: 5, langs: ['typescript'] }, web: { nodes: 20, edges: 7, langs: ['python', 'typescript'] } });
+  const s = resolveStats(p)!;
+  assert.equal(s.nodeCount, 30);
+  assert.equal(s.edgeCount, 12);
+  assert.deepEqual(s.languages, ['python', 'typescript'], 'union of the children, sorted');
+  assert.equal(s.readyCount, 2, 'summed across children');
+  assert.equal(s.dirty, false, 'no cache, no drift signal — same as the single-repo wiring fallback');
+  const line = strip(renderStatusline(s, null, { ctxPct: null })[0]);
+  assert.match(line, /30 nodes \/ 12 edges/);
+  assert.doesNotMatch(line, /not built/);
+});
+
+test('a zeroed dirty cache at a workspace parent keeps its flags and takes the counts from the children', () => {
+  // This is the exact state the hooks leave behind: PostToolUse patches a
+  // fresh, all-zero cache with dirty: true, and there is no wiring.json here.
+  const p = workspace({ api: { nodes: 10, edges: 5, langs: ['typescript'] }, web: { nodes: 20, edges: 7, langs: ['go'] } });
+  writeStats(p, { ...emptyStats(), dirty: true, staleCount: 2, lastFile: 'a.ts' });
+  const s = resolveStats(p)!;
+  assert.equal(s.nodeCount, 30, 'counts come from the children');
+  assert.equal(s.dirty, true, 'the live drift state the cache carries survives');
+  assert.equal(s.staleCount, 2);
+  assert.equal(s.lastFile, 'a.ts');
+});
+
+test('a workspace parent whose children are not built yet is still not built', () => {
+  const p = workspace({ api: null, web: null });
+  assert.equal(resolveStats(p), null);
+});
+
+test('an unbuilt child is skipped; the built ones still count', () => {
+  const p = workspace({ api: { nodes: 10, edges: 5, langs: ['typescript'] }, web: null });
+  const s = resolveStats(p)!;
+  assert.equal(s.nodeCount, 10);
+  assert.equal(s.edgeCount, 5);
+});
