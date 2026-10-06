@@ -1685,6 +1685,17 @@ brain
         process.exitCode = 1;
         return;
       }
+      // The one question the terminal asks goes BEFORE the browser opens. Asked
+      // after, it waited unseen behind a browser that was itself waiting on
+      // this push, and the person sat watching the browser not move.
+      if (wiredHostIds(repo).length === 0 && process.stdin.isTTY && tty) {
+        console.error("· graft isn't set up here yet — pick the agents your team uses, then your browser opens:");
+        await runInitCommand(
+          repo,
+          { build: true, mcp: true, hooks: true, statusline: true, global: true, verbose },
+          { epilogue: false, push: !verbose },
+        );
+      }
       const signedUp = await signUpForBrain(repo, `${here.owner}/${here.name}`);
       if (!signedUp) {
         if (!process.exitCode) process.exitCode = 1;
@@ -1729,7 +1740,9 @@ brain
 
     // A repo graft was never set up in gets `graft init` first. Same picker as
     // init: it is how someone agrees to what gets written, so a
-    // non-interactive push only says what to run.
+    // non-interactive push only says what to run. A first push with no trail
+    // already asked, before the browser opened (above); this is the case of a
+    // trail attached some other way.
     if (wiredHostIds(repo).length === 0) {
       if (process.stdin.isTTY && tty) {
         console.error("· graft isn't set up here yet — pick the agents your team uses:");

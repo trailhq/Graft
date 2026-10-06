@@ -76,11 +76,12 @@ test("signup url: carries the repo, the port and the state", () => {
   // Trail's front end, not the shared agents host link.ts calls for the API:
   // the signup a person walks through has to be the Trail-branded build.
   assert.equal(url.origin, "https://app.trailhq.com");
-  assert.equal(url.pathname, "/get-started");
+  // The new onboarding's code trail; it answers the same three parameters.
+  assert.equal(url.pathname, "/creating-a-trail");
   assert.equal(url.searchParams.get("graft_repo"), "NanoNets/Graft");
   assert.equal(url.searchParams.get("graft_port"), "51234");
   assert.equal(url.searchParams.get("graft_state"), "s-t-a-t-e");
-  assert.equal(url.searchParams.get("step"), "repo");
+  assert.equal(url.searchParams.get("step"), null);
 });
 
 test("signup url: GRAFT_BRAIN_URL points signup at staging too", () => {

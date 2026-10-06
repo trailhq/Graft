@@ -212,14 +212,21 @@ export function reviewUrl(brainId: string, baseUrl?: string): string {
 
 /** Where to send the browser for a repo's brain.
  *
+ * Trail's onboarding for a code trail: it opens on the repository, already
+ * filled in, beside what Trail will read from it, and Build Trail hands the
+ * trail back here. Earlier releases opened `/get-started?step=repo`, which
+ * Trail still answers, so a Trail without this page keeps working with them.
+ * Ship this only once Trail has /creating-a-trail in production: an older one
+ * would show its first question and never answer the push.
+ *
  * No port when an agent runs the push: nothing stays listening on loopback, so
  * Trail keeps the trail it made under `state` and graft asks for it by that. */
 export function signupUrl(opts: { repo: string; port?: number; state: string; baseUrl?: string }): string {
   const base = webBaseUrl(opts.baseUrl);
-  const q = new URLSearchParams({ step: "repo", graft_repo: opts.repo });
+  const q = new URLSearchParams({ graft_repo: opts.repo });
   if (opts.port !== undefined) q.set("graft_port", String(opts.port));
   q.set("graft_state", opts.state);
-  return `${base}/get-started?${q.toString()}`;
+  return `${base}/creating-a-trail?${q.toString()}`;
 }
 
 /*
