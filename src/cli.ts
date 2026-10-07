@@ -41,6 +41,7 @@ import {
 import { apiBaseUrl, clearPendingSignup, readLink, readPendingSignup, writeLink, writePendingSignup } from "./brain/link.js";
 import { withLegacyNames } from "./legacy-args.js";
 import { brand, cmd, graftNotice, tag } from "./brand.js";
+import { branchDiff } from "./cloud/diff.js";
 import { currentStage, DOING_LABEL, rulesSoFar, watchBuild, type RepoState } from "./brain/watch.js";
 import {
   AGENT_WAIT_MS,
@@ -95,6 +96,9 @@ import { costLabel, listNotes, noteTargets, renderNote, SECTIONS, sectionLead, s
 import { currentSessionCost } from "./notes/session-cost.js";
 import { currentBranch, noteAuthor } from "./notes/git-facts.js";
 import { confirm, fold, getSkill, learn, listSkills, publish, skillForAgent, skillName, skillStatus, type LearnResult } from "./skills/skills.js";
+import { withRankedNotes } from "./cloud/ask-cloud.js";
+import { maybeIndexInBackground, readIndexState, syncIndex } from "./cloud/sync.js";
+import { checkDiff, fetchTeam, isError, notSupported, type CheckResult } from "./cloud/trail-api.js";
 import { setInputRate } from "./context/savings.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readStamp, readUpdateCache, refreshUpdateCache, wiredHostIds, writeStamp } from "./upkeep.js";
 import {
@@ -346,6 +350,18 @@ program
     } catch {
       /* the next session tries again */
     }
+  });
+
+// Hidden: spawned detached by maybeIndexInBackground when this repo's notes
+// or skills changed since Trail last saw them. Running it by hand just uploads now.
+program
+  .command("_trail-index", { hidden: true })
+  .description("internal: upload this repo's notes and skills to its linked Trail")
+  .argument("[dir]", "target repo directory", ".")
+  .action(async (dir: string) => {
+    const repo = resolve(dir);
+    const link = readLink(repo);
+    if (link) await syncIndex(repo, link);
   });
 
 program
@@ -720,6 +736,8 @@ grouped(program.command("ask"), GROUP.find)
       return;
     }
     noteHit(r.hits.length > 0);
+    // Linked to Trail: rank every note the team uploaded, not only this machine's.
+    await withRankedNotes(r, dir);
     // How many notes reached the agent: the demand side of `trail note`.
     if (r.notesChecked) queryNote.notes = String(Math.min(r.notes?.length ?? 0, 2));
     if (opts.json) {
@@ -756,22 +774,9 @@ if (!TRAIL) {
     .action(async (dirArg: string | undefined, opts: { extensions?: string[]; json?: boolean }) => {
       await runCheckCommand(dirArg, opts, "graft check");
     });
-} else {
-  // `trail check` is the team check: your diff against what the team has
-  // learned. Until that ships it only says so, and where the freshness check
-  // went. Non-zero, so a CI step renamed from `graft check` fails loudly
-  // instead of passing without checking anything.
-  program
-    .command("check", { hidden: true })
-    .description("Check your diff against everything the team has learned")
-    .argument("[dir]")
-    .allowUnknownOption()
-    .action(() => {
-      console.error("· trail check will compare your diff against everything your team has learned. It isn't available yet.");
-      console.error("· looking for the code map freshness check? that's trail build --check");
-      process.exitCode = 1;
-    });
 }
+// Under trail, `check` is the team check (teamCheckCommand, with the cloud
+// commands below); the freshness check is `trail build --check`.
 
 /**
  * The freshness check: `graft check`, and `trail build --check`. `label` is how
@@ -1105,6 +1110,7 @@ grouped(program.command("learn", { hidden: !TRAIL }), GROUP.memory)
       process.exitCode = 1;
       return;
     }
+    maybeIndexInBackground(repo);
     track("takeaway_saved", { new_skill: String(r.created) }, { repo });
     const kind = r.created ? "new skill" : r.skill.where === "repo" ? "the repo's skill" : "skill";
     console.log(`✓ takeaway saved to ${kind} ${r.skill.name}${author ? ` · taught by ${author}` : ""}`);
@@ -1177,6 +1183,7 @@ skillsCmd
       if (!skill) console.log("· nothing to fold");
       return;
     }
+    maybeIndexInBackground(repo);
     if (inRepo) console.log("· review with git diff, then commit");
     else console.log(`· ${cmd("graft skills")} publish <skill> moves a skill into the repo's .claude/skills/, to commit for your team`);
   });
@@ -1194,6 +1201,7 @@ skillsCmd
       console.log(`· ${skillName(skill)} is already in the repo, in .claude/skills/${skillName(skill)}/`);
       return;
     }
+    maybeIndexInBackground(repo);
     console.log(`✓ ${skillName(skill)} → ${shown(repo, r.file)}`);
     console.log("· commit it to share it: Claude Code loads it for everyone who pulls. its takeaways stay on this machine");
   });
@@ -1316,7 +1324,12 @@ async function runNoteCommand(
   if (prior) console.log(`· builds on ${prior.author ? `${prior.author}'s` : "a"} note from ${shortDate(prior.date)}`);
   if (!SECTIONS.some((s) => sectionLead(body, s.heading) !== null))
     console.log("· tip: notes read best under ## Decided, ## Tried and ruled out and ## Watch out");
-  console.log("· kept on this machine, never in the repo");
+  console.log(
+    readLink(repo)
+      ? "· kept on this machine, never in the repo · shared with your team through Trail"
+      : `· kept on this machine, never in the repo · ${TRAIL ? "trail login" : "graft trail push"} shares notes with your team`,
+  );
+  maybeIndexInBackground(repo);
 }
 
 /** `graft init`'s flags, as commander hands them over. */
@@ -2298,34 +2311,221 @@ function disconnectCommand(name = "disconnect"): Command {
  */
 function loginCommand(name = "login"): Command {
   return new Command(name)
-    .description("Sign in and link this repo to Trail")
+    .description("Sign in and link this repo to Trail, or to your team's own Trail server with --server")
     .argument("[handoff]", "<brainId>:<token> from a Trail page; leave it out to sign up in the browser")
     .argument("[dir]", "target repo directory", ".")
-    .action(async (handoff: string | undefined, dir: string) => {
+    .option("--server <url>", "a self-hosted Trail, e.g. https://trail.acme.internal (default: Trail cloud)")
+    .action(async (handoffArg: string | undefined, dirArg: string, opts: { server?: string }) => {
+      // `trail login <dir>`: a lone argument that is a folder is the repo, not a handoff.
+      const argIsDir = handoffArg !== undefined && dirArg === "." && existsSync(handoffArg) && statSync(handoffArg).isDirectory();
+      const handoff = argIsDir ? undefined : handoffArg;
+      const dir = argIsDir ? handoffArg! : dirArg;
+      const repo = resolve(dir);
+      // A self-hosted Trail serves both the sign-in pages and the API; every
+      // request this run makes, and the link it saves, go there.
+      const server = opts.server?.trim().replace(/\/+$/, "");
+      if (server) {
+        if (!/^https?:\/\//.test(server)) {
+          console.error(`✗ --server takes a URL, like https://trail.acme.internal`);
+          process.exitCode = 1;
+          return;
+        }
+        process.env.GRAFT_BRAIN_URL = server;
+      }
+      let link = readLink(repo);
       if (handoff) {
         await runConnect(handoff, dir);
-        return;
+        link = readLink(repo);
+      } else if (link) {
+        console.error(`✓ already signed in · this repo is linked to Trail`);
+      } else {
+        const here = repoSlugFromGit(repo);
+        if (!here) {
+          console.error(`✗ this directory has no GitHub origin remote — ${brand()} can only link a GitHub repository today`);
+          process.exitCode = 1;
+          return;
+        }
+        link = await signUpForBrain(repo, `${here.owner}/${here.name}`);
+        if (!link) {
+          if (!process.exitCode) process.exitCode = 1;
+          return;
+        }
       }
+      if (!link) return;
+      if (server && link.baseUrl !== server) {
+        link = { ...link, baseUrl: server };
+        writeLink(repo, link);
+      }
+      await indexAfterLogin(repo, link);
+    });
+}
+
+/**
+ * After signing in: upload this repo's notes and skills from ~/.trail, which
+ * is how they reach the team, and say what that turned on.
+ */
+async function indexAfterLogin(repo: string, link: BrainLink): Promise<void> {
+  if (!keepsNotes(repo)) {
+    console.error(`· next: ${cmd("graft trail push")} reads this repo's history into Trail`);
+    return;
+  }
+  const res = await syncIndex(repo, link);
+  if (isError(res)) {
+    console.error(
+      notSupported(res)
+        ? "· this Trail doesn't take notes yet — they stay on this machine until it's updated"
+        : `⚠ couldn't upload your notes (${res.error}) — it's retried in the background on the next ask`,
+    );
+    return;
+  }
+  console.error(`✓ signed in${res.workspace ? ` · team ${res.workspace}` : ""}`);
+  console.error(
+    `✓ shared ${res.notes} note${res.notes === 1 ? "" : "s"} and ${res.skills} skill${res.skills === 1 ? "" : "s"} with your team${res.repo ? ` for ${res.repo}` : ""}`,
+  );
+  console.error(`· ${brand()} ask now ranks your team's notes with yours · ${brand()} team and ${brand()} check are on`);
+}
+
+/* -------------------------------------------------------------------------- */
+/* trail team · trail check                                                   */
+/* -------------------------------------------------------------------------- */
+
+/** Fold a long line at `width`, indenting what wraps. */
+function wrap(text: string, width: number, indent: string): string[] {
+  const out: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/)) {
+    if (line && line.length + 1 + word.length > width) {
+      out.push(line);
+      line = indent + word;
+    } else line = line ? `${line} ${word}` : word;
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+function teamCommand(name = "team"): Command {
+  return new Command(name)
+    .description("What the team built this week, who explored what, and where two people are on the same thing")
+    .argument("[dir]", "repository root", ".")
+    .option("--days <n>", "how far back to look", "7")
+    .option("--json", "output as JSON")
+    .action(async (dir: string, opts: { days: string; json?: boolean }) => {
       const repo = resolve(dir);
-      const existing = readLink(repo);
-      if (existing) {
-        console.error(`✓ already signed in · this repo is linked to Trail (${existing.brainId})`);
+      const link = readLink(repo);
+      if (!link) {
+        console.log("· the team view lives in Trail: what got built this week, who explored what, and where two people are on the same thing");
+        console.log(`· sign in to turn it on: ${cmd("graft trail connect")}`);
         return;
       }
-      const here = repoSlugFromGit(repo);
-      if (!here) {
-        console.error(`✗ this directory has no GitHub origin remote — ${brand()} can only link a GitHub repository today`);
+      const days = Math.max(1, Math.min(90, Number(opts.days) || 7));
+      maybeIndexInBackground(repo);
+      const t = await fetchTeam(link, days);
+      if (isError(t)) {
+        console.error(notSupported(t) ? "· this Trail doesn't have the team view yet" : `✗ ${t.error}`);
         process.exitCode = 1;
         return;
       }
-      const link = await signUpForBrain(repo, `${here.owner}/${here.name}`);
-      if (!link) {
-        if (!process.exitCode) process.exitCode = 1;
+      if (opts.json) {
+        console.log(JSON.stringify(t, null, 2));
         return;
       }
-      console.error(`· next: ${cmd("graft trail push")} reads this repo's history into it`);
+      console.log(`${days === 7 ? "this week" : `the last ${days} days`} in ${t.repo}`);
+      console.log(`${t.people} ${t.people === 1 ? "person" : "people"} · ${t.sessions} session${t.sessions === 1 ? "" : "s"} · ${t.new_notes} new note${t.new_notes === 1 ? "" : "s"}`);
+      if (t.members.length) {
+        console.log("");
+        const nameW = Math.max(...t.members.map((m) => m.name.length)) + 3;
+        const topicW = Math.min(32, Math.max(...t.members.map((m) => m.topics.join(", ").length)) + 3);
+        for (const m of t.members) {
+          const notes = m.notes ? `${m.notes} note${m.notes === 1 ? "" : "s"}` : "";
+          const reused = m.reused ? `  reused ${m.reused}×` : "";
+          console.log(`  ${m.name.padEnd(nameW)}${m.topics.join(", ").padEnd(topicW)}${notes.padEnd(7)}${reused}`.trimEnd());
+        }
+      }
+      if (t.overlaps.length) {
+        console.log("\noverlap");
+        for (const o of t.overlaps) for (const [i, l] of wrap(o.text, 66, "    ").entries()) console.log(i === 0 ? `  ● ${l}` : l);
+      }
+      if (t.url) console.log(`\n  full view: ${t.url}`);
     });
 }
+
+function teamCheckCommand(name = "check"): Command {
+  return new Command(name)
+    .description("Check your branch's diff against everything the team has learned: notes, skills and Trail's rules")
+    .argument("[dir]", "repository root", ".")
+    .option("--base <ref>", "compare against where the branch left this ref (default: origin's default branch)")
+    .option("--json", "output as JSON")
+    .action(async (dir: string, opts: { base?: string; json?: boolean }) => {
+      await runTeamCheck(resolve(dir), opts);
+    });
+}
+
+async function runTeamCheck(repo: string, opts: { base?: string; json?: boolean }): Promise<void> {
+  const d = branchDiff(repo, opts.base);
+  if (!d) {
+    console.error("✗ not a git repository");
+    process.exitCode = 1;
+    return;
+  }
+  if (d.files.length === 0) {
+    console.log(`· nothing to check: no changes against ${d.base}`);
+    return;
+  }
+  const link = readLink(repo);
+  if (!link) {
+    // What a check would cover, from the local files, and how to turn it on.
+    const dirs = [...new Set(d.files.map((f) => (f.includes("/") ? f.slice(0, f.lastIndexOf("/") + 1) : "./")))];
+    const notes = listNotes(repo).filter((n) => n.touches.some((t) => dirs.some((dd) => dd === "./" || t.startsWith(dd))));
+    const skills = listSkills(repo).filter((s) => dirs.some((dd) => dd !== "./" && `${s.body}\n${s.takeaways.map((t) => t.text).join("\n")}`.includes(dd)));
+    const where = dirs.length === 1 ? dirs[0] : `${dirs.length} folders`;
+    const has =
+      notes.length || skills.length
+        ? `, which ${dirs.length === 1 ? "has" : "have"} ${notes.length} note${notes.length === 1 ? "" : "s"} and ${skills.length} skill${skills.length === 1 ? "" : "s"}`
+        : "";
+    console.log(`· this change touches ${where}${has}.`);
+    console.log(`  trail check compares your diff against all of them before you open the PR: ${cmd("graft trail connect")}`);
+    return;
+  }
+  maybeIndexInBackground(repo);
+  if (d.truncated) console.error("⚠ the diff is over 400 KB; only the first 400 KB is checked");
+  const r = await checkDiff(link, { base: d.base, diff: d.diff, files: d.files, asker: noteAuthor(repo) });
+  if (isError(r)) {
+    console.error(notSupported(r) ? "· this Trail doesn't have trail check yet" : `✗ ${r.error}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (opts.json) {
+    console.log(JSON.stringify(r, null, 2));
+  } else {
+    printCheck(r);
+  }
+  if (r.findings.some((f) => f.verdict === "conflict")) process.exitCode = 1;
+}
+
+function printCheck(r: CheckResult): void {
+  console.log(
+    `checking ${r.files} changed file${r.files === 1 ? "" : "s"} against ${r.notes} note${r.notes === 1 ? "" : "s"} and ${r.skills} skill${r.skills === 1 ? "" : "s"}\n`,
+  );
+  const conflicts = r.findings.filter((f) => f.verdict === "conflict");
+  for (const f of [...conflicts, ...r.findings.filter((x) => x.verdict !== "conflict")]) {
+    const mark = f.verdict === "conflict" ? "✗" : "✓";
+    console.log(`${mark} ${f.file}${f.line ? `:${f.line}` : ""}`);
+    console.log(`  ${f.summary}`);
+    const s = f.source;
+    if (f.verdict === "conflict" && s.quote) {
+      const who = [s.author, s.date ? shortDate(s.date) : ""].filter(Boolean).join(" · ");
+      for (const l of wrap(`${who ? `${who}: ` : ""}${s.quote}`, 70, "  ")) console.log(`  ${l.trimStart()}`);
+    }
+  }
+  if (r.findings.length === 0) console.log("✓ nothing the team has learned bears on this change");
+  console.log("");
+  console.log(
+    conflicts.length
+      ? `· ${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"} · fix ${conflicts.length === 1 ? "it" : "them"}, or say why in the PR description`
+      : "· no conflicts",
+  );
+}
+
 
 /** Tokens saved by this repo's agent sessions touched in the last 7 days. */
 function savedThisWeek(repo: string, now = Date.now()): number {
@@ -2394,12 +2594,17 @@ function statusCommand(name = "status"): Command {
       else row("code map", `✓ ${fmt(graph.meta.nodeCount)} nodes · in sync with the code`);
       if (kept) row("notes", `${notes} · in ${shownPath(repoPlace(repo).dir)}`);
       if (!link) row("cloud", `not signed in · ${cmd("graft trail connect")}`);
-      else
+      else {
+        const idx = readIndexState(repo);
+        const host = link.baseUrl ? ` · ${link.baseUrl.replace(/^https?:\/\//, "")}` : "";
         row(
           "cloud",
-          `linked · ${fmt(rules.length)} rule${rules.length === 1 ? "" : "s"} cached` +
+          `linked${idx?.workspace ? ` to team ${idx.workspace}` : ""}${host} · ${fmt(rules.length)} rule${rules.length === 1 ? "" : "s"} cached` +
             (graph && anchored.length ? `, ${fmt(matching)} of ${fmt(anchored.length)} anchored still match the code` : ""),
         );
+        if (kept && idx?.notes !== undefined && !idx.failedAt)
+          row("", `${idx.notes} note${idx.notes === 1 ? "" : "s"} and ${idx.skills ?? 0} skill${idx.skills === 1 ? "" : "s"} shared with your team`);
+      }
       row("this week", saved > 0 ? `~${shortCount(saved)} tokens saved` : "nothing saved yet");
     });
 }
@@ -2408,7 +2613,7 @@ if (TRAIL) {
   // The old `graft trail …` group, at the top level: `trail push`, `trail
   // login`. `connect` and `watch` still run, unlisted — connect so the
   // handoff links Trail already sent keep working.
-  for (const c of [loginCommand(), pushCommand(), pullCommand()]) program.addCommand(c.helpGroup(GROUP.cloud));
+  for (const c of [loginCommand(), teamCommand(), teamCheckCommand(), pushCommand(), pullCommand()]) program.addCommand(c.helpGroup(GROUP.cloud));
   program.addCommand(
     disconnectCommand("logout").description("Unlink this repo from Trail (its rules stay in the instruction files until the next init)").helpGroup(GROUP.cloud),
   );
@@ -2422,7 +2627,7 @@ if (TRAIL) {
     habit.addCommand(c);
 
   // Help lists the groups in this order, and the commands within each.
-  const order = ["ask", "grep", "skeleton", "callers", "map", "note", "learn", "skills", "init", "build", "status", "upgrade", "uninstall", "telemetry", "login", "push", "pull", "logout", "blast"];
+  const order = ["ask", "grep", "skeleton", "callers", "map", "note", "learn", "skills", "init", "build", "status", "upgrade", "uninstall", "telemetry", "login", "team", "check", "push", "pull", "logout", "blast"];
   const rank = (c: Command) => {
     const i = order.indexOf(c.name());
     return i === -1 ? order.length : i;
@@ -2445,7 +2650,9 @@ if (TRAIL) {
     upgrade: "install the latest trail",
     uninstall: "remove everything trail or graft wrote to this repo",
     telemetry: "show or turn off the anonymous usage stats",
-    login: "sign in and link this repo to Trail",
+    login: "sign in for ranked search, the team view and checks",
+    team: "what the team built this week, and where work overlaps",
+    check: "check your diff against everything the team has learned",
     push: "send this repo's history to Trail to build its rules",
     pull: "write changes you accepted in Trail into this repo",
     logout: "unlink this repo from Trail",

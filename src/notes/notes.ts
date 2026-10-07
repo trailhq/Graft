@@ -107,12 +107,14 @@ function rebaseTouch(t: string, checkout: string, here: string): string {
  * Every note that bears on the folder `dir`, newest first: its repo's, or, for
  * a folder that holds several repos, its own and each repo's. Touches come
  * back relative to `dir`, so they line up with a query run there.
+ * `children: false` leaves a folder's repos out: only the folder's own notes.
  * Unreadable files are skipped.
  */
-export function listNotes(dir: string): Note[] {
+export function listNotes(dir: string, opts: { children?: boolean } = {}): Note[] {
   const here = resolve(dir);
   const out: Note[] = [];
-  for (const place of notePlaces(here)) {
+  const places = notePlaces(here);
+  for (const place of opts.children === false ? places.slice(0, 1) : places) {
     const notes = join(place.dir, "notes");
     let files: string[];
     try {

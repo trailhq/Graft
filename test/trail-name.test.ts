@@ -138,9 +138,9 @@ test("trail --help groups the commands and lists the cloud ones at the top level
   const r = run("trail", ["--help"], home);
   assert.equal(r.status, 0);
   for (const heading of ["Find code", "Setup:", "Trail cloud:", "CI:"]) assert.ok(r.out.includes(heading), heading);
-  for (const c of ["login", "logout", "push", "pull", "status"]) assert.match(r.out, new RegExp(`^  ${c} `, "m"), c);
+  for (const c of ["login", "team", "check", "logout", "push", "pull", "status"]) assert.match(r.out, new RegExp(`^  ${c} `, "m"), c);
   // Still run, just not listed.
-  for (const c of ["check", "viz", "mcp", "stats", "watch", "connect", "trail"]) assert.doesNotMatch(r.out, new RegExp(`^  ${c} `, "m"), c);
+  for (const c of ["viz", "mcp", "stats", "watch", "connect", "trail"]) assert.doesNotMatch(r.out, new RegExp(`^  ${c} `, "m"), c);
 });
 
 test("graft --help keeps its old flat list, including check and the trail group", () => {
@@ -170,10 +170,11 @@ test("the freshness check is graft check under graft and trail build --check und
   assert.equal(run("trail", ["build", "--check", d, "--json"], home).status, 1);
 });
 
-test("trail check says where the freshness check went, and fails so a renamed CI step can't pass silently", () => {
-  const r = run("trail", ["check"], scratchHome());
+test("trail check is the team check, not the freshness check", () => {
+  // Outside a git repo there is no diff to check; the freshness check is build --check.
+  const r = run("trail", ["check", mkdtempSync(join(tmpdir(), "not-git-"))], scratchHome());
   assert.equal(r.status, 1);
-  assert.match(r.err, /that's trail build --check/);
+  assert.match(r.err, /not a git repository/);
 });
 
 test("trail status puts the code map and the cloud link on one screen", () => {

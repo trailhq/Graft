@@ -265,7 +265,7 @@ test("trail note saves the note in ~/.trail, ask shows it to the next session, u
   assert.equal(saved.status, 0, saved.err);
   assert.match(saved.out, /^✓ note saved · ~\/\.trail\/repos\/local\/[^/]+\/notes\/\d{4}-\d{2}-\d{2}-bbox-coordinates-are-off-on-rotated-priya\.md$/m);
   assert.match(saved.out, /this took 12 min and ~9\.6k tokens to figure out\. the next session that touches bbox\.go gets it for ~\d+/);
-  assert.match(saved.out, /^· kept on this machine, never in the repo$/m);
+  assert.match(saved.out, /^· kept on this machine, never in the repo · trail login shares notes with your team$/m);
   const [file] = readdirSync(notesUnder(home)).filter((f) => f.endsWith(".md"));
   const written = parseNote(readFileSync(join(notesUnder(home), file!), "utf8"), "x");
   assert.equal(written?.author, "Priya");

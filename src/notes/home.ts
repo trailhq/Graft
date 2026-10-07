@@ -29,6 +29,7 @@
  * first write runs git, once, for the first commit.
  */
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -305,6 +306,25 @@ export function ensureRepoHome(start: string, env: NodeJS.ProcessEnv = process.e
   if (!existsSync(readme)) writeFileSync(readme, HOME_README);
   if (JSON.stringify(index) !== before) writeJsonAtomic(indexPath(home), index);
   return { place, created };
+}
+
+/**
+ * This machine's uploader id: random, made once, kept in `~/.trail/id`. Trail
+ * keys each person's uploaded notes by it, so one person's upload replaces
+ * their own notes and never a teammate's. It names no one.
+ */
+export function uploaderId(env: NodeJS.ProcessEnv = process.env): string {
+  const file = join(trailHome(env), "id");
+  try {
+    const id = readFileSync(file, "utf8").trim();
+    if (id) return id;
+  } catch {
+    /* first time */
+  }
+  const id = randomUUID();
+  mkdirSync(trailHome(env), { recursive: true });
+  writeFileSync(file, `${id}\n`);
+  return id;
 }
 
 /* -------------------------------------------------------------------------- */

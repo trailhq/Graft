@@ -116,6 +116,10 @@ export interface AskResult {
   /** The repo keeps notes on this machine, so an empty `notes` means "none
    *  about this yet" rather than "this repo keeps no notes". */
   notesChecked?: boolean;
+  /** Trail ranked these notes across the team's whole index (cloud/ask-cloud.ts). */
+  notesRanked?: boolean;
+  /** One line about the notes, e.g. that this many would search better ranked. */
+  notesHint?: string;
   /** Token-saving estimate, set only in `--source` (retriever) mode: the whole
    * size of the distinct files these hits point into, i.e. the baseline cost of
    * reading them instead of this pack. Computed from file sizes stored at build. */
@@ -1517,6 +1521,7 @@ export function formatAsk(r: AskResult): string {
     : r.notesChecked
       ? ["· no notes about this yet", ""]
       : [];
+  if (r.notesHint) teamNotes.push(r.notesHint, "");
   if (r.hits.length === 0) {
     if (r.notes?.length) return `${head}\n\n${teamNotes.join("\n").trimEnd()}\n\n${noteBlock || "no code matches."}${escalationNudge(r)}\n`;
     return `${head}\n\n${noteBlock || "no matches."}${escalationNudge(r)}\n`;
