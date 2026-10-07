@@ -332,6 +332,9 @@ test("the trail skill's description names when to use its commands, and the body
   const moments = content.indexOf("## When to reach for trail");
   assert.ok(moments >= 0 && moments < content.indexOf("## The tools"), "the moments come before the tool docs");
   assert.match(content, /\*\*When you finish a task that took real digging\*\*/);
+  assert.match(data.description, /corrects how something is done here, or states a rule for it, save it with trail learn/);
+  assert.match(content, /\*\*When the user corrects how something is done here\*\*/);
+  assert.match(content, /`trail skills show <skill>` prints it/);
 });
 
 test("the session-start directive mentions notes only in a repo that keeps them", async () => {

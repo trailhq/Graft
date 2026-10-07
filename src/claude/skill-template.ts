@@ -21,14 +21,21 @@ export function skillTemplate(brand: Brand = "graft"): string {
 const TRAIL_DESCRIPTION = `Use for ANY task in this repo, whether understanding how something works,
   finding where code lives, tracing what calls a symbol or scoping an edit.
   Run trail ask before grepping or reading source. It finds the code and the
-  notes past sessions left on what was decided and ruled out. When you finish
-  a task that took real digging, leave a note with trail note.`;
+  notes past sessions left on what was decided and ruled out. When the user
+  corrects how something is done here, or states a rule for it, save it with
+  trail learn. When you finish a task that took real digging, leave a note
+  with trail note.`;
 
 /** The same moments, first in the body, so they're read before the tool docs. */
 const TRAIL_MOMENTS = `## When to reach for trail
 - **Before exploring code**, run \`trail ask "<task>" --source\`. Notes from
   past sessions on what was decided, tried and ruled out print above the code.
   Read them first.
+- **When the user corrects how something is done here**, or states a rule for
+  it, save it with \`trail learn <skill>\` so your agent follows it from then
+  on. Before working in a skill's area, \`trail skills show <skill>\` prints it
+  with the corrections not yet folded in. How is under Skills and corrections
+  below.
 - **When you finish a task that took real digging**, leave a note for the next
   session with \`trail note\`. How is under Session notes below.
 
@@ -69,12 +76,13 @@ never a transcript, and nothing secret. It stays on this machine until its
 owner shares it with \`trail login\`.
 
 ## Skills and corrections
-When the user corrects how something is done here, save it so your agent
-learns it: \`trail learn <skill>\` with the rule and why on stdin, using a skill
-that fits (\`trail skills\` lists them) or a short new name (add
-\`--description "<what it covers>"\` for a new one). Corrections stay on this
-machine. Before working in a skill's area, run \`trail skills show <skill>\`:
-it prints the skill with every correction not yet folded into its SKILL.md.
+When the user corrects how something is done here, or states a rule for
+it, save it so your agent learns it: \`trail learn <skill>\` with the rule
+and why on stdin, using a skill that fits (\`trail skills\` lists them) or a
+short new name (add \`--description "<what it covers>"\` for a new one).
+Corrections stay on this machine. Before working in a skill's area, run
+\`trail skills show <skill>\`: it prints the skill with every correction not
+yet folded into its SKILL.md.
 
 If \`trail\` isn't installed on this machine but \`graft\` is, it's the same
 command under its old name.
