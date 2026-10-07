@@ -264,24 +264,24 @@ test("the index fingerprint changes when a note or a takeaway does", () => {
 
 // --- what agents are told about the check ---
 
-test("under trail, the skill and the session-start text say to run trail check before a PR; graft's never do", async () => {
+test("under trail, the skill and the session-start text say to run trail check before work goes for review; graft's never do", async () => {
   const { skillTemplate } = await import("../src/claude/skill-template.js");
   const { formatOrientation } = await import("../src/claude/format.js");
   const { BRAND_ENV } = await import("../src/brand.js");
   const matter = (await import("gray-matter")).default;
   const { data, content } = matter(skillTemplate("trail"));
-  assert.match(data.description, /Before you open a PR or push a branch for review, run trail check/);
+  assert.match(data.description, /When the work is ready for review, run trail check before you commit it, push it or open a PR/);
   assert.ok(data.description.length <= 1024, "skill descriptions are capped at 1,024 characters");
-  assert.match(content, /\*\*Before you open a PR or push a branch for review\*\*, run `trail check`/);
-  assert.match(content, /^## Before you open a PR$/m);
-  assert.doesNotMatch(skillTemplate("graft"), /trail check|before you open a PR/i, "graft check is still the freshness check");
+  assert.match(content, /\*\*When the work is ready for review\*\*, run `trail check` before you commit/);
+  assert.match(content, /^## Before work goes for review$/m);
+  assert.doesNotMatch(skillTemplate("graft"), /trail check|ready for review/i, "graft check is still the freshness check");
 
   const prev = process.env[BRAND_ENV];
   try {
     process.env[BRAND_ENV] = "trail";
-    assert.match(formatOrientation("# map", 100, undefined, 0, true), /Before you open a PR or push a branch for review, run `trail check`/);
+    assert.match(formatOrientation("# map", 100, undefined, 0, true), /When the work is ready for review, run `trail check` before you commit it, push the branch or open a PR/);
     delete process.env[BRAND_ENV];
-    assert.doesNotMatch(formatOrientation("# map", 100, undefined, 0, true), /trail check|before you open a PR/i);
+    assert.doesNotMatch(formatOrientation("# map", 100, undefined, 0, true), /trail check|ready for review/i);
   } finally {
     if (prev === undefined) delete process.env[BRAND_ENV];
     else process.env[BRAND_ENV] = prev;
