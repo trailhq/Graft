@@ -6,7 +6,6 @@ const SL_CMD = 'node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.
 /** Stable marker for "this statusLine is Graft's", not the full command string —
  * an older shim path or a GRAFT_DIR wrapper still names this file. */
 const GRAFT_STATUSLINE_HELPER = 'graft-statusline.cjs';
-const FOOTER = 'graft/[\\w./-]+\\.md';
 // Every form graft is actually invoked as. 'graft:*' covers a global install;
 // the other two cover a repo working on graft itself (or any consumer running it
 // from a checkout), where the binary is not on PATH under that name. A retrieval
@@ -135,10 +134,9 @@ export function mergeGraftSettings(
     merged.hooks[event] = [...foreign, ...blocks];
   }
 
-  // Drop graft's own prior regex before re-adding, so a change to FOOTER replaces
-  // the old pattern instead of stacking beside it. The user's regexes are kept.
-  const priorFooter = Array.isArray(merged.footerLinksRegexes) ? merged.footerLinksRegexes : [];
-  merged.footerLinksRegexes = [...priorFooter.filter((r: unknown) => !isGraftFooterRegex(r)), FOOTER];
+  // Legacy graft footer entries were bare strings, which Claude Code rejects at
+  // every settings scope. Remove only graft's entries on wiring refresh.
+  dropGraftFooter(merged);
 
   // headless/subagent runs hard-deny Bash by default; without an allowlist entry
   // `graft ask`'s own Bash calls (and the skill it installs) can't run out-of-box.
@@ -157,9 +155,9 @@ export function mergeGraftSettings(
  * absolute path — `~/.claude/settings.json`, where a write reaches every project on
  * the machine (see hosts/claude-global.ts for why that copy has to exist).
  *
- * Hooks only, deliberately. `mergeGraftSettings` also claims the statusline, the
- * footer regex and a Bash allowlist, and each of those is a reasonable thing to
- * accept for a repo you ran `graft init` in and an unreasonable thing to impose on
+ * Hooks only, deliberately. `mergeGraftSettings` also claims the statusline and
+ * a Bash allowlist, and each of those is a reasonable thing to accept for a repo
+ * you ran `graft init` in and an unreasonable thing to impose on
  * every repo you ever open — a statusline especially, since a session allows exactly
  * one and taking it globally would silently outrank the user's own. The hooks are the
  * piece that has to be global, because they are what a worktree loses.
@@ -175,5 +173,14 @@ export function mergeGraftHooks(existing: Json, helpers: string): { merged: Json
     const foreign = prior.filter((e: Json) => !isGraftEntry(e));
     merged.hooks[event] = [...foreign, ...blocks];
   }
+  dropGraftFooter(merged);
   return { merged };
+}
+
+/** Drop graft's legacy footer strings; keep foreign entries and an absent key. */
+function dropGraftFooter(merged: Json): void {
+  if (!Array.isArray(merged.footerLinksRegexes)) return;
+  const kept = merged.footerLinksRegexes.filter((r: unknown) => !isGraftFooterRegex(r));
+  if (kept.length === 0) delete merged.footerLinksRegexes;
+  else merged.footerLinksRegexes = kept;
 }
