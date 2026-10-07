@@ -15,6 +15,9 @@ test('canonical body names the three essentials', () => {
   assert.match(b, /graft map/, 'tells the agent to orient with graft map before exploring');
   assert.match(b, /\[scope\/\]/, 'teaches the [scope/] label on multi-scope/monorepo hits');
   assert.match(b, /--in <scope>\//, 'teaches narrowing with ask --in <scope>/');
+  assert.match(b, /local, regenerable cache/, 'graft/ is a cache, not a committed artifact (#80)');
+  assert.match(b, /gitignored/, 'tells the agent the graph is not in git (#80)');
+  assert.doesNotMatch(b, /through git/, 'must not claim git carries the graph (#80)');
   assert.ok(!/\bhook|statusline\b/i.test(b), 'no host-specific machinery in the shared body');
 });
 
@@ -30,6 +33,8 @@ test('kiro steering has inclusion: always frontmatter and the body', () => {
   assert.ok(r.includes(instructionBody()));
 });
 
-test('windsurf rule is the plain body', () => {
-  assert.ok(windsurfRule().includes(instructionBody()));
+test('windsurf rule has trigger: always_on frontmatter and the body', () => {
+  const r = windsurfRule();
+  assert.match(r, /^---\ntrigger: always_on\n---\n/);
+  assert.ok(r.includes(instructionBody()));
 });
