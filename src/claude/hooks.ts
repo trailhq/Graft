@@ -17,8 +17,9 @@ import { readLink } from '../brain/link.js';
 import { pickedAgents } from '../brain/push.js';
 import { readTrailSnapshot, trailContextLine } from '../brain/watch-trail.js';
 import { maybeAutopush, readTrailPushState, recordSeenSuggestions, type AutopushDeps } from '../brain/autopush.js';
-import { adoptRepoBrand, tag } from '../brand.js';
+import { adoptRepoBrand, cmd, tag } from '../brand.js';
 import { keepsNotes, noteCount } from '../notes/home.js';
+import { skillsDirective } from '../skills/skills.js';
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
  * conversational ("yes go ahead", "thanks") and the coverage gate can't judge
@@ -483,7 +484,9 @@ export async function main(event: string): Promise<void> {
     try {
       const idx = readFileSync(join(resolveContextDir(dir), 'INDEX.md'), 'utf8');
       const banner = staleBanner(indexFreshness(dir)) ?? undefined;
-      const orientation = formatOrientation(idx, undefined, banner, noteCount(dir), keepsNotes(dir));
+      const kept = keepsNotes(dir);
+      const skills = kept ? skillsDirective(dir, cmd('graft skills show')) : '';
+      const orientation = formatOrientation(idx, undefined, banner, noteCount(dir), kept, skills);
       emit('SessionStart', upkeep.length ? `${upkeep.join('\n')}\n\n${orientation}` : orientation);
     } catch {
       // No INDEX.md (never built here). An upgrade nudge is still worth saying.

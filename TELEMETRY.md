@@ -53,6 +53,8 @@ The events:
 | `trail_watch_exit` | `reason` (`suggestions`/`accepted`/`timeout`/`refused`/`no_trail`), `suggested_bucket`, `accepted_bucket`, `duration_bucket` (how long it waited) | `graft trail watch` ends |
 | `trail_autopush` | `outcome` (`started`/`skipped`), `reason` when skipped (`disabled`/`no_head`/`head_unchanged`/`throttled`/`spawn_failed`) | A Claude Code or Codex session starts in a repo with a trail attached, and the hook decides whether to refresh it with a background `graft trail push`. Repos without a trail send nothing |
 | `note_saved` | `has_cost` (`true`/`false`), `touches_bucket` (how many files the note is about, bucketed) | `trail note` saves a session note on this machine (`~/.trail/`). The title, the text and the paths are never sent |
+| `takeaway_saved` | `new_skill` (`true`/`false`) | `trail learn` saves a correction as a takeaway on a skill, on this machine (`~/.trail/`). Its text is never sent |
+| `skills_folded` | `takeaways_bucket` (how many takeaways were folded, bucketed) | `trail skills fold` writes takeaways into a skill's SKILL.md |
 | `session_summary` | `graft_reads_bucket`, `source_reads_bucket`, `saved_tokens_bucket`, `graft_turns_bucket`, `reported_turns_bucket` | Once, after an agent session ends |
 
 Two rules govern every value above, and both are enforced in code rather than by

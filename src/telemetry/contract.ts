@@ -79,6 +79,13 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
    *  and the paths never travel. The supply side of the notes loop; the
    *  `notes` property on `query` is the demand side. */
   note_saved: new Set<string>(['has_cost', 'touches_bucket']),
+  /** `trail learn` saved a correction as a takeaway on a skill (into
+   *  `~/.trail/`). `new_skill` says whether it started a skill. The text never
+   *  travels. */
+  takeaway_saved: new Set<string>(['new_skill']),
+  /** `trail skills fold` wrote waiting takeaways into a skill's SKILL.md;
+   *  how many, as a bucket. Whether corrections become the skill. */
+  skills_folded: new Set<string>(['takeaways_bucket']),
   /** One closed agent session, summarised. `graft_reads` vs `source_reads` is
    *  the single number that says whether an agent prefers graft to grep; the two
    *  `*_turns` buckets are the follow-up question — of the turns that used graft,

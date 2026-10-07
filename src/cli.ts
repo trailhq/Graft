@@ -11,7 +11,7 @@
 import "dotenv/config";
 import { Command } from "commander";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Graft } from "./engine.js";
 import { resolveConfig, type EngineConfig } from "./ai/providers.js";
@@ -94,6 +94,7 @@ import { listSessionIds, readSession, sessionDir } from "./claude/state.js";
 import { costLabel, listNotes, noteTargets, renderNote, SECTIONS, sectionLead, shortDate, tokensLabel, writeNote, type Note } from "./notes/notes.js";
 import { currentSessionCost } from "./notes/session-cost.js";
 import { currentBranch, noteAuthor } from "./notes/git-facts.js";
+import { confirm, fold, getSkill, learn, listSkills, publish, skillForAgent, skillName, skillStatus, type LearnResult } from "./skills/skills.js";
 import { setInputRate } from "./context/savings.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readStamp, readUpdateCache, refreshUpdateCache, wiredHostIds, writeStamp } from "./upkeep.js";
 import {
@@ -1073,6 +1074,148 @@ grouped(program.command("note", { hidden: !TRAIL }), GROUP.memory)
   .argument("[dir]", "repository root", ".")
   .action(async (dir: string, opts: { title: string; body?: string; touches?: string; author?: string; minutes?: string; tokens?: string; json?: boolean }) => {
     await runNoteCommand(resolve(dir), opts);
+  });
+
+// `trail learn` and `trail skills`: corrections become takeaways on a skill,
+// kept on this machine, and takeaways fold into its SKILL.md. Unlisted under
+// graft, like `note`, but they run.
+grouped(program.command("learn", { hidden: !TRAIL }), GROUP.memory)
+  .description("Turn a correction into a takeaway on a skill, kept in ~/.trail (the takeaway on stdin)")
+  .argument("<skill>", "the skill it belongs to, e.g. pdf-coords; a new name makes a new skill")
+  .argument("[dir]", "repository root", ".")
+  .option("-m, --text <text>", "the takeaway itself, instead of stdin")
+  .option("--description <text>", "for a new skill: what it covers")
+  .option("--section <heading>", "the SKILL.md heading it belongs under when folded")
+  .option("--author <name>", "who taught it (default: the first word of git config user.name)")
+  .action(async (skill: string, dir: string, opts: { text?: string; description?: string; section?: string; author?: string }) => {
+    const repo = resolve(dir);
+    const text = (opts.text ?? (await readStdin())).trim();
+    if (!text) {
+      console.error(`✗ a takeaway needs its text, on stdin or with -m:`);
+      console.error(`  ${cmd("graft learn")} ${skill} <<'EOF'\n  Read rotation with page.Rotation(), never pdfcpu: it drops /Rotate on linearized files.\n  EOF`);
+      process.exitCode = 1;
+      return;
+    }
+    const author = opts.author?.trim() || noteAuthor(repo);
+    let r: LearnResult;
+    try {
+      r = learn(repo, { skill, text, author, date: new Date().toISOString().slice(0, 10), description: opts.description, section: opts.section });
+    } catch (err) {
+      console.error(`✗ ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    track("takeaway_saved", { new_skill: String(r.created) }, { repo });
+    const kind = r.created ? "new skill" : r.skill.where === "repo" ? "the repo's skill" : "skill";
+    console.log(`✓ takeaway saved to ${kind} ${r.skill.name}${author ? ` · taught by ${author}` : ""}`);
+    console.log(`· your agent follows it from now on · kept on this machine, in ${shownPath(dirname(dirname(r.takeaway.path)))}`);
+    console.log(`· ${cmd("graft skills")} fold ${r.skill.name} writes it into SKILL.md`);
+  });
+
+const skillsCmd = grouped(program.command("skills", { hidden: !TRAIL }), GROUP.memory)
+  .description("List this repo's skills, and the takeaways waiting to fold into each")
+  .argument("[dir]", "repository root", ".")
+  .option("--json", "output as JSON")
+  .action((dir: string, opts: { json?: boolean }) => {
+    const repo = resolve(dir);
+    const all = listSkills(repo);
+    if (opts.json) {
+      console.log(JSON.stringify(all, null, 2));
+      return;
+    }
+    if (all.length === 0) {
+      console.log(`no skills yet · ${cmd("graft learn")} <skill> saves the first takeaway and makes the skill`);
+      return;
+    }
+    const width = Math.max(...all.map((s) => s.name.length)) + 2;
+    for (const s of all) console.log(`${s.name.padEnd(width)}${skillStatus(s)}`);
+  });
+
+/** `✗ no skill called x` and the exit code, for a name that isn't one. */
+function noSuchSkill(name: string): void {
+  console.error(`✗ no skill called ${skillName(name)} · ${cmd("graft skills")} lists them`);
+  process.exitCode = 1;
+}
+
+skillsCmd
+  .command("show")
+  .description("Print a skill with every takeaway not yet folded in: what an agent reads before working in its area")
+  .argument("<skill>", "the skill")
+  .option("-C, --dir <path>", "repository root", ".")
+  .action((skill: string, opts: { dir: string }) => {
+    const s = getSkill(resolve(opts.dir), skill);
+    if (!s) return noSuchSkill(skill);
+    process.stdout.write(skillForAgent(s));
+  });
+
+skillsCmd
+  .command("fold")
+  .description("Write a skill's waiting takeaways into its SKILL.md and bump its version")
+  .argument("[skill]", "one skill; leave out to fold every skill with takeaways waiting")
+  .option("--confirmed", "only the takeaways someone other than their teacher confirmed")
+  .option("-C, --dir <path>", "repository root", ".")
+  .action((skill: string | undefined, opts: { confirmed?: boolean; dir: string }) => {
+    const repo = resolve(opts.dir);
+    if (skill && !getSkill(repo, skill)) return noSuchSkill(skill);
+    const names = skill ? [skill] : listSkills(repo).map((s) => s.name);
+    let inRepo = false;
+    let any = false;
+    for (const n of names) {
+      const r = fold(repo, n, { confirmed: opts.confirmed });
+      if (!r) continue;
+      if (r.folded.length === 0) {
+        if (skill) console.log(`· ${r.skill} v${r.from} · nothing to fold${r.stillWaiting ? `, ${r.stillWaiting} waiting for a second person` : ""}`);
+        continue;
+      }
+      any = true;
+      inRepo ||= r.where === "repo";
+      track("skills_folded", { takeaways_bucket: countBucket(r.folded.length) }, { repo });
+      console.log(`✓ ${r.skill} v${r.from} → v${r.to} · folded ${r.folded.length} takeaway${r.folded.length === 1 ? "" : "s"}${r.stillWaiting ? `, ${r.stillWaiting} still waiting` : ""}`);
+      console.log(`  M ${r.where === "repo" ? shown(repo, r.file) : shownPath(r.file)}   ${r.sections.map((h) => `+ ${h}`).join(" ")}`);
+    }
+    if (!any) {
+      if (!skill) console.log("· nothing to fold");
+      return;
+    }
+    if (inRepo) console.log("· review with git diff, then commit");
+    else console.log(`· ${cmd("graft skills")} publish <skill> moves a skill into the repo's .claude/skills/, to commit for your team`);
+  });
+
+skillsCmd
+  .command("publish")
+  .description("Move a skill kept on this machine into the repo's .claude/skills/, ready to commit")
+  .argument("<skill>", "the skill")
+  .option("-C, --dir <path>", "repository root", ".")
+  .action((skill: string, opts: { dir: string }) => {
+    const repo = resolve(opts.dir);
+    const r = publish(repo, skill);
+    if (!r.ok) {
+      if (r.reason === "unknown") return noSuchSkill(skill);
+      console.log(`· ${skillName(skill)} is already in the repo, in .claude/skills/${skillName(skill)}/`);
+      return;
+    }
+    console.log(`✓ ${skillName(skill)} → ${shown(repo, r.file)}`);
+    console.log("· commit it to share it: Claude Code loads it for everyone who pulls. its takeaways stay on this machine");
+  });
+
+skillsCmd
+  .command("confirm")
+  .description("Say a teammate's takeaway is right, so `fold --confirmed` takes it")
+  .argument("<skill>", "the skill")
+  .argument("[takeaway]", "one takeaway file (default: every one waiting that someone else taught)")
+  .option("--author <name>", "who is confirming (default: the first word of git config user.name)")
+  .option("-C, --dir <path>", "repository root", ".")
+  .action((skill: string, takeaway: string | undefined, opts: { author?: string; dir: string }) => {
+    const repo = resolve(opts.dir);
+    if (!getSkill(repo, skill)) return noSuchSkill(skill);
+    const who = opts.author?.trim() || noteAuthor(repo);
+    const done = confirm(repo, skill, who, takeaway);
+    if (done.length === 0) {
+      console.log(`· nothing to confirm on ${skillName(skill)} — a takeaway needs someone other than its teacher`);
+      return;
+    }
+    for (const t of done) console.log(`✓ confirmed ${t.taughtBy || "a"}'s takeaway from ${shortDate(t.date)} · ${shownPath(t.path)}`);
+    console.log(`· ${cmd("graft skills")} fold ${skillName(skill)} writes it into SKILL.md`);
   });
 
 grouped(program.command("init"), GROUP.setup)
@@ -2279,7 +2422,7 @@ if (TRAIL) {
     habit.addCommand(c);
 
   // Help lists the groups in this order, and the commands within each.
-  const order = ["ask", "grep", "skeleton", "callers", "map", "note", "init", "build", "status", "upgrade", "uninstall", "telemetry", "login", "push", "pull", "logout", "blast"];
+  const order = ["ask", "grep", "skeleton", "callers", "map", "note", "learn", "skills", "init", "build", "status", "upgrade", "uninstall", "telemetry", "login", "push", "pull", "logout", "blast"];
   const rank = (c: Command) => {
     const i = order.indexOf(c.name());
     return i === -1 ? order.length : i;
@@ -2294,6 +2437,8 @@ if (TRAIL) {
     callers: "who calls it, or what it calls with --direction out",
     map: "directory clusters, hubs and hotspots",
     note: "save what this session decided, tried and ruled out",
+    learn: "turn a correction into a takeaway on a skill",
+    skills: "list skills, show one, fold takeaways in, publish to the repo",
     init: "wire trail into your agents",
     build: "rebuild the code map · --check fails if it's stale",
     status: "code map, notes, cloud link and tokens saved",

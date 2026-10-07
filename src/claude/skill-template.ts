@@ -68,6 +68,14 @@ under \`## Decided\`, \`## Tried and ruled out\` and \`## Watch out\`. A summary
 never a transcript, and nothing secret. It stays on this machine until its
 owner shares it with \`trail login\`.
 
+## Skills and corrections
+When the user corrects how something is done here, save it so your agent
+learns it: \`trail learn <skill>\` with the rule and why on stdin, using a skill
+that fits (\`trail skills\` lists them) or a short new name (add
+\`--description "<what it covers>"\` for a new one). Corrections stay on this
+machine. Before working in a skill's area, run \`trail skills show <skill>\`:
+it prints the skill with every correction not yet folded into its SKILL.md.
+
 If \`trail\` isn't installed on this machine but \`graft\` is, it's the same
 command under its old name.
 `;

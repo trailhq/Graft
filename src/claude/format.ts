@@ -211,7 +211,7 @@ export function relevantRetrieval(ask: AskJson, s: SessionState, cap = 3): strin
   return txt;
 }
 
-export function formatOrientation(indexMd: string, budgetBytes = 1500, staleNote?: string, notes = 0, keepsNotes = notes > 0): string {
+export function formatOrientation(indexMd: string, budgetBytes = 1500, staleNote?: string, notes = 0, keepsNotes = notes > 0, skills = ''): string {
   // Always-on directive (cached, seen turn 0) so the agent reaches for graft's
   // commands without waiting for the discretionary skill to load. This is the
   // reliable steering channel (fires every session, unlike the discretionary
@@ -231,7 +231,8 @@ export function formatOrientation(indexMd: string, budgetBytes = 1500, staleNote
     `  Already know the file or symbol to change? Go straight to it: ${cmd('graft grep')} "<symbol>", read the span, edit. Save ask for when you don't yet know where the code lives.\n` +
     `  Refactor, rename, or multi-file change? Run ${cmd('graft callers')} <sym> --depth all FIRST to map every connected file; editing the primary file and stopping is the classic miss (platform siblings, a new file to extract).\n` +
     `Each tool opens its output with a "${tag()} tokens saved ≈ N" line, sometimes with its dollar value; when you used ${b} this turn, close your reply with a one-line tally of the total saved, dollars included when given (e.g. 🌱 ${b} saved ~12k tokens (~$0.04) this turn, 3 calls). Never price tokens yourself; never pipe ${b} through head/tail — it is already capped, and clipping drops that line.\n` +
-    teamNotesDirective(notes, keepsNotes);
+    teamNotesDirective(notes, keepsNotes) +
+    skills;
   const banner = staleNote ? `${staleNote}\n\n` : "";
   return `${banner}${directive}\nrepo map (graft/INDEX.md):\n${indexMd.slice(0, budgetBytes)}`;
 }
@@ -251,7 +252,8 @@ export function teamNotesDirective(notes: number, kept = notes > 0): string {
       : '';
   return (
     read +
-    `When you finish a task that took real digging, leave a note for the next session: \`${cmd('graft note')} --title "<what it was about>"\` with the note on stdin, under ## Decided, ## Tried and ruled out and ## Watch out. A summary, never a transcript, and nothing secret. It stays on this machine until its owner shares it.\n`
+    `When you finish a task that took real digging, leave a note for the next session: \`${cmd('graft note')} --title "<what it was about>"\` with the note on stdin, under ## Decided, ## Tried and ruled out and ## Watch out. A summary, never a transcript, and nothing secret. It stays on this machine until its owner shares it.\n` +
+    `When the user corrects how something is done here, save it so your agent learns it: \`${cmd('graft learn')} <skill>\` with the rule and why on stdin, using a skill that fits (\`${cmd('graft skills')}\` lists them) or a short new name.\n`
   );
 }
 
