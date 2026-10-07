@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { HOSTS, detectHosts, type DetectProbe, type HostTarget } from './registry.js';
 import { upsertSection } from './sections.js';
-import { registerMcpConfigs, type McpWrite } from './mcp-config.js';
+import { registerMcpConfigs, type McpWrite, type PackageRunner } from './mcp-config.js';
 import { installCodexHooks } from './codex-hooks.js';
 import { installCursorHooks } from './cursor-hooks.js';
 import type { ConfigWrite } from './config-write.js';
@@ -47,6 +47,8 @@ export function runHostsInit(
     hooks?: boolean;
     /** false → skip every write outside the repo (the ~/.codex/ targets). */
     global?: boolean;
+    /** `--runner`: written into every generated MCP config. */
+    runner?: PackageRunner;
   } = {},
 ): HostsInitResult {
   const home = opts.home ?? homedir();
@@ -77,7 +79,7 @@ export function runHostsInit(
   const mcp =
     opts.mcp === false
       ? []
-      : registerMcpConfigs(repo, selected.map((h) => h.id), { home, global: opts.global });
+      : registerMcpConfigs(repo, selected.map((h) => h.id), { home, global: opts.global, runner: opts.runner });
   // The Codex hook targets are user-level (~/.codex), so --no-global suppresses them.
   const hooks =
     opts.hooks === false || opts.global === false || !selected.some((h) => h.id === 'agents')

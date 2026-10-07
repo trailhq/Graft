@@ -44,10 +44,10 @@ function rewriteWiring(repo: string, hosts: string[], opts: WiringOpts): void {
   // its `~/.claude` writes (hosts/claude-global.ts) are out-of-repo, and a user who
   // declined those at init time must keep declining them on every replay.
   if (hosts.includes('claude'))
-    runInit(repo, { build: false, cliPath: graftCliPath(), statusline: opts.statusline, global: opts.global });
+    runInit(repo, { build: false, cliPath: graftCliPath(), statusline: opts.statusline, global: opts.global, runner: opts.runner });
   const others = hosts.filter((h) => h !== 'claude');
   if (others.length)
-    runHostsInit(repo, { agents: others, global: opts.global, mcp: opts.mcp, hooks: opts.hooks });
+    runHostsInit(repo, { agents: others, global: opts.global, mcp: opts.mcp, hooks: opts.hooks, runner: opts.runner });
 }
 
 /**

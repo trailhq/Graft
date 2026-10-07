@@ -58,6 +58,7 @@ import {
 } from "./brain/watch-trail.js";
 import { AUTOPUSH_CHILD_ENV, recordTrailPush } from "./brain/autopush.js";
 import { startSpinner } from "./util/spinner.js";
+import { isPackageRunner, type PackageRunner } from "./hosts/mcp-config.js";
 import { contextDirFor } from "./context/node-file.js";
 import { loadGraphCached } from "./graph/load.js";
 import { ensureFreshChildren, ensureFreshGraph, refreshNote } from "./graph/refresh.js";
@@ -984,13 +985,14 @@ program
   .option("-y, --yes", "skip the picker and wire every detected agent (the pre-0.8 default)")
   .option("--no-global", "skip writes outside this repo (the ~/.codex/ config + hooks)")
   .option("--trail <handoff>", "attach a Trail: <brainId>:<token> (or a bare id with GRAFT_BRAIN_TOKEN set)")
+  .option("--runner <npx|bunx|pnpm|yarn>", "package runner written into generated MCP configs (default: detect from the lockfile)")
   .option("--verbose", "print every file written, the graph build's own output and the closing banner")
   .action(async (dir: string, opts: InitOptions) => {
     await runInitCommand(dir, opts);
   });
 
 /** `graft init`'s flags, as commander hands them over. */
-interface InitOptions { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; trail?: string; verbose?: boolean }
+interface InitOptions { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; trail?: string; verbose?: boolean; runner?: string }
 
 /** `a, b and c`. */
 function joinAnd(items: string[]): string {
@@ -1030,6 +1032,11 @@ async function runInitCommand(
       }
       brainLink = parsed;
     }
+    if (opts.runner !== undefined && !isPackageRunner(opts.runner)) {
+      console.error(`✗ unknown --runner ${opts.runner} — valid: npx, bunx, pnpm, yarn`);
+      process.exit(1);
+    }
+    const runner: PackageRunner | undefined = opts.runner !== undefined && isPackageRunner(opts.runner) ? opts.runner : undefined;
     const repo = resolve(dir);
     const explicit = Array.isArray(opts.agents) ? opts.agents : undefined;
 
@@ -1119,7 +1126,7 @@ async function runInitCommand(
     const reports: WireReport[] = [];
     for (const target of targets) {
       if (verbose && target !== repo) console.error(`\n— ${relative(repo, target)}/`);
-      reports.push(wireTarget(target, ids, { home, cliPath, plan, opts, wantClaude, quiet: !verbose }));
+      reports.push(wireTarget(target, ids, { home, cliPath, plan, opts: { ...opts, runner }, wantClaude, quiet: !verbose }));
     }
 
     // The graph, built once after the wiring: a workspace parent's build is
@@ -1245,7 +1252,7 @@ function wireTarget(
     cliPath: string;
     plan: ReturnType<typeof planInit>;
     wantClaude: boolean;
-    opts: { build?: boolean; mcp?: boolean; hooks?: boolean; global?: boolean; statusline?: boolean };
+    opts: { build?: boolean; mcp?: boolean; hooks?: boolean; global?: boolean; statusline?: boolean; runner?: PackageRunner };
     /** Collect warnings and removals instead of printing a line per file, and
      *  leave the graph build to the caller (see buildGraphWithProgress). */
     quiet?: boolean;
@@ -1278,7 +1285,7 @@ function wireTarget(
       // `global`/`home` are threaded through alongside `statusline`: the claude layer
       // writes under `~/.claude` now (hosts/claude-global.ts), so --no-global has to
       // reach it or the flag would silently mean "no out-of-repo writes, except three".
-      const res = runInit(repo, { build: opts.build, cliPath, statusline: wantStatusline, global: opts.global, home });
+      const res = runInit(repo, { build: opts.build, cliPath, statusline: wantStatusline, global: opts.global, home, runner: opts.runner });
       say(`✓ wrote ${res.settingsPath}`);
       for (const s of res.shims) say(`✓ wrote ${s}`);
       say(`✓ wrote ${res.skill}`);
@@ -1303,6 +1310,7 @@ function wireTarget(
         mcp: opts.mcp,
         hooks: opts.hooks,
         global: opts.global,
+        runner: opts.runner,
       });
       for (const w of r.written) say(`✓ ${w.id}: ${w.path} (${w.action})`);
       for (const m of r.mcp) say(`✓ mcp ${m.id}: ${m.path} (${m.action})`);
@@ -1322,6 +1330,7 @@ function wireTarget(
       mcp: opts.mcp !== false,
       hooks: opts.hooks !== false,
       statusline: wantStatusline,
+      ...(opts.runner ? { runner: opts.runner } : {}),
     });
 
     // Every host's wiring points at graft/, so the graph is built whatever was

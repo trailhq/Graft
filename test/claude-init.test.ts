@@ -212,3 +212,36 @@ test('buildGraphIfMissing: an existing graph is left alone', () => {
   // A bogus cliPath would throw if it were reached; the wiring check short-circuits.
   assert.equal(buildGraphIfMissing(dir, { build: true, cliPath: '/nonexistent/cli.js' }), false);
 });
+
+test('runInit --runner bunx writes bunx into .mcp.json', () => {
+  const d = fresh();
+  runInit(d, { build: false, runner: 'bunx', home: fresh() });
+  const mcp = JSON.parse(readFileSync(join(d, '.mcp.json'), 'utf8'));
+  assert.deepEqual(mcp.mcpServers.graft, { command: 'bunx', args: ['@nanonets/graft', 'mcp'] });
+});
+
+
+test('runInit detects the target repo runner for both project and user-scope MCP', () => {
+  const repo = fresh();
+  const home = fresh();
+  const caller = fresh();
+  writeFileSync(join(repo, 'bun.lock'), '{}');
+  const previousCwd = process.cwd();
+  const previousForced = process.env.GRAFT_MCP_NPX;
+  try {
+    // `graft init /another/repo` must read that repo's lockfile for every
+    // registration, rather than reading the directory the CLI was started in.
+    process.chdir(caller);
+    delete process.env.GRAFT_MCP_NPX;
+    runInit(repo, { build: false, home });
+    const project = JSON.parse(readFileSync(join(repo, '.mcp.json'), 'utf8'));
+    const user = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'));
+    const expected = { command: 'bunx', args: ['@nanonets/graft', 'mcp'] };
+    assert.deepEqual(project.mcpServers.graft, expected);
+    assert.deepEqual(user.mcpServers.graft, expected);
+  } finally {
+    process.chdir(previousCwd);
+    if (previousForced === undefined) delete process.env.GRAFT_MCP_NPX;
+    else process.env.GRAFT_MCP_NPX = previousForced;
+  }
+});
