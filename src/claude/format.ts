@@ -239,9 +239,10 @@ export function formatOrientation(indexMd: string, budgetBytes = 1500, staleNote
 
 /**
  * The paragraph about notes, for a repo that keeps them on this machine
- * (`kept`): read the ones there are first, credit them in the tally, and
- * leave one when done. Empty for a repo that keeps none, so graft's directive
- * is unchanged everywhere else.
+ * (`kept`): read the ones there are first, credit them in the tally, leave
+ * one when done, and save corrections. Under trail, also run the check before
+ * a PR; under graft, `check` is still the freshness check. Empty for a repo
+ * that keeps none, so graft's directive is unchanged everywhere else.
  */
 export function teamNotesDirective(notes: number, kept = notes > 0): string {
   if (!kept) return '';
@@ -253,7 +254,10 @@ export function teamNotesDirective(notes: number, kept = notes > 0): string {
   return (
     read +
     `When you finish a task that took real digging, leave a note for the next session: \`${cmd('graft note')} --title "<what it was about>"\` with the note on stdin, under ## Decided, ## Tried and ruled out and ## Watch out. A summary, never a transcript, and nothing secret. It stays on this machine until its owner shares it.\n` +
-    `When the user corrects how something is done here, or states a rule for it, save it so your agent learns it: \`${cmd('graft learn')} <skill>\` with the rule and why on stdin, using a skill that fits (\`${cmd('graft skills')}\` lists them) or a short new name.\n`
+    `When the user corrects how something is done here, or states a rule for it, save it so your agent learns it: \`${cmd('graft learn')} <skill>\` with the rule and why on stdin, using a skill that fits (\`${cmd('graft skills')}\` lists them) or a short new name.\n` +
+    (brand() === 'trail'
+      ? `Before you open a PR or push a branch for review, run \`trail check\`: it compares the diff with what the team has learned and exits 1 on a conflict. Fix the conflict, or say in the PR description why the change is right anyway.\n`
+      : '')
   );
 }
 

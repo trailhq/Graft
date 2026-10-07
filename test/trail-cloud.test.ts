@@ -261,3 +261,29 @@ test("the index fingerprint changes when a note or a takeaway does", () => {
   learn(d, { skill: "pdf-coords", text: "Another takeaway.", author: "Mei", date: "2026-10-08" });
   assert.notEqual(afterNote, indexFingerprint(indexPayload(d)));
 });
+
+// --- what agents are told about the check ---
+
+test("under trail, the skill and the session-start text say to run trail check before a PR; graft's never do", async () => {
+  const { skillTemplate } = await import("../src/claude/skill-template.js");
+  const { formatOrientation } = await import("../src/claude/format.js");
+  const { BRAND_ENV } = await import("../src/brand.js");
+  const matter = (await import("gray-matter")).default;
+  const { data, content } = matter(skillTemplate("trail"));
+  assert.match(data.description, /Before you open a PR or push a branch for review, run trail check/);
+  assert.ok(data.description.length <= 1024, "skill descriptions are capped at 1,024 characters");
+  assert.match(content, /\*\*Before you open a PR or push a branch for review\*\*, run `trail check`/);
+  assert.match(content, /^## Before you open a PR$/m);
+  assert.doesNotMatch(skillTemplate("graft"), /trail check|before you open a PR/i, "graft check is still the freshness check");
+
+  const prev = process.env[BRAND_ENV];
+  try {
+    process.env[BRAND_ENV] = "trail";
+    assert.match(formatOrientation("# map", 100, undefined, 0, true), /Before you open a PR or push a branch for review, run `trail check`/);
+    delete process.env[BRAND_ENV];
+    assert.doesNotMatch(formatOrientation("# map", 100, undefined, 0, true), /trail check|before you open a PR/i);
+  } finally {
+    if (prev === undefined) delete process.env[BRAND_ENV];
+    else process.env[BRAND_ENV] = prev;
+  }
+});

@@ -23,8 +23,9 @@ const TRAIL_DESCRIPTION = `Use for ANY task in this repo, whether understanding 
   Run trail ask before grepping or reading source. It finds the code and the
   notes past sessions left on what was decided and ruled out. When the user
   corrects how something is done here, or states a rule for it, save it with
-  trail learn. When you finish a task that took real digging, leave a note
-  with trail note.`;
+  trail learn. Before you open a PR or push a branch for review, run trail
+  check. When you finish a task that took real digging, leave a note with
+  trail note.`;
 
 /** The same moments, first in the body, so they're read before the tool docs. */
 const TRAIL_MOMENTS = `## When to reach for trail
@@ -36,6 +37,9 @@ const TRAIL_MOMENTS = `## When to reach for trail
   on. Before working in a skill's area, \`trail skills show <skill>\` prints it
   with the corrections not yet folded in. How is under Skills and corrections
   below.
+- **Before you open a PR or push a branch for review**, run \`trail check\`. It
+  checks the diff against what the team has learned. How is under Before you
+  open a PR below.
 - **When you finish a task that took real digging**, leave a note for the next
   session with \`trail note\`. How is under Session notes below.
 
@@ -46,7 +50,8 @@ const TRAIL_MOMENTS = `## When to reach for trail
  * The graft text with trail's spelling. The code map still lives in `graft/`,
  * so a `graft` followed by `/` is a path and stays; `graft check` became
  * `trail build --check`. Trail has its own frontmatter and opens with the
- * moments to reach for it. Then the part only trail has: session notes.
+ * moments to reach for it. Then the parts only trail has: session notes,
+ * corrections and the check before a PR.
  */
 function trailSkill(graft: string): string {
   const text = graft
@@ -83,6 +88,15 @@ short new name (add \`--description "<what it covers>"\` for a new one).
 Corrections stay on this machine. Before working in a skill's area, run
 \`trail skills show <skill>\`: it prints the skill with every correction not
 yet folded into its SKILL.md.
+
+## Before you open a PR
+Before you open a PR or push a branch for review, run \`trail check\`. It
+compares the branch's diff with the notes and skills your team shared, and
+exits 1 when the change goes against one. Fix the conflict, or say in the PR
+description why the change is right anyway. \`--base <ref>\` picks what to
+compare against; the default is origin's default branch. If this repo isn't
+signed in to Trail, the check says what it would cover and how to turn it
+on: pass that on to the user once, then carry on.
 
 If \`trail\` isn't installed on this machine but \`graft\` is, it's the same
 command under its old name.
