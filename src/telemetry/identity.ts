@@ -87,10 +87,11 @@ export function installId(home?: string): Install {
  * `ensureBuildConfigIgnored`, which appends to the repo's `.gitignore`. Minting
  * an id during a read-only `graft ask` must not modify a file the user has
  * committed. `graft/.cache/` is already derived, already git-ignored, and
- * already where every other per-repo sidecar lives.
+ * already where every other per-repo sidecar lives. A caller-selected context
+ * directory puts the ID in that graph's `.cache/` instead of the default.
  */
-export function repoId(repo: string): string {
-  const path = join(cacheDir(repo), 'telemetry-repo-id.json');
+export function repoId(repo: string, contextDir?: string): string {
+  const path = join(cacheDir(repo, contextDir), 'telemetry-repo-id.json');
   const existing = readJson<{ repoId?: string }>(path);
   if (existing?.repoId) return existing.repoId;
   const id = randomUUID();

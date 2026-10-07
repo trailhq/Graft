@@ -30,8 +30,8 @@ const LOCK_FILE = '.sync.lock';
 
 /**
  * Where the pieces this module manages (the stats cache, the sync lock,
- * per-session state, the upkeep stamp) actually live when no caller-supplied
- * override is available. The Claude Code hooks, `sync-run`, the statusline,
+ * per-session state, the upkeep stamp) actually live. A caller-selected graph
+ * directory wins; without one, the Claude Code hooks, `sync-run`, the statusline,
  * and `upkeep` all resolve a bare project dir and never see an explicit
  * `--dir` — unlike a direct CLI invocation, which threads one through
  * `contextDirFor` (`context/node-file.ts`). This mirrors that same override
@@ -40,13 +40,16 @@ const LOCK_FILE = '.sync.lock';
  * the `--deep` LLM path. A relative `GRAFT_DIR` resolves against `projectDir`
  * so it holds regardless of the caller's cwd.
  */
-export function resolveContextDir(projectDir: string): string {
+export function resolveContextDir(projectDir: string, contextDir?: string): string {
+  // An explicit directory has already been selected by the CLI/graph caller.
+  // Keep its spelling (including relative paths) consistent with that graph.
+  if (contextDir) return contextDir;
   const override = process.env.GRAFT_DIR;
   if (!override) return join(projectDir, 'graft');
   return isAbsolute(override) ? override : join(projectDir, override);
 }
 
-export function cacheDir(projectDir: string): string { return join(resolveContextDir(projectDir), '.cache'); }
+export function cacheDir(projectDir: string, contextDir?: string): string { return join(resolveContextDir(projectDir, contextDir), '.cache'); }
 function statsPath(d: string): string { return join(cacheDir(d), 'stats.json'); }
 
 export function readJson<T>(p: string): T | null {

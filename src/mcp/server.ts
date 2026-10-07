@@ -136,7 +136,7 @@ export function startMcpServer(root: string, dirOverride?: string, version = '0'
             // `{"name":"constructor"}`, and a plain lookup would hand `track` a
             // function rather than undefined.
             const command = Object.hasOwn(TOOL_COMMAND, name) ? TOOL_COMMAND[name] : undefined;
-            track('query', { command, surface: 'mcp' }, { repo: root, host: 'mcp' });
+            track('query', { command, surface: 'mcp' }, { repo: root, contextDir: dirOverride, host: 'mcp' });
             reply(id, { content: [{ type: 'text', text: r.text }], isError: r.isError });
           },
           (err) => replyError(id, -32603, err instanceof Error ? err.message : String(err)),

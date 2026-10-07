@@ -37,6 +37,9 @@ export interface QueuedEvent {
 export interface TrackContext {
   /** Repo root, when the call site has one — supplies `repo_id`. */
   repo?: string;
+  /** Selected graph directory. Used only for the local repo-id sidecar; this
+   *  path never enters event properties or crosses the telemetry wire. */
+  contextDir?: string;
   /** Which surface is calling. Defaults to the CLI. */
   host?: AgentHost;
   /** Test seam: a scratch `$HOME`. Production callers never pass this. */
@@ -71,7 +74,7 @@ function commonProps(ctx: TrackContext): Record<string, string> {
     agent_host: detectHost(ctx.host, ctx.env ?? process.env),
   };
   if (ctx.repo) {
-    try { props.repo_id = repoId(ctx.repo); } catch { /* unwritable cache — omit */ }
+    try { props.repo_id = repoId(ctx.repo, ctx.contextDir); } catch { /* unwritable cache — omit */ }
   }
   return props;
 }

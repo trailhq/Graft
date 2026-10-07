@@ -5,7 +5,7 @@
  * workspace parent (≥2 git children) federates query commands across children.
  */
 import "dotenv/config";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Graft } from "./engine.js";
@@ -136,7 +136,7 @@ program
   .name("graft")
   .description("Build a repo's context graph as linked markdown, and keep it in sync with the code.")
   .version(currentVersion, "-v, --version")
-  .option("--dir <path>", "context graph directory (default: <repo>/graft)")
+  .addOption(new Option("--dir <path>", "context graph directory (default: <repo>/graft)").env("GRAFT_DIR"))
   .option("--provider <name>", "LLM wire format: openai | anthropic | litellm | orcarouter (env GRAFT_PROVIDER)")
   .option("--model <id>", "model id for the LLM pass (env GRAFT_MODEL)")
   .option("--api-key <key>", "provider API key (env GRAFT_API_KEY)")
@@ -148,6 +148,12 @@ interface GlobalOpts {
   model?: string;
   apiKey?: string;
   baseUrl?: string;
+}
+
+/** Keep CLI repo identities beside the graph selected by --dir, including
+ * commands that only emit a query or signup event. Paths stay local. */
+function telemetryContext(repo?: string, contextDir = program.opts<GlobalOpts>().dir) {
+  return { repo, contextDir };
 }
 
 /** Config drawn from the global CLI flags (env + defaults fill the rest). */
@@ -275,7 +281,7 @@ program.hook("preAction", (_parent, action) => {
 program.hook("postAction", (_parent, action) => {
   const name = action.name();
   if (!isTrackedCommand(name)) return;
-  track("query", { command: name, surface: "cli", hit: queryNote.hit }, { repo: queryNote.repo });
+  track("query", { command: name, surface: "cli", hit: queryNote.hit }, telemetryContext(queryNote.repo));
 });
 
 // Hidden from --help: only ever spawned detached by maybeRefreshInBackground.
@@ -533,7 +539,7 @@ program
           ),
       }).catch((err: unknown) => {
         // Only the stage and a code enum; the message stays on this machine.
-        track("build_failed", { stage: "summarize", code: errorCode(err) }, { repo: buildRoot });
+        track("build_failed", { stage: "summarize", code: errorCode(err) }, telemetryContext(buildRoot, resolved.contextDir));
         throw err;
       });
       process.stderr.write("\n");
@@ -557,7 +563,7 @@ program
           `\r${phase === "enrich" ? "summarizing" : "parsing"} ${index + 1}/${total}: ${file.slice(0, 50).padEnd(50)}`,
         ),
     }).catch((err: unknown) => {
-      track("build_failed", { stage: "graph", code: errorCode(err) }, { repo: buildRoot });
+      track("build_failed", { stage: "graph", code: errorCode(err) }, telemetryContext(buildRoot, resolved.contextDir));
       throw err;
     });
     process.stderr.write("\n");
@@ -581,7 +587,7 @@ program
         duration_bucket: durationBucket(Date.now() - buildStartedAt),
         incremental: String(g.reused > 0),
       },
-      { repo: buildRoot },
+      telemetryContext(buildRoot, g.contextDir),
     );
     for (const e of g.errors) console.error(`✗ ${e}`);
 
@@ -1223,7 +1229,7 @@ async function runInitCommand(
     track(
       "init_completed",
       { agents: [...ids].sort().join(","), consent: consent === undefined ? "unasked" : String(consent) },
-      { repo },
+      telemetryContext(repo),
     );
     return { ids };
 }
@@ -1426,7 +1432,7 @@ async function signUpForBrain(repo: string, slug: string): Promise<BrainLink | n
   // the outcome is the one thing a terminal handoff can lose: a user who reads
   // the URL and walks away kills the process, and only an event already on disk
   // survives that. This is the denominator; `brain_signup_settled` is not.
-  track("brain_signup_opened", { mode: "terminal" }, { repo });
+  track("brain_signup_opened", { mode: "terminal" }, telemetryContext(repo));
 
   // Printed before the browser opens, and printed whether or not it opens: on a
   // remote shell nothing can open, and on a desktop the window sometimes lands
@@ -1450,19 +1456,19 @@ async function signUpForBrain(repo: string, slug: string): Promise<BrainLink | n
   if (got === "stopped") {
     handoff.close();
     console.error("· stopped — nothing was sent; run graft trail push again when you're ready");
-    track("brain_signup_settled", { outcome: "stopped", mode: "terminal", duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
+    track("brain_signup_settled", { outcome: "stopped", mode: "terminal", duration_bucket: durationBucket(Date.now() - startedAt) }, telemetryContext(repo));
     process.exitCode = 130;
     return null;
   }
   if ("error" in got) {
     console.error(`✗ ${got.error}`);
     // The category, never the sentence: `got.error` names the repo and the link.
-    track("brain_signup_settled", { outcome: got.reason, mode: "terminal", duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
+    track("brain_signup_settled", { outcome: got.reason, mode: "terminal", duration_bucket: durationBucket(Date.now() - startedAt) }, telemetryContext(repo));
     return null;
   }
   writeLink(repo, got.link);
   console.error(`✓ trail connected · ${slug} — your browser shows it building`);
-  track("brain_signup_settled", { outcome: "linked", mode: "terminal", duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
+  track("brain_signup_settled", { outcome: "linked", mode: "terminal", duration_bucket: durationBucket(Date.now() - startedAt) }, telemetryContext(repo));
   return got.link;
 }
 
@@ -1480,14 +1486,14 @@ async function signUpForBrain(repo: string, slug: string): Promise<BrainLink | n
 async function signUpWithoutTerminal(repo: string, slug: string): Promise<BrainLink | null> {
   const startedAt = Date.now();
   const settled = (outcome: string) =>
-    track("brain_signup_settled", { outcome, mode: "agent", duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
+    track("brain_signup_settled", { outcome, mode: "agent", duration_bucket: durationBucket(Date.now() - startedAt) }, telemetryContext(repo));
   const pending = readPendingSignup(repo, slug, PENDING_SIGNUP_TTL_MS);
 
   if (!pending) {
     const state = newSignupState();
     writePendingSignup(repo, { state, repo: slug, createdAt: Date.now() });
     const url = signupUrl({ repo: slug, state });
-    track("brain_signup_opened", { mode: "agent" }, { repo });
+    track("brain_signup_opened", { mode: "agent" }, telemetryContext(repo));
     openBrowser(url);
     console.error(`· ${slug} has no trail yet — opened Trail's sign-up page in the browser:`);
     console.error(`  ${url}`);
