@@ -21,4 +21,6 @@ test('skill template is a well-formed SKILL.md', () => {
   assert.match(body, /--in <scope>\//, 'body teaches narrowing with ask --in <scope>/');
   assert.match(body, /tokens saved/i, 'body references the tokens-saved footer');
   assert.match(body, /every turn/i, 'body tells the agent to report savings each turn');
+  assert.match(body, /npx -y @nanonets\/graft/, 'body tells the agent how to run without a global install');
+  assert.match(body, /does not install it/, 'body says graft init does not put the CLI on PATH');
 });
