@@ -317,6 +317,23 @@ test("the skill speaks trail in a repo wired for it, keeps graft/ paths, and tea
   assert.doesNotMatch(trail, /\.trail\/notes|gets committed/);
 });
 
+// Claude Code reads only a skill's description up front, so the moments to
+// reach for trail have to be named there, and lead the body.
+test("the trail skill's description names when to use its commands, and the body leads with them", async () => {
+  const { skillTemplate } = await import("../src/claude/skill-template.js");
+  const matter = (await import("gray-matter")).default;
+  const { data, content } = matter(skillTemplate("trail"));
+  assert.equal(data.name, "trail");
+  assert.ok(data.description.length <= 1024, "skill descriptions are capped at 1,024 characters");
+  assert.match(data.description, /ANY task in this repo/);
+  assert.match(data.description, /trail ask before grepping/);
+  assert.match(data.description, /When you finish a task .* trail note/);
+  assert.doesNotMatch(data.description, /graft/, "nothing about the old name or the graft\/ folder");
+  const moments = content.indexOf("## When to reach for trail");
+  assert.ok(moments >= 0 && moments < content.indexOf("## The tools"), "the moments come before the tool docs");
+  assert.match(content, /\*\*When you finish a task that took real digging\*\*/);
+});
+
 test("the session-start directive mentions notes only in a repo that keeps them", async () => {
   const { formatOrientation } = await import("../src/claude/format.js");
   assert.doesNotMatch(formatOrientation("# map", 100), /note/);

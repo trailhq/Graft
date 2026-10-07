@@ -13,16 +13,46 @@ export function skillTemplate(brand: Brand = "graft"): string {
 }
 
 /**
+ * When Claude Code loads the trail skill. It reads only the description up
+ * front and opens the body when the description fits the moment, so the
+ * description names every moment a trail command belongs to, not just code
+ * search. It's a plain YAML scalar, so no ": " and no " #".
+ */
+const TRAIL_DESCRIPTION = `Use for ANY task in this repo, whether understanding how something works,
+  finding where code lives, tracing what calls a symbol or scoping an edit.
+  Run trail ask before grepping or reading source. It finds the code and the
+  notes past sessions left on what was decided and ruled out. When you finish
+  a task that took real digging, leave a note with trail note.`;
+
+/** The same moments, first in the body, so they're read before the tool docs. */
+const TRAIL_MOMENTS = `## When to reach for trail
+- **Before exploring code**, run \`trail ask "<task>" --source\`. Notes from
+  past sessions on what was decided, tried and ruled out print above the code.
+  Read them first.
+- **When you finish a task that took real digging**, leave a note for the next
+  session with \`trail note\`. How is under Session notes below.
+
+## The code map
+`;
+
+/**
  * The graft text with trail's spelling. The code map still lives in `graft/`,
  * so a `graft` followed by `/` is a path and stays; `graft check` became
- * `trail build --check`. Then the part only trail has: session notes.
+ * `trail build --check`. Trail has its own frontmatter and opens with the
+ * moments to reach for it. Then the part only trail has: session notes.
  */
 function trailSkill(graft: string): string {
   const text = graft
+    .replace(/^---\n[\s\S]*?\n---\n/, "")
     .replace("### 6 · Lifecycle: \`graft build\` / \`graft check\`", "### 6 · Lifecycle: \`trail build\` / \`trail build --check\`")
     .replace("\`check\` fails when \`graft/\` is stale, for CI.", "\`build --check\` fails when \`graft/\` is stale, for CI.")
-    .replace(/\bgraft\b(?![/\w-])/g, "trail");
-  return `${text.trimEnd()}
+    .replace(/\bgraft\b(?![/\w-])/g, "trail")
+    .replace("# trail\n", `# trail\n\n${TRAIL_MOMENTS}`);
+  return `---
+name: trail
+description: ${TRAIL_DESCRIPTION}
+---
+${text.trimEnd()}
 
 ## Session notes
 Past sessions on this repo leave notes: what they decided, tried and ruled
