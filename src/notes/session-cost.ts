@@ -90,7 +90,7 @@ function blocks(e: Entry): Array<Record<string, unknown>> {
 /** Claude Code's tools that change a file, each naming it in `file_path` (`notebook_path` for notebooks). */
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
-const NOTE_CALL = /(^|[|&;]\s*|\s)(npx\s+(-y\s+)?(@trailhq\/|@nanonets\/)?)?(trail|graft)\s+note\b/;
+export const NOTE_CALL = /(^|[|&;]\s*|\s)(npx\s+(-y\s+)?(@trailhq\/|@nanonets\/)?)?(trail|graft)\s+note\b/;
 
 /**
  * The cost of one transcript since its last finished note. Pure, for tests:

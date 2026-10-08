@@ -17,7 +17,8 @@ import { readLink } from '../brain/link.js';
 import { pickedAgents } from '../brain/push.js';
 import { readTrailSnapshot, trailContextLine } from '../brain/watch-trail.js';
 import { maybeAutopush, readTrailPushState, recordSeenSuggestions, type AutopushDeps } from '../brain/autopush.js';
-import { adoptRepoBrand, cmd, tag } from '../brand.js';
+import { adoptRepoBrand, brand, cmd, tag } from '../brand.js';
+import { NOTE_CALL } from '../notes/session-cost.js';
 import { keepsNotes, noteCount } from '../notes/home.js';
 import { skillsDirective } from '../skills/skills.js';
 
@@ -380,6 +381,65 @@ function countTallyTurn(input: any, dir: string): void {
   }
 }
 
+/** Tool calls in one turn before it counts as digging worth a note. */
+export const NOTE_WORTHY_CALLS = 4;
+
+/** What the agent is told when a turn took real digging and left no note. */
+export const NOTE_ASK =
+  '[trail] This took real digging and the session has saved no note. Before you finish, leave one for the next session: ' +
+  '`trail note --title "<what it was about>"` with the note on stdin, under ## Decided, ## Tried and ruled out and ## Watch out. ' +
+  "A summary, never a transcript, and nothing secret. Then finish as trail's output asks, if it asks anything.";
+
+/**
+ * Whether the turn that just ended deserves a note: it made at least
+ * NOTE_WORTHY_CALLS tool calls since the person's last message, and nothing in
+ * the session has run `trail note` yet. Pure, for tests: `text` is the
+ * transcript's JSONL.
+ */
+export function turnWantsNote(text: string): boolean {
+  let calls = 0;
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let e: any;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const content = e?.message?.content;
+    const blocks: any[] = Array.isArray(content) ? content : [];
+    // A message the person typed starts a new turn; a tool result does not.
+    if (e?.type === 'user' && (typeof content === 'string' || blocks.some((b) => b?.type === 'text'))) calls = 0;
+    for (const b of blocks) {
+      if (b?.type !== 'tool_use') continue;
+      if (typeof b.input?.command === 'string' && NOTE_CALL.test(b.input.command)) return false;
+      calls++;
+    }
+  }
+  return calls >= NOTE_WORTHY_CALLS;
+}
+
+/**
+ * Under trail, a turn that took real digging and left no note is asked once
+ * per session to leave one, by blocking the stop with the reason. The agent
+ * then saves the note, and trail's output carries on from there (the sign-in
+ * link, when one is due). Never blocks twice in a row: Claude Code sets
+ * `stop_hook_active` on the stop that follows a block.
+ */
+function askForNote(input: any, dir: string): void {
+  try {
+    if (brand() !== 'trail' || input?.stop_hook_active || !input?.transcript_path || !keepsNotes(dir)) return;
+    const id = input?.session_id || 'default';
+    const s = readSession(dir, id);
+    if (s.noteAsked) return;
+    if (!turnWantsNote(readFileSync(input.transcript_path, 'utf8'))) return;
+    writeSession(dir, id, { ...s, noteAsked: true });
+    process.stdout.write(JSON.stringify({ decision: 'block', reason: NOTE_ASK }));
+  } catch {
+    // A missed reminder costs one note; a broken Stop hook costs the session.
+  }
+}
+
 function handleStop(input: any, dir: string): void {
   sampleTurnCost(input, dir);
   countTallyTurn(input, dir);
@@ -509,7 +569,7 @@ export async function main(event: string): Promise<void> {
   // session-start, whose Stop fires per turn and so has no real end signal.
   if (event === 'cursor-session-end') { summarizeSession(dir, cursorSessionId(input), { host: 'cursor' }); return; }
 
-  if (event === 'stop') { handleStop(input, dir); return; }
+  if (event === 'stop') { handleStop(input, dir); askForNote(input, dir); return; }
 
   if (event === 'post-edit-sync') { await handlePostEdit(input, dir); handleStop(input, dir); return; }
 
