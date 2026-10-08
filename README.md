@@ -77,10 +77,12 @@
 ## Trail quick start
 
 ```bash
-npm install -g @trailhq/trail    # install trail, once
-trail init                       # pick your agents, build the code map, wire up Claude Code
-claude                           # then work the way you always do
+npm install -g @trailhq/trail
+trail init
+claude
 ```
+
+Install once. `trail init` asks which agents your team uses, builds the code map and wires up Claude Code. Then work the way you always do.
 
 When a session works something out, your agent leaves a short note: what it decided, what it ruled out, and what to watch out for. The next session on that code gets the note back before it starts digging, and tells you how much work it saved. Notes stay on your machine in `~/.trail`, never in the repo.
 
