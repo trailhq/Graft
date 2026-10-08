@@ -78,7 +78,8 @@ When you finish a task that took real digging, leave a note for the next
 session: \`trail note --title "<what it was about>"\` with the note on stdin,
 under \`## Decided\`, \`## Tried and ruled out\` and \`## Watch out\`. A summary,
 never a transcript, and nothing secret. It stays on this machine until its
-owner shares it with \`trail login\`.
+owner signs in to Trail. When trail's output hands you a sign-in link, end
+your reply with it as it asks; don't run \`trail login\` yourself.
 
 ## Skills and corrections
 When the user corrects how something is done here, or states a rule for

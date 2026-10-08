@@ -98,6 +98,7 @@ import { currentBranch, noteAuthor } from "./notes/git-facts.js";
 import { confirm, fold, getSkill, learn, listSkills, publish, skillForAgent, skillName, skillStatus, type LearnResult } from "./skills/skills.js";
 import { withRankedNotes } from "./cloud/ask-cloud.js";
 import { maybeIndexInBackground, readIndexState, syncIndex } from "./cloud/sync.js";
+import { cloudLines, waitForSignIn } from "./cloud/nudge.js";
 import { checkDiff, fetchTeam, isError, notSupported, type CheckResult } from "./cloud/trail-api.js";
 import { setInputRate } from "./context/savings.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readStamp, readUpdateCache, refreshUpdateCache, wiredHostIds, writeStamp } from "./upkeep.js";
@@ -362,6 +363,14 @@ program
     const repo = resolve(dir);
     const link = readLink(repo);
     if (link) await syncIndex(repo, link);
+  });
+
+program
+  .command("_trail-claim", { hidden: true })
+  .description("internal: wait for a sign-in through the link trail handed the agent, then share this repo's notes")
+  .argument("[dir]", "target repo directory", ".")
+  .action(async (dir: string) => {
+    await waitForSignIn(resolve(dir));
   });
 
 program
@@ -745,6 +754,7 @@ grouped(program.command("ask"), GROUP.find)
     } else {
       const { formatAsk } = await import("./ask/ask.js");
       process.stdout.write(formatAsk(r));
+      printLines(cloudLines(dir, { command: "ask" }));
     }
   });
 
@@ -1324,12 +1334,16 @@ async function runNoteCommand(
   if (prior) console.log(`· builds on ${prior.author ? `${prior.author}'s` : "a"} note from ${shortDate(prior.date)}`);
   if (!SECTIONS.some((s) => sectionLead(body, s.heading) !== null))
     console.log("· tip: notes read best under ## Decided, ## Tried and ruled out and ## Watch out");
-  console.log(
-    readLink(repo)
-      ? "· kept on this machine, never in the repo · shared with your team through Trail"
-      : `· kept on this machine, never in the repo · ${TRAIL ? "trail login" : "graft trail push"} shares notes with your team`,
-  );
+  if (readLink(repo)) console.log("· kept on this machine, never in the repo · shared with your team through Trail");
+  else if (TRAIL) console.log("· kept on this machine, never in the repo");
+  else console.log(`· kept on this machine, never in the repo · ${cmd("graft trail push")} shares notes with your team`);
   maybeIndexInBackground(repo);
+  printLines(cloudLines(repo, { command: "note" }));
+}
+
+/** Lines that close a command's output, with a blank line before them. */
+function printLines(lines: string[]): void {
+  if (lines.length) console.log(`\n${lines.join("\n")}`);
 }
 
 /** `graft init`'s flags, as commander hands them over. */
@@ -2483,7 +2497,8 @@ async function runTeamCheck(repo: string, opts: { base?: string; json?: boolean 
         ? `, which ${dirs.length === 1 ? "has" : "have"} ${notes.length} note${notes.length === 1 ? "" : "s"} and ${skills.length} skill${skills.length === 1 ? "" : "s"}`
         : "";
     console.log(`· this change touches ${where}${has}.`);
-    console.log(`  trail check compares your diff against all of them before you open the PR: ${cmd("graft trail connect")}`);
+    console.log("  trail check compares your diff against your team's notes and skills once you're signed in to Trail");
+    printLines(cloudLines(repo, { command: "check" }));
     return;
   }
   maybeIndexInBackground(repo);
@@ -2498,6 +2513,7 @@ async function runTeamCheck(repo: string, opts: { base?: string; json?: boolean 
     console.log(JSON.stringify(r, null, 2));
   } else {
     printCheck(r);
+    printLines(cloudLines(repo, { command: "check" }));
   }
   if (r.findings.some((f) => f.verdict === "conflict")) process.exitCode = 1;
 }

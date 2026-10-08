@@ -55,7 +55,7 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
    *  make one. Queued the moment the link is printed, so a signup somebody
    *  walked away from is still counted — the settle below never fires for those,
    *  and abandonment is exactly the thing a terminal handoff loses silently. */
-  brain_signup_opened: new Set<string>(['mode']),
+  brain_signup_opened: new Set<string>(['mode', 'command', 'wording']),
   /** That handoff reaching an end. `outcome` is a closed set, so the reason a
    *  signup failed travels as a category and never as the error's own words. */
   brain_signup_settled: new Set<string>(['outcome', 'mode', 'duration_bucket']),
