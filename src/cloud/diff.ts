@@ -30,12 +30,30 @@ export interface BranchDiff {
   truncated: boolean;
 }
 
-/** The branch's diff against its base's merge base, working tree included. Null outside a git repo. */
+/**
+ * What `trail init` writes to wire agents up. Never a decision anyone made, so
+ * never part of what a check reads: on a branch cut before the wiring was
+ * committed upstream, it would otherwise be most of the diff.
+ */
+export const WIRING = [
+  ".claude/skills/trail",
+  ".claude/skills/graft",
+  ".claude/helpers/trail-hooks.cjs",
+  ".claude/helpers/graft-hooks.cjs",
+  ".cursor/rules/trail.mdc",
+  ".cursor/rules/graft.mdc",
+  ".mcp.json",
+  ".ignore",
+];
+
+const NOT_WIRING = ["--", ".", ...WIRING.map((p) => `:(exclude)${p}`)];
+
+/** The branch's diff against its base's merge base, working tree included, without trail's own wiring. Null outside a git repo. */
 export function branchDiff(repo: string, base = defaultBase(repo), maxBytes = 400 * 1024): BranchDiff | null {
   const from = git(repo, ["merge-base", "HEAD", base])?.trim() || base;
-  const files = git(repo, ["diff", "--name-only", from]);
+  const files = git(repo, ["diff", "--name-only", from, ...NOT_WIRING]);
   if (files === null) return null;
-  let diff = git(repo, ["diff", "--unified=3", from]) ?? "";
+  let diff = git(repo, ["diff", "--unified=3", from, ...NOT_WIRING]) ?? "";
   const truncated = Buffer.byteLength(diff) > maxBytes;
   if (truncated) diff = Buffer.from(diff).subarray(0, maxBytes).toString("utf8");
   return {
