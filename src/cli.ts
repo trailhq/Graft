@@ -551,12 +551,12 @@ grouped(program.command("build"), GROUP.setup)
   )
   .option(
     "--follow-nested-repos",
-    "include nested Git clones the index does not track (a multi-repo manifest checkout, or any repo cloned into the tree) " +
+    "include nested Git clones and directory symlinks to Git repos " +
       "as ONE graph, so imports across them resolve; persisted for later builds and automatic refreshes",
   )
   .option(
     "--no-follow-nested-repos",
-    "exclude untracked nested Git clones; persisted for later builds and automatic refreshes (default)",
+    "exclude nested Git clones and directory symlinks to Git repos; persisted for later builds and automatic refreshes (default)",
   )
   .option(
     "--include-dir <name>",

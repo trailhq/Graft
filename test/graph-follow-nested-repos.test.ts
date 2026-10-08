@@ -1,13 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isClean, probeDrift } from "../src/graph/fingerprint.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import { readBuildConfig } from "../src/util/state.js";
 import type { GraphV1 } from "../src/graph/types.js";
 import { runCli, tmpRepo } from "./helpers.js";
+import { ensureFreshGraph } from "../src/graph/refresh.js";
 
 function gitRun(root: string, args: string[]): void {
   execFileSync("git", args, { cwd: root, stdio: "ignore" });
@@ -189,5 +190,51 @@ test("follow-nested-repos and follow-submodules are independent switches", () =>
   } finally {
     rmSync(parent, { recursive: true, force: true });
     rmSync(sub, { recursive: true, force: true });
+  }
+});
+
+test("linked repos build and refresh one queryable graph at the parent, including a linked worktree", async () => {
+  const parent = tmpRepo("linked-graph-parent");
+  const library = tmpRepo("linked-graph-library");
+  const checkout = tmpRepo("linked-graph-checkout");
+  const worktree = join(checkout, "worktree");
+  try {
+    gitRun(parent, ["init", "-q"]);
+    gitRun(library, ["init", "-q"]);
+    write(library, "src/api.ts", "export function linkedValue(): number { return 1; }\n");
+    commitAll(library, "library fixture");
+    gitRun(library, ["worktree", "add", "--detach", worktree]);
+    write(worktree, "src/consumer.ts", 'import { linkedValue } from "../../library/src/api.js";\nexport function linkedConsumer() { return linkedValue(); }\n');
+    mkdirSync(join(parent, "repos"));
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    symlinkSync(library, join(parent, "repos", "library"), linkType);
+    symlinkSync(worktree, join(parent, "repos", "consumer"), linkType);
+
+    expectCliOk(["build", parent, "--follow-nested-repos"]);
+    const graph = graphOf(parent);
+    assert.ok(graph.nodes.some((n) => n.id === "repos/library/src/api.ts#linkedValue"));
+    assert.ok(graph.nodes.some((n) => n.id === "repos/consumer/src/consumer.ts#linkedConsumer"));
+    assert.ok(graph.edges.some((e) => e.relation === "imports" && e.source === "repos/consumer/src/consumer.ts" && e.target === "repos/library/src/api.ts"));
+    assert.equal(existsSync(join(parent, "graft", "workspace.json")), false, "the parent owns a single graph");
+    assert.equal(existsSync(join(library, "graft")), false, "the linked target needs no separate index");
+    assert.deepEqual(readBuildConfig(parent), { followNestedRepos: true });
+    assert.ok(isClean(probeDrift(parent, join(parent, "graft"))!));
+
+    const query = runCli(["ask", "linkedValue", parent, "--source"]);
+    assert.equal(query.status, 0, query.describe());
+    assert.match(query.stdout, /repos\/library\/src\/api\.ts/);
+    write(library, "src/added.ts", "export function addedLinkedValue() { return 2; }\n");
+    assert.ok(probeDrift(parent, join(parent, "graft"))!.added.includes("repos/library/src/added.ts"));
+    assert.equal((await ensureFreshGraph(parent)).refreshed, true, "automatic refresh follows the saved option");
+    assert.ok(graphOf(parent).nodes.some((n) => n.id === "repos/library/src/added.ts#addedLinkedValue"));
+
+    expectCliOk(["build", parent]);
+    assert.ok(graphOf(parent).nodes.some((n) => n.id === "repos/library/src/added.ts#addedLinkedValue"));
+    expectCliOk(["build", parent, "--no-follow-nested-repos"]);
+    assert.equal(graphOf(parent).nodes.length, 0);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+    rmSync(library, { recursive: true, force: true });
   }
 });
