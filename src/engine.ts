@@ -49,6 +49,9 @@ export interface GraphRunOptions {
   lsp?: boolean;
   /** Repo-relative directory prefixes to limit the build to (`--only-dir`). */
   onlyDirs?: string[];
+  /** Extra ignore files beyond the repo's own `.graftignore` / `.cursorignore`
+   * (`--ignore-file`), repo-relative or absolute. Additive. */
+  ignoreFiles?: string[];
   onProgress?: GraphBuildOptions["onProgress"];
 }
 
@@ -96,6 +99,7 @@ export class Graft {
       reuse: opts.reuse,
       lsp: opts.lsp,
       onlyDirs: opts.onlyDirs,
+      ignoreFiles: opts.ignoreFiles,
       onProgress: opts.onProgress,
     });
   }

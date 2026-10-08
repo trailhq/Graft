@@ -93,6 +93,10 @@ export interface GraphBuildOptions {
    * set, only files under these prefixes are indexed; the list is recorded in the
    * fingerprint so the freshness probe enumerates the same set. */
   onlyDirs?: string[];
+  /** Extra ignore files beyond the repo's own `.graftignore` / `.cursorignore`
+   * (`--ignore-file`), repo-relative or absolute. Additive; the list is recorded
+   * in the fingerprint so the probe and the auto-refresh enumerate the same set. */
+  ignoreFiles?: string[];
   onProgress?: (info: {
     phase: "parse" | "enrich";
     index: number;
@@ -160,6 +164,7 @@ export async function buildGraph(
   const walked = walkDir(root, readIncludeDirs(root), {
     followSubmodules: readFollowSubmodules(root),
     followNestedRepos: readFollowNestedRepos(root),
+    ignoreFiles: opts.ignoreFiles,
   });
   const onlyDirs = opts.onlyDirs && opts.onlyDirs.length > 0 ? new Set(opts.onlyDirs) : undefined;
   const repoFiles = filterByOnlyDirs(walked, root, onlyDirs);
