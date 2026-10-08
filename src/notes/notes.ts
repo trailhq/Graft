@@ -35,6 +35,11 @@ export interface Note {
   /** `file` or `file#Symbol`, relative to the top of the checkout (or to the folder `listNotes` was asked about). */
   touches: string[];
   body: string;
+  /** Came from Trail's ranked search rather than this machine. `path` is then
+   * where it sits in its uploader's ~/.trail, not a file anyone here can open. */
+  fromTrail?: boolean;
+  /** Written by someone other than whoever is asking. */
+  teammate?: boolean;
 }
 
 /** The three sections a note is written under. Notes may have others; these are the ones `ask` quotes. */
@@ -342,13 +347,20 @@ function clip(s: string, n = 88): string {
 export function formatNoteHits(hits: NoteHit[]): string[] {
   const lines: string[] = [];
   for (const { note } of hits) {
-    const who = note.author ? `${note.author}'s note` : "a note";
+    const who = note.author ? `${note.author}'s note${note.teammate ? ", a teammate's" : ""}` : "a note";
     lines.push(`from ${who} · ${shortDate(note.date)} · ${note.title}`);
+    const cost = costLabel(note.cost);
+    if (note.fromTrail) {
+      // No file here to open for the rest, so the whole note comes with it.
+      for (const l of note.body.trim().split("\n")) lines.push(`  ${l}`);
+      lines.push(`  shared through Trail${cost ? ` · ${cost}` : ""}`);
+      lines.push("");
+      continue;
+    }
     for (const s of SECTIONS) {
       const lead = sectionLead(note.body, s.heading);
       if (lead) lines.push(`  ${s.label.padEnd(11)} ${clip(lead)}`);
     }
-    const cost = costLabel(note.cost);
     lines.push(`  ${shownPath(note.path)}${cost ? ` · ${cost}` : ""}`);
     lines.push("");
   }

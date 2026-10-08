@@ -36,6 +36,7 @@ function asNote(n: RemoteNote): Note {
     cost: minutes !== undefined || tokens !== undefined ? { minutes, tokens } : undefined,
     touches: n.touches ?? [],
     body: n.body,
+    fromTrail: true,
   };
 }
 
@@ -78,7 +79,11 @@ export async function withRankedNotes(r: AskResult, repo: string, now = Date.now
   const session = transcript ? basename(transcript, ".jsonl") : `${asker}-${new Date(now).toISOString().slice(0, 10)}`;
   const res = await searchNotes(link, { query: r.query, files: r.hits.map((h) => pointerFile(h.pointer)), limit: 3, asker, session });
   if (isError(res)) return r;
-  const remote: NoteHit[] = res.notes.map((n) => ({ note: asNote(n), score: n.score, shared: [] }));
+  const remote: NoteHit[] = res.notes.map((n) => ({
+    note: { ...asNote(n), teammate: !!n.author && !!asker && n.author !== asker },
+    score: n.score,
+    shared: [],
+  }));
   // One note, whether Trail sent it back or it's on this machine: same file name.
   const seen = new Set(remote.map((h) => basename(h.note.path)));
   const merged = [...remote, ...(r.notes ?? []).filter((h) => !seen.has(basename(h.note.path)))].slice(0, 2);

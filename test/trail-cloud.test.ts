@@ -179,7 +179,7 @@ test("a linked ask puts Trail's ranked notes first", async () => {
     await run(["build", d], home);
     const r = await run(["ask", "webhook retry backoff", d], home);
     assert.equal(r.status, 0, r.err);
-    assert.match(r.out, /from Lena's note · Oct 3 · Webhook retries trip the OCR rate limit/);
+    assert.match(r.out, /from Lena's note, a teammate's · Oct 3 · Webhook retries trip the OCR rate limit\n  ## Decided\n  Three retries with jitter\./);
     assert.match(r.out, /took 20 min and ~14k tokens to work out/);
     const search = trail.seen.find((s) => s.path === "search")!;
     assert.equal(search.body.query, "webhook retry backoff");
