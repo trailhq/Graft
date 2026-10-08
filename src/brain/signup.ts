@@ -19,6 +19,7 @@
  * state it just generated, so some other page the user happens to have open
  * cannot push a brain of its own choosing into their repository.
  */
+import { brand } from "../brand.js";
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -180,9 +181,11 @@ export async function startHandoff(): Promise<Handoff> {
 /** The Trail front end this machine is pointed at, without a trailing slash.
  *
  * Read at the moment it is needed rather than captured once, matching the rest
- * of the brain code: GRAFT_BRAIN_URL is free to move between calls. */
+ * of the brain code: GRAFT_BRAIN_URL is free to move between calls. TRAIL_WEB_URL
+ * moves only the pages, for a Trail whose pages and API are on different hosts,
+ * as a local one is. */
 export function webBaseUrl(baseUrl?: string): string {
-  return (process.env.GRAFT_BRAIN_URL || baseUrl || DEFAULT_WEB_BASE_URL).replace(/\/+$/, "");
+  return (process.env.TRAIL_WEB_URL || process.env.GRAFT_BRAIN_URL || baseUrl || DEFAULT_WEB_BASE_URL).replace(/\/+$/, "");
 }
 
 /** Where the browser is sent once the handoff has been accepted.
@@ -219,6 +222,8 @@ export function signupUrl(opts: { repo: string; port?: number; state: string; ba
   const q = new URLSearchParams({ step: "repo", graft_repo: opts.repo });
   if (opts.port !== undefined) q.set("graft_port", String(opts.port));
   q.set("graft_state", opts.state);
+  // Under trail, signing in shares notes rather than making a brain, and the page says so.
+  if (brand() === "trail") q.set("graft_mode", "trail");
   return `${base}/get-started?${q.toString()}`;
 }
 

@@ -56,7 +56,7 @@ test("no note yet: nobody is asked to sign in", () => {
 test("once a session, with the link the agent ends its reply with, in wording that changes per session", () => {
   const d = repo();
   const first = lines(d, "ask", "s1");
-  assert.match(first[0]!, /^\[trail\] End your reply with this line, word for word: \[Share your notes with your team\?\]\(http:\/\/trail\.test\/get-started\?step=repo&graft_repo=acme%2Fextract-\d+&graft_state=[\w-]+\)$/);
+  assert.match(first[0]!, /^\[trail\] End your reply with this line, word for word: \[Share your notes with your team\?\]\(http:\/\/trail\.test\/get-started\?step=repo&graft_repo=acme%2Fextract-\d+&graft_state=[\w-]+&graft_mode=trail\)$/);
   assert.match(first[1]!, /don't run trail login yourself/);
   const state = readPendingSignup(d, slug(d), 60_000)?.state;
   assert.ok(state && first[0]!.includes(`graft_state=${state}`), "the link carries the state the background wait claims");
