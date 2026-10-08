@@ -53,6 +53,7 @@
 
 ## Contents
 
+- [Trail quick start](#trail-quick-start): notes your agent leaves for the next session, and your team's
 - [Quick start](#quick-start)
 - [The problem](#the-problem)
 - [What Graft does](#what-graft-does)
@@ -70,6 +71,28 @@
 - [Tested on your popular repos](#tested-on-your-popular-repos)
 - [Development](#development)
 - [License](#license)
+
+---
+
+## Trail quick start
+
+```bash
+npm install -g @trailhq/trail    # install trail, once
+trail init                       # pick your agents, build the code map, wire up Claude Code
+claude                           # then work the way you always do
+```
+
+When a session works something out, your agent leaves a short note: what it decided, what it ruled out, and what to watch out for. The next session on that code gets the note back before it starts digging, and tells you how much work it saved. Notes stay on your machine in `~/.trail`, never in the repo.
+
+When you want your team to have them, your agent offers a sign-in link at the end of a reply. Teammates on your company's email domain join in one click, and from then on everyone's agent starts from what the team already worked out. Before a PR, `trail check` compares your change with what the team decided and flags anything that goes against it.
+
+Trying this branch before `@trailhq/trail` is published:
+
+```bash
+git clone -b feat/trail-cloud https://github.com/trailhq/Graft.git trail && cd trail
+npm install && npm run build && node scripts/pack-trail.mjs
+npm install -g ./build/trail
+```
 
 ---
 
