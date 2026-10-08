@@ -6,6 +6,7 @@
  */
 import { relative, dirname, sep } from 'node:path';
 import type { HostPlan, PlannedWrite } from './hosts/plan.js';
+import { brand } from './brand.js';
 
 const indigo = (s: string) => `\x1b[38;2;84;111;255m${s}\x1b[0m`;
 const muted = (s: string) => `\x1b[38;5;244m${s}\x1b[0m`;
@@ -277,7 +278,7 @@ export function renderPicker(state: PickerState, tty = true, opts: { title?: str
   // rows carry the '(not detected)' tag or the cursor's colour codes.
   const label = (r: PickerRow) => `${r.label}${r.detected || r.kind === 'setting' ? '' : ' (not detected)'}`;
   const width = Math.max(...visible.filter((r) => r.kind === 'host').map((r) => label(r).length), 12);
-  const title = opts.title === undefined ? 'graft init — pick the agents your team uses:' : opts.title;
+  const title = opts.title === undefined ? `${brand()} init — pick the agents your team uses:` : opts.title;
   const lines = title ? [title, ''] : [];
   let ruled = false;
   const foldLine = () => {
