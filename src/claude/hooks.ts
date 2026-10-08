@@ -382,7 +382,7 @@ function countTallyTurn(input: any, dir: string): void {
 }
 
 /** Tool calls in one turn before it counts as digging worth a note. */
-export const NOTE_WORTHY_CALLS = 4;
+export const NOTE_WORTHY_CALLS = 3;
 
 /** What the agent is told when a turn took real digging and left no note. */
 export const NOTE_ASK =

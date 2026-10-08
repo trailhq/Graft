@@ -19,6 +19,7 @@ const jsonl = (entries: object[]) => entries.map((e) => JSON.stringify(e)).join(
 test('a turn of real digging with no note wants one', () => {
   const dig = [prompt('why does Do hang'), call('trail ask "do"'), result(), call('sed -n 1,9p client.go'), result(), call('go test ./...'), result(), call('grep -n x client.go'), result()];
   assert.equal(turnWantsNote(jsonl(dig)), true);
+  assert.equal(turnWantsNote(jsonl(dig.slice(0, 7))), true, 'three calls are');
   assert.equal(turnWantsNote(jsonl(dig.slice(0, 5))), false, 'two calls are not digging');
   assert.equal(turnWantsNote(jsonl([...dig, prompt('thanks'), call('ls')])), false, 'only the last turn counts');
   assert.equal(turnWantsNote(jsonl([call('trail note --title "x" <<EOF'), result(), ...dig])), false, 'a note this session is enough');
