@@ -28,6 +28,22 @@ import { readStamp } from "../upkeep.js";
 
 export const GRAFTIGNORE_NAME = ".graftignore";
 export const CURSORIGNORE_NAME = ".cursorignore";
+/** Written by an explicit `graft build` when the repo has no `.graftignore` yet:
+ * comments only, so it changes nothing until a rule is added — its purpose is
+ * to make the file's existence (and syntax) self-evident. Committed by the user
+ * like any other tracked file, so the whole team shares the exclusions. */
+export const GRAFTIGNORE_STARTER = `# graft's ignore file — keep files out of the graph even when they are
+# tracked in Git. Syntax is .gitignore's: one pattern per line, # comments,
+# a leading ! re-includes, a trailing / names a directory, a / in the pattern
+# binds it to the repo root, and ** spans directories. A bare name matches
+# at any depth. Later lines (and later --ignore-file files) win over earlier
+# ones. Commit this file to share the exclusions with the team.
+#
+# Examples:
+#   generated/          # an output directory that is tracked in the repo
+#   *.generated.ts      # generated files anywhere
+#   !src/keep.ts        # re-include one file a wider rule caught
+`;
 /** Same escape hatch as `--no-gitignore` (`GRAFT_NO_GITIGNORE`): skip reading —
  * and the CLI skips creating — graft's own ignore file. */
 export const GRAFT_NO_GRAFTIGNORE = "GRAFT_NO_GRAFTIGNORE";
