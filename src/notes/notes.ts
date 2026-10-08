@@ -247,6 +247,26 @@ export function noteTargets(dir: string, edited: string[] = [], since?: number):
   return out.length ? out : [{ dir: here.checkout, touches: [] }];
 }
 
+/** A path-shaped word in a note: `client.go`, `src/a/b.ts:12-30`, `x.go#Fn`. */
+const MENTION = /(?:^|[\s(`'"\[])((?:[\w.-]+\/)*[\w-][\w.-]*\.[A-Za-z][A-Za-z0-9]{0,5})(?=$|[\s:#)`'",.;\]])/gm;
+
+/**
+ * Files of the checkout at `dir` that a note's text names by path. A session
+ * that only read code edits nothing, so without these its note would touch no
+ * file, and nothing that looks a note up by file (`trail check`, the ranked
+ * search) would ever find it.
+ */
+export function mentionedFiles(dir: string, body: string): string[] {
+  const out: string[] = [];
+  for (const m of body.matchAll(MENTION)) {
+    const f = m[1]!.replace(/^\.\//, "");
+    if (out.includes(f) || ownPath(f) || f.startsWith("..")) continue;
+    if (existsSync(join(dir, f))) out.push(f);
+    if (out.length >= TOUCH_LIMIT) break;
+  }
+  return out;
+}
+
 /* -------------------------------------------------------------------------- */
 /* finding the notes that matter for a query                                  */
 /* -------------------------------------------------------------------------- */

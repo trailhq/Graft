@@ -92,7 +92,7 @@ import { patchBuildConfig, type BuildConfig } from "./util/state.js";
 import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
 import { listSessionIds, readSession, sessionDir } from "./claude/state.js";
-import { costLabel, listNotes, noteTargets, renderNote, SECTIONS, sectionLead, shortDate, tokensLabel, writeNote, type Note } from "./notes/notes.js";
+import { costLabel, listNotes, noteTargets, renderNote, SECTIONS, sectionLead, shortDate, tokensLabel, writeNote, type Note, mentionedFiles } from "./notes/notes.js";
 import { currentSessionCost } from "./notes/session-cost.js";
 import { currentBranch, noteAuthor } from "./notes/git-facts.js";
 import { confirm, fold, getSkill, learn, listSkills, publish, skillForAgent, skillName, skillStatus, type LearnResult } from "./skills/skills.js";
@@ -1302,7 +1302,11 @@ async function runNoteCommand(
   // session edited. Explicit --touches means just this repo.
   const targets = opts.touches
     ? [{ dir: repo, touches: opts.touches.split(",").map((t) => t.trim()).filter(Boolean) }]
-    : noteTargets(repo, spent?.edited ?? [], spent?.startedAt);
+    : noteTargets(repo, spent?.edited ?? [], spent?.startedAt).map((t) => ({
+        ...t,
+        // And the files the note names, for a session that read code without editing it.
+        touches: [...new Set([...t.touches, ...mentionedFiles(t.dir, body)])].slice(0, 10),
+      }));
   const author = opts.author?.trim() || noteAuthor(repo);
   const date = new Date().toISOString().slice(0, 10);
   const earlier: Note[] = [];
