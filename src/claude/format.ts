@@ -116,8 +116,10 @@ export function notesForPrompt(ask: AskJson, s: SessionState, cap = PROMPT_NOTES
   if (!fresh.length) return null;
   s.injectedNotes = [...(s.injectedNotes ?? []), ...fresh.map((h) => h.note.path || h.note.title)].slice(-INJECTED_POINTERS_CAP);
   return (
-    `${tag()} notes earlier sessions left on this. Read them before exploring, and when one saves you work, ` +
-    `count it in your tally:\n` + formatNoteHits(fresh).join('\n').trimEnd()
+    `${tag()} notes earlier sessions left on this. Read them before exploring. If one shapes your answer, ` +
+    `end your reply with one line that says so, naming whose note it was and what it took to work out ` +
+    `(e.g. "📝 Built on Anirudh's note from Oct 8, which took 4 min and ~30k tokens to work out."):\n` +
+    formatNoteHits(fresh).join('\n').trimEnd()
   );
 }
 

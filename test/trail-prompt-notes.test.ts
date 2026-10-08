@@ -15,6 +15,7 @@ test("a matching note reaches the agent with the prompt, once a session", () => 
   const s = {} as SessionState;
   const first = notesForPrompt(ask, s);
   assert.match(first!, /notes earlier sessions left on this/);
+  assert.match(first!, /end your reply with one line that says so/);
   assert.match(first!, /from Anirudh's note · Oct 8 · gh repo clone success message/);
   assert.match(first!, /Print ✓ Cloned OWNER\/REPO to DIR/);
   assert.equal(notesForPrompt(ask, s), null, "not again in the same session");
