@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import "dotenv/config";
 import { Command, Option } from "commander";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, isAbsolute, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Graft } from "./engine.js";
 import { resolveConfig, type EngineConfig } from "./ai/providers.js";
@@ -58,7 +58,7 @@ import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurrentVersion, readPackageName, runUpgrade } from "./cli-meta.js";
 import { nativeFallbackNotice } from "./graph/native.js";
-import { lockHeldByOther, patchBuildConfig, type BuildConfig } from "./util/state.js";
+import { lockHeldByOther, patchBuildConfig, readFollowNestedRepos, type BuildConfig } from "./util/state.js";
 import { NEVER_INCLUDE_DIRS } from "./ingest/fs.js";
 import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
@@ -559,6 +559,14 @@ grouped(program.command("build"), GROUP.setup)
     "exclude nested Git clones and directory symlinks to Git repos; persisted for later builds and automatic refreshes (default)",
   )
   .option(
+    "--include-ignored-repos",
+    "with --follow-nested-repos and --only-dir: include explicitly selected Git repos even if the parent ignores their mounts; child ignores still apply; persisted",
+  )
+  .option(
+    "--no-include-ignored-repos",
+    "clear the saved ignored-repository mounts",
+  )
+  .option(
     "--include-dir <name>",
     "override SKIP_DIRS (and named hidden directories) for this repo's walks, repeatable " +
       "(e.g. --include-dir build --include-dir .kb); persisted, so a later build (and the " +
@@ -594,6 +602,7 @@ grouped(program.command("build"), GROUP.setup)
       onlyDir?: string[];
       followSubmodules?: boolean;
       followNestedRepos?: boolean;
+      includeIgnoredRepos?: boolean;
       gitignore?: boolean;
       ignore?: boolean;
     },
@@ -678,6 +687,31 @@ grouped(program.command("build"), GROUP.setup)
     const followNestedReposWasExplicit = command.getOptionValueSource("followNestedRepos") === "cli";
     if (followNestedReposWasExplicit && typeof opts.followNestedRepos === "boolean") {
       buildConfigPatch.followNestedRepos = opts.followNestedRepos;
+    }
+    if (command.getOptionValueSource("includeIgnoredRepos") === "cli") {
+      if (opts.includeIgnoredRepos === false) {
+        buildConfigPatch.includeIgnoredRepos = [];
+      } else {
+        const root = resolve(dir);
+        const followsNested = buildConfigPatch.followNestedRepos ?? readFollowNestedRepos(root);
+        if (!followsNested || !onlyDirs?.length || !existsSync(join(root, ".git"))) {
+          console.error("✗ --include-ignored-repos requires --follow-nested-repos and --only-dir paths to repositories under a Git root");
+          process.exit(1);
+        }
+        for (const path of onlyDirs) {
+          const abs = resolve(root, path);
+          const rel = relative(root, abs);
+          let valid = rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+          try {
+            valid = valid && statSync(abs).isDirectory() && existsSync(join(abs, ".git"));
+          } catch { valid = false; }
+          if (!valid) {
+            console.error(`✗ --include-ignored-repos: "${path}" must name a Git repository inside the build root`);
+            process.exit(1);
+          }
+        }
+        buildConfigPatch.includeIgnoredRepos = onlyDirs;
+      }
     }
     if (Object.keys(buildConfigPatch).length > 0) {
       patchBuildConfig(resolve(dir), buildConfigPatch);

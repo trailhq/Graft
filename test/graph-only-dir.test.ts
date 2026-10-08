@@ -66,6 +66,10 @@ test("--only-dir limits the walk, records the whitelist in the fingerprint, and 
     // excluded src/b and top.ts are NOT reported as phantom "added" drift.
     const drift = probeDrift(d, join(d, "graft"));
     assert.ok(drift && isClean(drift), "excluded files must not read as drift");
+
+    runCli(["build", d]);
+    assert.ok(graphOf(d)!.nodes.every((n) => n.path.startsWith("src/a/")), "a plain rebuild retains the saved selection");
+    assert.deepEqual(readFingerprint(join(d, "graft"))?.onlyDirs, ["src/a"]);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }

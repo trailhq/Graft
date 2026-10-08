@@ -702,6 +702,13 @@ trail build --no-follow-submodules   # exclude submodules again and persist that
 trail build --follow-nested-repos    # include nested git clones and symlinked repos; persist the choice
 trail build --no-follow-nested-repos # exclude nested clones again and persist that choice (the default)
 
+# Explicitly index selected repo mounts that the parent ignores (child ignores still apply).
+trail build --follow-nested-repos --include-ignored-repos \
+  --only-dir source-material/historical-repos/widget \
+  --only-dir source-material/historical-repos/databraid-api
+trail build --no-include-ignored-repos # clear the saved ignored-repository mounts
+
+If the parent deliberately ignores linked repositories (for example, to keep a framework's source scanner out of them), add `--include-ignored-repos` alongside `--follow-nested-repos` and repeat `--only-dir` for each repository mount. Every selected path must be a repository under the build root. Graft saves these explicit mounts in local `.graft/config.json`, preserves the parent's `.gitignore`, and continues to honor each child's ignore rules. The selection also survives plain rebuilds and automatic refreshes. `.ignore` controls ripgrep and does not override Git's visibility for Graft.
 trail status [dir]                   # the graft map, learnings and tokens saved, on one screen
 trail upgrade                        # npm install -g the latest published version
                                      # a new version is announced automatically (checked once a day);
@@ -797,6 +804,8 @@ The graft map supports these layouts:
   gets a `graft/workspace.json` index. Queries from the parent federate across
   every child, always labeled `<child>/`. Run `trail build` inside a child to
   work on just that repo.
+
+If the parent deliberately ignores linked repositories (for example, to keep a framework's source scanner out of them), add `--include-ignored-repos` alongside `--follow-nested-repos` and repeat `--only-dir` for each repository mount. Every selected path must be a repository under the build root. Graft saves these explicit mounts in local `.graft/config.json`, preserves the parent's `.gitignore`, and continues to honor each child's ignore rules. The selection also survives plain rebuilds and automatic refreshes. `.ignore` controls ripgrep and does not override Git's visibility for Graft.
 
 In every layout, narrow to one sub-project with `trail ask "<task>" --in <scope>/`
 once you know where you're working.

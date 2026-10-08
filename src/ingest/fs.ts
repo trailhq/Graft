@@ -86,13 +86,16 @@ export function shouldSkipDir(name: string, includes?: ReadonlySet<string>): boo
  * Both default to false, preserving the historical superproject boundary. Each
  * child keeps its own ignore rules; uninitialized submodules and gitignored
  * nested repos remain absent either way (`--exclude-standard` never emits
- * them, so there is nothing to follow).
+ * them, so there is nothing to follow), unless explicitly named through
+ * `includeIgnoredRepos`; that exception bypasses only the parent's ignores.
  */
 export interface WalkOptions {
   /** Include initialized Git submodules (gitlinks) recursively. Default false. */
   followSubmodules?: boolean;
   /** Include nested Git clones and directory symlinks to repos. Default false. */
   followNestedRepos?: boolean;
+  /** Explicit parent-relative repo mounts, bypassing only the parent's ignores. */
+  includeIgnoredRepos?: ReadonlySet<string>;
 }
 
 /**
@@ -257,6 +260,17 @@ function gitVisibleFiles(
   }
 
   const out = new Set<string>();
+  if (!traversal && opts.followNestedRepos === true) {
+    for (const rel of opts.includeIgnoredRepos ?? []) {
+      const abs = resolve(root, rel);
+      // Persisted settings must never reach above the requested root or turn
+      // an ordinary ignored source directory into an implicit repository.
+      if (abs === root || escapedCanonical(root, abs) || !existsSync(join(abs, ".git"))) continue;
+      const mount = relative(root, abs).replace(/\\/g, "/");
+      const prior = entries.get(mount);
+      entries.set(mount, { gitlink: prior?.gitlink === true, nested: true });
+    }
+  }
   for (const [rel, entry] of entries) {
     const abs = resolve(root, rel);
     // Filter against the original superproject path. Otherwise a submodule

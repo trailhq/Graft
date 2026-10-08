@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isClean, probeDrift } from "../src/graph/fingerprint.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
@@ -236,5 +236,66 @@ test("linked repos build and refresh one queryable graph at the parent, includin
     rmSync(parent, { recursive: true, force: true });
     rmSync(checkout, { recursive: true, force: true });
     rmSync(library, { recursive: true, force: true });
+  }
+});
+
+test("explicit ignored repository mounts preserve parent and child ignores and refresh only selected repos", async () => {
+  const parent = tmpRepo("ignored-links-parent");
+  const targets = [tmpRepo("ignored-widget"), tmpRepo("ignored-api"), tmpRepo("ignored-other")];
+  const names = ["widget", "databraid-api", "other"];
+  const selected = names.slice(0, 2).map((name) => `source-material/historical-repos/${name}`);
+  const whitelist = selected.flatMap((path) => ["--only-dir", path]);
+  const ignore = "/source-material/\n/graft/\n/.graft/\n";
+  try {
+    gitRun(parent, ["init", "-q"]);
+    write(parent, ".gitignore", ignore);
+    write(parent, "root.ts", "export const excludedRoot = 1;\n");
+    mkdirSync(join(parent, "source-material", "historical-repos"), { recursive: true });
+    for (const [i, target] of targets.entries()) {
+      gitRun(target, ["init", "-q"]);
+      write(target, ".gitignore", "*.generated.ts\n");
+      write(target, "src/value.ts", `export function value${i}() { return ${i}; }\n`);
+      write(target, "src/ignored.generated.ts", "export const ignoredValue = 1;\n");
+      symlinkSync(target, join(parent, "source-material", "historical-repos", names[i]), process.platform === "win32" ? "junction" : "dir");
+    }
+    expectCliOk(["build", parent, "--follow-nested-repos", ...whitelist]);
+    assert.equal(graphOf(parent).nodes.length, 0, "parent ignores remain authoritative without an explicit override");
+    expectCliOk(["build", parent, "--include-ignored-repos", ...whitelist]);
+    const graph = graphOf(parent);
+    assert.ok(graph.nodes.some((n) => n.id === `${selected[0]}/src/value.ts#value0`));
+    assert.ok(graph.nodes.some((n) => n.id === `${selected[1]}/src/value.ts#value1`));
+    assert.ok(graph.nodes.every((n) => selected.some((path) => n.path.startsWith(`${path}/`))));
+    assert.ok(!graph.nodes.some((n) => n.path.endsWith("ignored.generated.ts")), "the child ignore rules still apply");
+    assert.equal(readFileSync(join(parent, ".gitignore"), "utf8"), ignore);
+    assert.deepEqual(readBuildConfig(parent), { followNestedRepos: true, includeIgnoredRepos: selected });
+    assert.ok(isClean(probeDrift(parent, join(parent, "graft"))!));
+
+    write(targets[0], "src/added.ts", "export function addedIgnoredMountValue() { return 5; }\n");
+    assert.equal((await ensureFreshGraph(parent)).refreshed, true);
+    assert.ok(graphOf(parent).nodes.some((n) => n.id === `${selected[0]}/src/added.ts#addedIgnoredMountValue`));
+    assert.ok(graphOf(parent).nodes.every((n) => selected.some((path) => n.path.startsWith(`${path}/`))));
+
+    expectCliOk(["build", parent]);
+    assert.ok(graphOf(parent).nodes.some((n) => n.id === `${selected[0]}/src/added.ts#addedIgnoredMountValue`));
+    assert.ok(graphOf(parent).nodes.every((n) => selected.some((path) => n.path.startsWith(`${path}/`))), "a plain rebuild keeps only the selected repos");
+    expectCliOk(["build", parent, "--no-follow-nested-repos", ...whitelist]);
+    assert.equal(graphOf(parent).nodes.length, 0);
+    expectCliOk(["build", parent, "--follow-nested-repos", "--no-include-ignored-repos", ...whitelist]);
+    assert.equal(graphOf(parent).nodes.length, 0);
+    assert.deepEqual(readBuildConfig(parent)?.includeIgnoredRepos, []);
+
+    for (const args of [
+      ["build", parent, "--include-ignored-repos"],
+      ["build", parent, "--include-ignored-repos", "--only-dir", "source-material"],
+      ["build", parent, "--include-ignored-repos", "--only-dir", `../${targets[0].split(/[\\/]/).pop()}`],
+    ]) {
+      const result = runCli(args);
+      assert.equal(result.status, 1, result.describe());
+      assert.match(result.stderr, /include-ignored-repos/);
+    }
+    assert.equal(readFileSync(join(parent, ".gitignore"), "utf8"), ignore);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+    for (const target of targets) rmSync(target, { recursive: true, force: true });
   }
 });

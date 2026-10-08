@@ -25,14 +25,14 @@ import type { NativeFallback } from "./native.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
-import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
+import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs, readIncludeIgnoredRepos } from "../util/state.js";
 import {
   emptyExtractCache,
   readExtractCache,
   writeExtractCache,
   type ExtractEntry,
 } from "./extract-cache.js";
-import { writeFingerprint } from "./fingerprint.js";
+import { readFingerprint, writeFingerprint } from "./fingerprint.js";
 import { seedGraph, type SeedResult } from "./seed.js";
 import { filterByOnlyDirs, listSourceStats, normalizeExtensions } from "./source-files.js";
 import { resolveEdges, type GoModule } from "./resolve.js";
@@ -226,8 +226,10 @@ export async function buildGraph(
   const walked = walkDir(root, readIncludeDirs(root), {
     followSubmodules: readFollowSubmodules(root),
     followNestedRepos: readFollowNestedRepos(root),
+    includeIgnoredRepos: readIncludeIgnoredRepos(root),
   });
-  const onlyDirs = opts.onlyDirs && opts.onlyDirs.length > 0 ? new Set(opts.onlyDirs) : undefined;
+  const selectedDirs = opts.onlyDirs ?? readFingerprint(outDir)?.onlyDirs;
+  const onlyDirs = selectedDirs?.length ? new Set(selectedDirs) : undefined;
   const repoFiles = filterByOnlyDirs(walked, root, onlyDirs);
   const extensions = normalizeExtensions(opts.extensions);
   const files = listSourceStats(root, outDir, repoFiles, undefined, extensions);
@@ -436,7 +438,7 @@ export async function buildGraph(
   // these source bytes." Nothing about the projections below — which is why it is
   // safe to write here, and why `graphOnly` builds (the query path, which stops
   // right after this line) are still recorded as fresh.
-  writeFingerprint(outDir, entries, opts.onlyDirs, extensions);
+  writeFingerprint(outDir, entries, selectedDirs, extensions);
 
   // Tier-2 passive surface: project the nodes into per-file markdown cards, and
   // refresh the INDEX roster. Pure projection — no LLM, no network.
