@@ -3,7 +3,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { join, basename, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { readWiring } from './stats.js';
-import { formatBlastRadius, relevantRetrieval, formatOrientation } from './format.js';
+import { formatBlastRadius, relevantRetrieval, formatOrientation, notesForPrompt } from './format.js';
 import { indexFreshness, staleBanner } from '../context/check.js';
 import { patchStats, readStats, acquireLock, readSession, writeSession, resolveContextDir } from './state.js';
 import { graftCliPath, claudeScriptPath } from './paths.js';
@@ -594,7 +594,9 @@ export async function main(event: string): Promise<void> {
     s.lastQuery = prompt;
     const agent = input?.agent?.name;
     if (agent) s.perAgentQuery[agent] = prompt;
-    const txt = relevantRetrieval(ask, s);
+    // Notes first: what an earlier session worked out matters more than where code is.
+    const notes = brand() === 'trail' ? notesForPrompt(ask, s) : null;
+    const txt = [notes, relevantRetrieval(ask, s)].filter(Boolean).join('\n\n');
     if (txt) emit('UserPromptSubmit', txt);
     writeSession(dir, id, s);
   }

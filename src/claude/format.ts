@@ -7,6 +7,7 @@ import type { GraphV1, EdgeV1 } from '../graph/types.js';
 import { HIGH_FLOOR, STRONG_FLOOR } from '../ask/fuse.js';
 import { dollarsSaved, formatDollars } from '../context/price.js';
 import { brand, cmd, tag } from '../brand.js';
+import { formatNoteHits, type NoteHit } from '../notes/notes.js';
 
 const C = {
   indigo: (s: string) => `\x1b[38;2;84;111;255m${s}\x1b[0m`,
@@ -92,6 +93,32 @@ export interface AskJson {
    * query hit a real symbol, or only words buried in some body?". `ask --json`
    * has always emitted it; the gate below is what finally reads it. */
   coverageStrong?: number;
+  /** Notes from earlier sessions that bear on the query, when this repo keeps them. */
+  notes?: NoteHit[];
+}
+
+/** How many notes one prompt may bring in. */
+export const PROMPT_NOTES_CAP = 2;
+
+/**
+ * Notes from earlier sessions that bear on what the person just asked, put in
+ * front of the agent before it starts, each at most once a session.
+ *
+ * Without this a note only arrives when the agent thinks to run `ask`, and on a
+ * task that names its own search string it greps straight past it: in a traced
+ * cli/cli session the agent fixed the second of two related messages without
+ * ever seeing the note the first one left. The note's own relevance (its files
+ * and words) decides; the code-pointer gates below don't apply to it.
+ */
+export function notesForPrompt(ask: AskJson, s: SessionState, cap = PROMPT_NOTES_CAP): string | null {
+  const seen = new Set(s.injectedNotes ?? []);
+  const fresh = (ask.notes ?? []).filter((h) => h?.note && !seen.has(h.note.path || h.note.title)).slice(0, cap);
+  if (!fresh.length) return null;
+  s.injectedNotes = [...(s.injectedNotes ?? []), ...fresh.map((h) => h.note.path || h.note.title)].slice(-INJECTED_POINTERS_CAP);
+  return (
+    `${tag()} notes earlier sessions left on this. Read them before exploring, and when one saves you work, ` +
+    `count it in your tally:\n` + formatNoteHits(fresh).join('\n').trimEnd()
+  );
 }
 
 function tokensOf(chars: number): number { return Math.round(chars / 4); }
