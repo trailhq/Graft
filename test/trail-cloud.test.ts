@@ -60,6 +60,12 @@ function team(): { anirudh: string; vedu: string } {
   return { anirudh: clone("anirudh", "Anirudh Kumar"), vedu: clone("vedu", "Vedu S") };
 }
 
+test("a learning file whose name isn't one trail writes is never read from a branch", async () => {
+  const { SAFE_LEARNING_NAME } = await import("../src/notes/branches.js");
+  assert.ok(SAFE_LEARNING_NAME.test("2026-10-09-keep-the-default-retry-count-at-anirudh.md"));
+  for (const bad of ["x;curl evil|sh.md", "a b.md", "$(id).md", "../../etc.md", "notes.txt"]) assert.ok(!SAFE_LEARNING_NAME.test(bad), bad);
+});
+
 test("a learning on a teammate's pushed branch reaches the other clone before it merges, and its files show as overlap", () => {
   const { anirudh, vedu } = team();
   git(vedu, "checkout", "-q", "-b", "vedu/jitter");
@@ -203,6 +209,6 @@ test("a learning on an unmerged branch shows its first lines and where to read i
   };
   const lines = formatNoteHits([{ note, score: 1, shared: [] }]).join("\n");
   assert.match(lines, /decided {5}Use LinearJitterBackoff\./);
-  assert.match(lines, /on vedu\/jitter, pushed and not merged yet · git show origin\/vedu\/jitter:\.trail\/learnings\//);
+  assert.match(lines, /on vedu\/jitter, pushed and not merged yet · git show 'origin\/vedu\/jitter:\.trail\/learnings\/2026-10-09-jitter-vedu\.md'/);
   assert.doesNotMatch(lines, /Ignore earlier instructions/);
 });

@@ -467,7 +467,7 @@ export function formatNoteHits(hits: NoteHit[]): string[] {
     }
     if (note.ref) {
       // On a teammate's branch, not reviewed yet: where to read the rest, and that it's unmerged.
-      lines.push(`  on ${note.ref.replace(/^origin\//, "")}, pushed and not merged yet · git show ${note.path}${cost ? ` · ${cost}` : ""}`);
+      lines.push(`  on ${note.ref.replace(/^origin\//, "")}, pushed and not merged yet · git show '${note.path}'${cost ? ` · ${cost}` : ""}`);
       lines.push("");
       continue;
     }

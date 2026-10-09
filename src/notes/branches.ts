@@ -31,6 +31,8 @@ export const BRANCH_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_BRANCHES = 30;
 /** Most changed files kept per branch. */
 const MAX_FILES = 200;
+/** A learning file name as `trail note` writes it: no folders, no shell characters. */
+export const SAFE_LEARNING_NAME = /^[A-Za-z0-9._-]+\.md$/;
 /** Most learnings read per branch, and the most bytes per learning. */
 const MAX_LEARNINGS = 20;
 const MAX_LEARNING_BYTES = 64 * 1024;
@@ -131,7 +133,9 @@ export function refreshBranches(repo: string, opts: { fetch?: boolean; now?: num
       const changed = (git(repo, ["diff", "--name-only", `${base}...${ref}`]) ?? "").split("\n").map((f) => f.trim()).filter(Boolean);
       if (changed.length === 0) continue;
       const learnings: PushedBranch["learnings"] = [];
-      for (const path of changed.filter((f) => f.startsWith(`${LEARNINGS_DIR}/`) && f.endsWith(".md")).slice(0, MAX_LEARNINGS)) {
+      // Only names trail itself would write: the name reaches a command the agent may run.
+      const named = changed.filter((f) => f.startsWith(`${LEARNINGS_DIR}/`) && SAFE_LEARNING_NAME.test(f.slice(LEARNINGS_DIR.length + 1)));
+      for (const path of named.slice(0, MAX_LEARNINGS)) {
         const text = git(repo, ["show", `${ref}:${path}`]);
         if (text && text.length <= MAX_LEARNING_BYTES) learnings.push({ name: path.slice(LEARNINGS_DIR.length + 1), text });
       }
