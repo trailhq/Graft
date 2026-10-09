@@ -66,11 +66,13 @@ export function readJson<T>(p: string): T | null {
  * open) accumulates one full-size file per attempt, and nothing in graft ever lists
  * `.cache/` to clean them up.
  */
-export function writeJsonAtomic(p: string, value: unknown, compact = false): void {
+export function writeJsonAtomic(p: string, value: unknown, compact = false, mode?: number): void {
   mkdirSync(dirname(p), { recursive: true });
   const tmp = `${p}.${process.pid}.tmp`;
   try {
-    writeFileSync(tmp, compact ? JSON.stringify(value) : JSON.stringify(value, null, 2));
+    // `mode` applies to the new file before it's renamed into place, so a
+    // secret is never readable by others even for a moment.
+    writeFileSync(tmp, compact ? JSON.stringify(value) : JSON.stringify(value, null, 2), mode === undefined ? undefined : { mode });
     renameSync(tmp, p);
   } catch (e) {
     try { rmSync(tmp, { force: true }); } catch { /* nothing more we can do */ }

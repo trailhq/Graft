@@ -84,10 +84,19 @@ function git(repo: string, args: string[], timeout = 15_000): string | null {
   }
 }
 
-/** First word of a name, capitalised, the way a learning's author is written. */
+/** First word of a name, capitalised, the way a learning's author is written. Letters only, at most 40. */
 function firstName(name: string): string {
-  const first = name.trim().split(/\s+/)[0] ?? "";
+  const first = (name.trim().split(/\s+/)[0] ?? "").replace(/[^\p{L}\p{N}._-]/gu, "").slice(0, 40);
   return first ? first[0]!.toUpperCase() + first.slice(1) : "";
+}
+
+/**
+ * A branch name as it may appear in what the agent reads: the characters git
+ * branch names are usually made of, at most 80. Branch names and authors come
+ * from whoever pushed, so nothing else of theirs reaches an instruction.
+ */
+export function safeRef(ref: string): string {
+  return ref.replace(/[^A-Za-z0-9._/-]/g, "").slice(0, 80);
 }
 
 /** The remote branch everything is compared with: what origin/HEAD points at, else a usual name. */
@@ -126,7 +135,7 @@ export function refreshBranches(repo: string, opts: { fetch?: boolean; now?: num
         const text = git(repo, ["show", `${ref}:${path}`]);
         if (text && text.length <= MAX_LEARNING_BYTES) learnings.push({ name: path.slice(LEARNINGS_DIR.length + 1), text });
       }
-      branches.push({ ref, author: firstName(author ?? ""), at, files: changed.slice(0, MAX_FILES), learnings });
+      branches.push({ ref: safeRef(ref), author: firstName(author ?? ""), at, files: changed.slice(0, MAX_FILES), learnings });
     }
   }
   const cache: BranchCache = { fetchedAt: Date.now(), stamp: refsStamp(repo), base, branches };

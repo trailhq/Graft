@@ -28,7 +28,7 @@ import { currentTranscript } from "../notes/session-cost.js";
 import { durationBucket } from "../telemetry/contract.js";
 import { track } from "../telemetry/track.js";
 import { readJson, writeJsonAtomic } from "../util/state.js";
-import { claimHandoff, readCloud, registerHandoff, trailUrl, writeCloud, type ClaimResult, type HandoffRepo } from "./workspace.js";
+import { claimHandoff, readCloud, registerHandoff, SECRET_FILE_MODE, trailUrl, writeCloud, type ClaimResult, type HandoffRepo } from "./workspace.js";
 import { syncWorkspaceRepos } from "./workspace-sync.js";
 
 /** What the link says, in turn: one per session, so it never reads the same twice running. */
@@ -81,8 +81,9 @@ function readState(env?: NodeJS.ProcessEnv): NudgeState {
   return readJson<NudgeState>(statePath(env)) ?? {};
 }
 
+/** Owner-only, like cloud.json: a pending link's state claims the workspace token. */
 function writeState(patch: Partial<NudgeState>, env?: NodeJS.ProcessEnv): void {
-  writeJsonAtomic(statePath(env), { ...readState(env), ...patch });
+  writeJsonAtomic(statePath(env), { ...readState(env), ...patch }, false, SECRET_FILE_MODE);
 }
 
 /** The agent session running this command: Claude Code's id, or its newest

@@ -450,8 +450,8 @@ export function whoseLearning(n: Note): string {
 /**
  * The block `ask` prints above its results: whose learning each is, when,
  * what it was about and what it cost, then the first line of each section and
- * where to read the rest. A learning on a teammate's unmerged branch comes
- * whole, since there's no file here to open. An agent
+ * where to read the rest. A learning on a teammate's unmerged branch says so,
+ * with the `git show` that prints it, since there's no file here to open. An agent
  * relays the cost when it says what the turn saved, which is how the saving
  * becomes countable.
  */
@@ -461,16 +461,15 @@ export function formatNoteHits(hits: NoteHit[]): string[] {
     const who = `${note.author ? `${note.author}'s learning` : "a learning"}${note.teammate ? ", a teammate's" : ""}`;
     lines.push(`from ${who} · ${shortDate(note.date)} · ${note.title}`);
     const cost = costLabel(note.cost);
-    if (note.ref) {
-      // On a teammate's branch: no file here to open for the rest, so the whole learning comes with it.
-      for (const l of note.body.trim().split("\n")) lines.push(`  ${l}`);
-      lines.push(`  on ${note.ref.replace(/^origin\//, "")}, pushed and not merged yet${cost ? ` · ${cost}` : ""}`);
-      lines.push("");
-      continue;
-    }
     for (const s of SECTIONS) {
       const lead = sectionLead(note.body, s.heading);
       if (lead) lines.push(`  ${s.label.padEnd(11)} ${clip(lead)}`);
+    }
+    if (note.ref) {
+      // On a teammate's branch, not reviewed yet: where to read the rest, and that it's unmerged.
+      lines.push(`  on ${note.ref.replace(/^origin\//, "")}, pushed and not merged yet · git show ${note.path}${cost ? ` · ${cost}` : ""}`);
+      lines.push("");
+      continue;
     }
     lines.push(`  ${notePlace(note)}${cost ? ` · ${cost}` : ""}`);
     lines.push("");

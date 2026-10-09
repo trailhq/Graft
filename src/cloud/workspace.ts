@@ -54,8 +54,11 @@ export function readCloud(env: NodeJS.ProcessEnv = process.env): Cloud | null {
   return c?.token && c.workspace?.slug ? c : null;
 }
 
+/** Owner-only: the file holds the workspace token. */
+export const SECRET_FILE_MODE = 0o600;
+
 export function writeCloud(c: Cloud, env: NodeJS.ProcessEnv = process.env): void {
-  writeJsonAtomic(cloudPath(env), c);
+  writeJsonAtomic(cloudPath(env), c, false, SECRET_FILE_MODE);
 }
 
 export function clearCloud(env: NodeJS.ProcessEnv = process.env): boolean {
