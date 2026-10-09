@@ -46,7 +46,7 @@ export interface Note {
   teammate?: boolean;
   /** `repo`: in the repo's `.trail/learnings/`, for everyone. `personal`: in ~/.trail, this machine only. */
   scope?: "repo" | "personal";
-  /** Found on a teammate's pushed branch (`origin/vedu/jitter`) rather than in
+  /** Found on a teammate's pushed branch (`origin/kumar/jitter`) rather than in
    * this checkout. `path` is then `<ref>:.trail/learnings/<name>`, readable
    * with `git show`, and the whole body travels with the note. */
   ref?: string;
@@ -446,7 +446,7 @@ export function savedByNote(n: Note): number {
   return Math.max(0, took - readingTokens(n));
 }
 
-/** `Anirudh's learning`, `a learning`, `Vedu's learning on vedu/jitter`. */
+/** `Anirudh's learning`, `a learning`, `Kumar's learning on kumar/jitter`. */
 export function whoseLearning(n: Note): string {
   const who = n.author ? `${n.author}'s learning` : "a learning";
   return n.ref ? `${who} on ${n.ref.replace(/^origin\//, "")}` : who;

@@ -198,7 +198,7 @@ export function addRepo(c: Cloud, repo: { key: string; name: string }, fetchImpl
 export interface UploadedLearning {
   /** `.trail/learnings/<name>`. */
   path: string;
-  /** "" for the working tree, or the pushed branch it was found on (`origin/vedu/x`). */
+  /** "" for the working tree, or the pushed branch it was found on (`origin/kumar/x`). */
   ref: string;
   branch?: string;
   title: string;

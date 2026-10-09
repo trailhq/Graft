@@ -393,7 +393,7 @@ function demoDiff(from: string, to: string): string {
 }
 
 test("demo: raising defaultRetryMax from 4 to 10 conflicts with Anirudh's decision", () => {
-  const res = checkLocally({ diff: demoDiff("4", "10"), files: ["client.go"], notes: [demoNote()], skills: [], asker: "Vedu", now: new Date("2026-10-09T10:00:00Z") });
+  const res = checkLocally({ diff: demoDiff("4", "10"), files: ["client.go"], notes: [demoNote()], skills: [], asker: "Kumar", now: new Date("2026-10-09T10:00:00Z") });
   assert.deepEqual(res, {
     files: 1,
     notes: 1,

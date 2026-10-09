@@ -38,7 +38,7 @@ const MAX_LEARNINGS = 20;
 const MAX_LEARNING_BYTES = 64 * 1024;
 
 export interface PushedBranch {
-  /** `origin/vedu/jitter-client`. */
+  /** `origin/kumar/jitter-client`. */
   ref: string;
   /** First name of whoever made the branch's newest commit. */
   author: string;
@@ -252,7 +252,7 @@ export function pushedWhen(at: number, now = Date.now()): string {
   return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 }
 
-/** `● overlap · Vedu's branch vedu/jitter also changes client.go (pushed today 14:20)`. */
+/** `● overlap · Kumar's branch kumar/jitter also changes client.go (pushed today 14:20)`. */
 export function formatOverlap(o: Overlap, now = Date.now()): string {
   const branch = o.ref.replace(/^origin\//, "");
   const files = o.shared.length <= 2 ? o.shared.join(" and ") : `${o.shared.slice(0, 2).join(", ")} and ${o.shared.length - 2} more`;

@@ -26,7 +26,7 @@ test("a matching learning reaches the agent with the prompt, once a session, wit
 
 test("a teammate's pushed branch on the same code is put in front of the agent once, to start its reply with", async () => {
   const { overlapsForPrompt } = await import("../src/claude/format.js");
-  const line = "● overlap · Vedu's branch vedu/retry also changes client.go (pushed today 15:32)";
+  const line = "● overlap · Kumar's branch kumar/retry also changes client.go (pushed today 15:32)";
   const ask = { query: "retry count", mode: "lexical", hits: [], overlaps: [line, "[trail] Start your reply with the overlap line above, word for word, so the user knows."] } as AskJson;
   const s = {} as SessionState;
   const first = overlapsForPrompt(ask, s);
