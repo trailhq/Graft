@@ -423,6 +423,11 @@ export function costLabel(cost?: NoteCost): string | null {
   return parts.length ? `took ${parts.join(" and ")} to work out` : null;
 }
 
+/** `'a b'`, with any single quote inside closed, escaped and reopened: safe to paste into a shell. */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 function clip(s: string, n = 88): string {
   return s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s;
 }
@@ -467,7 +472,7 @@ export function formatNoteHits(hits: NoteHit[]): string[] {
     }
     if (note.ref) {
       // On a teammate's branch, not reviewed yet: where to read the rest, and that it's unmerged.
-      lines.push(`  on ${note.ref.replace(/^origin\//, "")}, pushed and not merged yet · git show '${note.path}'${cost ? ` · ${cost}` : ""}`);
+      lines.push(`  on ${note.ref.replace(/^origin\//, "")}, pushed and not merged yet · git show ${shellQuote(note.path)}${cost ? ` · ${cost}` : ""}`);
       lines.push("");
       continue;
     }

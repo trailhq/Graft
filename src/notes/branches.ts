@@ -128,6 +128,9 @@ export function refreshBranches(repo: string, opts: { fetch?: boolean; now?: num
       if (branches.length >= MAX_BRANCHES) break;
       const [ref, unix, author] = line.split("\t");
       if (!ref || ref === base || ref === "origin/HEAD" || ref === "origin") continue;
+      // A name made only of what branch names are usually made of, or the branch is skipped:
+      // it reaches what the agent reads, and a cleaned-up copy would name a different branch.
+      if (safeRef(ref) !== ref) continue;
       const at = Number(unix) * 1000;
       if (!Number.isFinite(at) || now - at > BRANCH_WINDOW_MS) continue;
       const changed = (git(repo, ["diff", "--name-only", `${base}...${ref}`]) ?? "").split("\n").map((f) => f.trim()).filter(Boolean);
@@ -139,7 +142,7 @@ export function refreshBranches(repo: string, opts: { fetch?: boolean; now?: num
         const text = git(repo, ["show", `${ref}:${path}`]);
         if (text && text.length <= MAX_LEARNING_BYTES) learnings.push({ name: path.slice(LEARNINGS_DIR.length + 1), text });
       }
-      branches.push({ ref: safeRef(ref), author: firstName(author ?? ""), at, files: changed.slice(0, MAX_FILES), learnings });
+      branches.push({ ref, author: firstName(author ?? ""), at, files: changed.slice(0, MAX_FILES), learnings });
     }
   }
   const cache: BranchCache = { fetchedAt: Date.now(), stamp: refsStamp(repo), base, branches };
