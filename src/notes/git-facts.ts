@@ -36,11 +36,11 @@ export function currentBranch(repo: string): string | undefined {
   return b && b !== "HEAD" ? b : undefined;
 }
 
-/** Paths that are the code map or agent wiring, never what a note is about. */
+/** Paths that are the code map, agent wiring or the learnings themselves, never what a learning is about. */
 export function ownPath(p: string): boolean {
   // .gitignore and .ignore too: `trail init` and the code map add their lines
   // to them, which is never what a session's note is about.
-  return /^(graft|\.graft|\.claude|\.cursor|\.codex)(\/|$)/.test(p) || p === ".mcp.json" || p === ".gitignore" || p === ".ignore";
+  return /^(graft|\.graft|\.claude|\.cursor|\.codex|\.trail)(\/|$)/.test(p) || p === ".mcp.json" || p === ".gitignore" || p === ".ignore";
 }
 
 /**

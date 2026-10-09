@@ -137,10 +137,10 @@ test("trail --help groups the commands and lists the cloud ones at the top level
   const home = scratchHome();
   const r = run("trail", ["--help"], home);
   assert.equal(r.status, 0);
-  for (const heading of ["Find code", "Setup:", "Trail cloud:", "CI:"]) assert.ok(r.out.includes(heading), heading);
-  for (const c of ["login", "team", "check", "logout", "push", "pull", "status"]) assert.match(r.out, new RegExp(`^  ${c} `, "m"), c);
-  // Still run, just not listed.
-  for (const c of ["viz", "mcp", "stats", "watch", "connect", "trail"]) assert.doesNotMatch(r.out, new RegExp(`^  ${c} `, "m"), c);
+  for (const heading of ["Find code", "Team memory:", "Setup:", "Workspace", "CI:"]) assert.ok(r.out.includes(heading), heading);
+  for (const c of ["note", "check", "team", "workspace", "login", "logout", "status"]) assert.match(r.out, new RegExp(`^  ${c} `, "m"), c);
+  // Still run, just not listed: the brain's rules gave way to the workspace.
+  for (const c of ["viz", "mcp", "stats", "watch", "connect", "trail", "push", "pull"]) assert.doesNotMatch(r.out, new RegExp(`^  ${c} `, "m"), c);
 });
 
 test("graft --help keeps its old flat list, including check and the trail group", () => {
@@ -148,7 +148,7 @@ test("graft --help keeps its old flat list, including check and the trail group"
   assert.equal(r.status, 0);
   assert.match(r.out, /^Usage: graft /m);
   for (const c of ["check", "stats", "viz", "trail"]) assert.match(r.out, new RegExp(`^  ${c} `, "m"), c);
-  assert.ok(!r.out.includes("Trail cloud:"));
+  assert.ok(!r.out.includes("Workspace ·"));
 });
 
 test("the freshness check is graft check under graft and trail build --check under trail", () => {
@@ -177,16 +177,16 @@ test("trail check is the team check, not the freshness check", () => {
   assert.match(r.err, /not a git repository/);
 });
 
-test("trail status puts the code map and the cloud link on one screen", () => {
+test("trail status puts the code map and the workspace on one screen", () => {
   const home = scratchHome();
   const d = builtRepo();
   run("trail", ["build", d], home);
   const r = run("trail", ["status", d], home);
   assert.equal(r.status, 0, r.err);
   assert.match(r.out, /^code map {4}✓ \d+ nodes · in sync with the code$/m);
-  assert.match(r.out, /^cloud {7}not signed in · trail login$/m);
+  assert.match(r.out, /^workspace {3}not connected · Claude offers a link once there are learnings to share$/m);
   const json = JSON.parse(run("trail", ["status", d, "--json"], home).out);
-  assert.equal(json.cloud, null);
+  assert.equal(json.workspace, null);
 });
 
 test("old spellings keep working under trail: trail trail status, trail brain status, trail stats", () => {

@@ -7,7 +7,7 @@ import type { GraphV1, EdgeV1 } from '../graph/types.js';
 import { HIGH_FLOOR, STRONG_FLOOR } from '../ask/fuse.js';
 import { dollarsSaved, formatDollars } from '../context/price.js';
 import { brand, cmd, tag } from '../brand.js';
-import { formatNoteHits, type NoteHit } from '../notes/notes.js';
+import { formatNoteHits, learningSavingsLine, type NoteHit } from '../notes/notes.js';
 
 const C = {
   indigo: (s: string) => `\x1b[38;2;84;111;255m${s}\x1b[0m`,
@@ -95,6 +95,8 @@ export interface AskJson {
   coverageStrong?: number;
   /** Notes from earlier sessions that bear on the query, when this repo keeps them. */
   notes?: NoteHit[];
+  /** Teammates' pushed branches that change the files the hits point into, one line each. */
+  overlaps?: string[];
 }
 
 /** How many notes one prompt may bring in. */
@@ -115,11 +117,30 @@ export function notesForPrompt(ask: AskJson, s: SessionState, cap = PROMPT_NOTES
   const fresh = (ask.notes ?? []).filter((h) => h?.note && !seen.has(h.note.path || h.note.title)).slice(0, cap);
   if (!fresh.length) return null;
   s.injectedNotes = [...(s.injectedNotes ?? []), ...fresh.map((h) => h.note.path || h.note.title)].slice(-INJECTED_POINTERS_CAP);
+  const saved = learningSavingsLine(fresh);
   return (
-    `${tag()} notes earlier sessions left on this. Read them before exploring. If one shapes your answer, ` +
-    `end your reply with one line that says so, naming whose note it was and what it took to work out ` +
-    `(e.g. "📝 Built on Anirudh's note from Oct 8, which took 4 min and ~30k tokens to work out."):\n` +
-    formatNoteHits(fresh).join('\n').trimEnd()
+    `${tag()} learnings earlier sessions left on this. Read them before exploring. If one shapes your answer, ` +
+    `close your reply with one short line that credits it, naming whose it was and what it saved ` +
+    `(e.g. "📝 Started from Anirudh's learning · saved ~27k tokens"):\n` +
+    formatNoteHits(fresh).join('\n').trimEnd() +
+    (saved ? `\n${saved}` : '')
+  );
+}
+
+/**
+ * Teammates' pushed branches that change the code this prompt is about, each
+ * at most once a session, for the agent to mention: two people on the same
+ * thing is worth knowing before either goes further.
+ */
+export function overlapsForPrompt(ask: AskJson, s: SessionState): string | null {
+  const seen = new Set(s.injectedOverlaps ?? []);
+  // The overlap lines themselves; `ask`'s own instruction to the agent is restated below.
+  const fresh = (ask.overlaps ?? []).filter((o) => o.startsWith('●') && !seen.has(o));
+  if (!fresh.length) return null;
+  s.injectedOverlaps = [...(s.injectedOverlaps ?? []), ...fresh].slice(-INJECTED_POINTERS_CAP);
+  return (
+    `${tag()} a teammate's pushed branch changes the same code. Start your reply with ${fresh.length === 1 ? 'this line' : 'these lines'}, word for word, so the user knows before going further:\n` +
+    fresh.join('\n')
   );
 }
 
@@ -267,27 +288,33 @@ export function formatOrientation(indexMd: string, budgetBytes = 1500, staleNote
 }
 
 /**
- * The paragraph about notes, for a repo that keeps them on this machine
- * (`kept`): read the ones there are first, credit them in the tally, leave
- * one when done, and save corrections. Under trail, also run the check before
- * work goes for review; under graft, `check` is still the freshness check. Empty for a repo
- * that keeps none, so graft's directive is unchanged everywhere else.
+ * The paragraph about learnings, for a repo that keeps them: read the ones
+ * there are first and credit them in a closing line, leave one when done,
+ * commit it with the change, and save corrections. Under trail, also run the
+ * check before work goes for review; under graft, `check` is still the
+ * freshness check. Empty for a repo that keeps none, so graft's directive is
+ * unchanged everywhere else.
  */
 export function teamNotesDirective(notes: number, kept = notes > 0): string {
   if (!kept) return '';
   const read =
     notes > 0
-      ? `This repo has ${notes} note${notes === 1 ? '' : 's'} from past sessions on what was decided, tried and ruled out. \`${cmd('graft ask')}\` puts the ones that bear on a task above the code; read them before exploring. ` +
-        `When a note saved you work, add to your tally how much of it came from that note, using the cost printed with it (e.g. ~9k tokens and ~12 min of it came from Priya's note on bbox rotation).\n`
+      ? `This repo has ${notes} learning${notes === 1 ? '' : 's'} from past sessions, yours and your team's, on what was decided, tried and ruled out (in .trail/learnings/). \`${cmd('graft ask')}\` puts the ones that bear on a task above the code; read them before exploring. ` +
+        `When one saved you work, close your reply with one short line crediting it, e.g. 📝 Started from Priya's learning · saved ~9k tokens, using the savings ${b()} prints with it.\n`
       : '';
   return (
     read +
-    `When you finish a task that took real digging, leave a note for the next session: \`${cmd('graft note')} --title "<what it was about>"\` with the note on stdin, under ## Decided, ## Tried and ruled out and ## Watch out. A summary, never a transcript, and nothing secret. It stays on this machine until its owner shares it.\n` +
+    `When you finish a task that took real digging, save a learning for the next session: \`${cmd('graft note')} --title "<what it was about>"\` with the text on stdin, under ## Decided, ## Tried and ruled out and ## Watch out. A summary, never a transcript, and nothing secret. It goes in .trail/learnings/; commit it with the change so your team's Claude starts from it. Add --personal for something about the user's own setup rather than the code.\n` +
     `When the user corrects how something is done here, or states a rule for it, save it so your agent learns it: \`${cmd('graft learn')} <skill>\` with the rule and why on stdin, using a skill that fits (\`${cmd('graft skills')}\` lists them) or a short new name.\n` +
     (brand() === 'trail'
-      ? `When the work is ready for review, run \`trail check\` before you commit it, push the branch or open a PR: it compares the branch's changes, committed or not, with what the team has learned and exits 1 on a conflict. Fix the conflict, or say why the change is right anyway in the commit message or PR description.\n`
+      ? `When the work is ready for review, run \`trail check\` before you commit it, push the branch or open a PR: it compares the branch's changes, committed or not, with what the team has learned and exits 1 on a conflict. Fix the conflict, or say why the change is right anyway in the commit message or PR description, and save a new learning saying what changed. Never edit an existing learning, yours or a teammate's.\n`
       : '')
   );
+}
+
+/** The tool's running name, for prose. */
+function b(): string {
+  return brand();
 }
 
 export function renderSubagent(agentName: string, session: SessionState | null): string {

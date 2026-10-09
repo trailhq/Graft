@@ -1,8 +1,9 @@
 /**
- * Where a repo's notes and takeaways live: on this machine, under
- * `~/.trail/repos/<key>/`, never inside the repo. Nothing trail saves about a
- * session shows up in `git status` or in anyone's pull request, and nothing
- * leaves the machine until its owner signs in to share it.
+ * Where a repo's personal learnings and takeaways live: on this machine, under
+ * `~/.trail/repos/<key>/`. (Learnings about the code itself go in the repo's
+ * committed `.trail/`, see repo-trail.ts.) Nothing here shows up in
+ * `git status` or in anyone's pull request, and nothing leaves the machine
+ * unless its owner shares it.
  *
  * The key names the repo, not the folder it happens to be checked out in, so
  * every checkout of one repo reads and writes the same notes:
@@ -34,6 +35,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readJson, writeJsonAtomic } from "../util/state.js";
+import { readBranchCache } from "./branches.js";
+import { hasRepoTrail, learningFiles } from "./repo-trail.js";
 
 /** `~/.trail`, or `$TRAIL_HOME`. */
 export function trailHome(env: NodeJS.ProcessEnv = process.env): string {
@@ -274,13 +277,16 @@ export function findRepoPlace(start: string, env: NodeJS.ProcessEnv = process.en
 
 export const HOME_README = `# ~/.trail
 
-Notes and corrections from your coding sessions, kept by Trail on this
-machine. Nothing here is in your repos, and nothing leaves this machine
-until you run \`trail login\` to share it with your team.
+What Trail keeps on this machine. Learnings about the code are in each
+repo's own .trail/learnings/, committed with the code; this folder holds
+the rest, and none of it leaves this machine unless you share it.
 
-- repos/<repo>/notes/    one note per session: what was decided, tried and
-                         ruled out, and what it took to figure out
+- repos/<repo>/notes/    personal learnings: about your setup or habits,
+                         not the code
 - repos/<repo>/skills/   corrections you taught your agent, per skill
+- repos/known.json       the repos Trail has run in, which is the list a
+                         workspace's repo picker shows
+- cloud.json             your Trail workspace, once you've connected one
 
 <repo> is the repo's remote (github.com/owner/name), so every clone and
 worktree of one repo shares its notes. Repos without a remote are under
@@ -305,6 +311,7 @@ export function ensureRepoHome(start: string, env: NodeJS.ProcessEnv = process.e
   const readme = join(home, "README.md");
   if (!existsSync(readme)) writeFileSync(readme, HOME_README);
   if (JSON.stringify(index) !== before) writeJsonAtomic(indexPath(home), index);
+  rememberRepo(start, env);
   return { place, created };
 }
 
@@ -363,20 +370,85 @@ export function notePlaces(dir: string, env: NodeJS.ProcessEnv = process.env): R
   return places.filter((p) => !seen.has(p.key) && seen.add(p.key));
 }
 
-/** This repo keeps notes on this machine: `trail init` or a first note made its folder. */
+/** This repo keeps learnings: it has a committed `.trail/`, or `trail init` or a first learning made its folder in ~/.trail. */
 export function keepsNotes(dir: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  return notePlaces(dir, env).some((p) => existsSync(p.dir));
+  return notePlaces(dir, env).some((p) => existsSync(p.dir) || (p.git && hasRepoTrail(p.checkout)));
 }
 
-/** How many notes bear on `dir`, counted without reading them. */
+/**
+ * How many learnings bear on `dir`, counted without reading them: the repo's
+ * `.trail/learnings/`, this machine's own, and the ones on teammates' pushed
+ * branches, one per file name. Spawns nothing: the statusline calls it.
+ */
 export function noteCount(dir: string, env: NodeJS.ProcessEnv = process.env): number {
-  let n = 0;
+  const names = new Set<string>();
   for (const p of notePlaces(dir, env)) {
+    if (p.git) for (const f of learningFiles(p.checkout)) names.add(f);
     try {
-      n += readdirSync(join(p.dir, "notes")).filter((f) => f.endsWith(".md")).length;
+      for (const f of readdirSync(join(p.dir, "notes"))) if (f.endsWith(".md")) names.add(f);
     } catch {
       /* none */
     }
+    if (p.git) for (const b of readBranchCache(p.checkout)?.branches ?? []) for (const l of b.learnings) names.add(l.name);
   }
-  return n;
+  return names.size;
+}
+
+/* -------------------------------------------------------------------------- */
+/* the repos Trail has run in                                                 */
+/* -------------------------------------------------------------------------- */
+
+export interface KnownRepo {
+  /** `github.com/hashicorp/go-retryablehttp`: the key notes are kept under. */
+  key: string;
+  /** `hashicorp/go-retryablehttp`: how people name it. */
+  name: string;
+  /** The checkout it was last seen in, on this machine. */
+  path: string;
+  /** When, epoch ms. */
+  seenAt: number;
+}
+
+function knownPath(home: string): string {
+  return join(home, "repos", "known.json");
+}
+
+/** `github.com/hashicorp/go-retryablehttp` → `hashicorp/go-retryablehttp`; a local key → its folder's name. */
+export function repoName(key: string, checkout?: string): string {
+  if (key.startsWith("local/")) return basename(checkout ?? key);
+  const parts = key.split("/");
+  return parts.length > 2 ? parts.slice(1).join("/") : key;
+}
+
+/**
+ * Every repo Trail has run in on this machine, most recent first. This is the
+ * list a workspace's repo picker shows: Trail never searches the disk for repos.
+ */
+export function knownRepos(env: NodeJS.ProcessEnv = process.env): KnownRepo[] {
+  const raw = readJson<Record<string, Omit<KnownRepo, "key">>>(knownPath(trailHome(env))) ?? {};
+  return Object.entries(raw)
+    .map(([key, r]) => ({ key, name: r.name, path: r.path, seenAt: r.seenAt }))
+    .sort((a, b) => b.seenAt - a.seenAt);
+}
+
+/** How long a sighting stays fresh before `rememberRepo` writes again. */
+const SEEN_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Note that Trail ran in the repo at `dir`. Cheap enough for every command:
+ * it writes only for a repo that's new, moved, or not seen for a day.
+ */
+export function rememberRepo(dir: string, env: NodeJS.ProcessEnv = process.env, now = Date.now()): void {
+  try {
+    const place = repoPlace(dir, env);
+    if (!place.git) return;
+    const file = knownPath(trailHome(env));
+    const all = readJson<Record<string, Omit<KnownRepo, "key">>>(file) ?? {};
+    const prior = all[place.key];
+    if (prior && prior.path === place.checkout && now - prior.seenAt < SEEN_TTL_MS) return;
+    all[place.key] = { name: repoName(place.key, place.checkout), path: place.checkout, seenAt: now };
+    writeJsonAtomic(file, all);
+  } catch {
+    /* a missed sighting only shortens the picker's list */
+  }
 }

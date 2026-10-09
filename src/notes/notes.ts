@@ -1,11 +1,16 @@
 /**
- * Session notes: one short note per coding session, kept on this machine in
- * `~/.trail/repos/<repo>/notes/` (see home.ts for how a repo gets its key).
+ * Learnings: one short note per coding session that took real digging.
  *
- * A note is what a session worked out that the code itself doesn't say: what
- * was decided, what was tried and ruled out, and what to watch out for, plus
- * what it cost to figure out. The next session on the same code reads it
+ * A learning is what a session worked out that the code itself doesn't say:
+ * what was decided, what was tried and ruled out, and what to watch out for,
+ * plus what it cost to figure out. The next session on the same code reads it
  * before exploring, so nobody pays for it twice.
+ *
+ * Most learnings are about the code, so they go in the repo's `.trail/learnings/`
+ * and are committed with the change (repo-trail.ts): every teammate's agent
+ * starts from them, and teammates' pushed branches bring theirs before they
+ * merge (branches.ts). A personal one, about one person's setup or habits,
+ * stays on their machine in `~/.trail/repos/<repo>/notes/` (home.ts).
  *
  * One file per session and never edited after it's written. A summary only,
  * never a transcript: the agent writes the body, and nothing here reads
@@ -15,8 +20,10 @@ import { readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import matter from "gray-matter";
+import { readBranchCache } from "./branches.js";
 import { changedFiles, ownPath } from "./git-facts.js";
 import { checkoutRoot, childCheckouts, ensureRepoHome, notePlaces, repoPlace, shownPath } from "./home.js";
+import { ensureRepoTrail, LEARNINGS_DIR, learningsDir } from "./repo-trail.js";
 
 export interface NoteCost {
   minutes?: number;
@@ -35,12 +42,18 @@ export interface Note {
   /** `file` or `file#Symbol`, relative to the top of the checkout (or to the folder `listNotes` was asked about). */
   touches: string[];
   body: string;
-  /** Came from Trail's ranked search rather than this machine. `path` is then
-   * where it sits in its uploader's ~/.trail, not a file anyone here can open. */
-  fromTrail?: boolean;
   /** Written by someone other than whoever is asking. */
   teammate?: boolean;
+  /** `repo`: in the repo's `.trail/learnings/`, for everyone. `personal`: in ~/.trail, this machine only. */
+  scope?: "repo" | "personal";
+  /** Found on a teammate's pushed branch (`origin/vedu/jitter`) rather than in
+   * this checkout. `path` is then `<ref>:.trail/learnings/<name>`, readable
+   * with `git show`, and the whole body travels with the note. */
+  ref?: string;
 }
+
+/** Which kind of learning to write: for the repo (the default) or for this person only. */
+export type LearningScope = "repo" | "personal";
 
 /** The three sections a note is written under. Notes may have others; these are the ones `ask` quotes. */
 export const SECTIONS = [
@@ -108,35 +121,74 @@ function rebaseTouch(t: string, checkout: string, here: string): string {
   return [rel, ...sym].join("#");
 }
 
-/**
- * Every note that bears on the folder `dir`, newest first: its repo's, or, for
- * a folder that holds several repos, its own and each repo's. Touches come
- * back relative to `dir`, so they line up with a query run there.
- * `children: false` leaves a folder's repos out: only the folder's own notes.
- * Unreadable files are skipped.
- */
-export function listNotes(dir: string, opts: { children?: boolean } = {}): Note[] {
-  const here = resolve(dir);
+/** Every `.md` in `notesDir` that parses as a note, with touches rebased onto `here`. */
+function readNotesIn(notesDir: string, checkout: string, here: string, scope: LearningScope): Note[] {
+  let files: string[];
+  try {
+    files = readdirSync(notesDir).filter((f) => f.endsWith(".md"));
+  } catch {
+    return [];
+  }
   const out: Note[] = [];
-  const places = notePlaces(here);
-  for (const place of opts.children === false ? places.slice(0, 1) : places) {
-    const notes = join(place.dir, "notes");
-    let files: string[];
+  for (const f of files) {
     try {
-      files = readdirSync(notes).filter((f) => f.endsWith(".md"));
+      const n = parseNote(readFileSync(join(notesDir, f), "utf8"), join(notesDir, f));
+      if (n) out.push({ ...n, scope, touches: n.touches.map((t) => rebaseTouch(t, checkout, here)) });
     } catch {
-      continue;
-    }
-    for (const f of files) {
-      try {
-        const n = parseNote(readFileSync(join(notes, f), "utf8"), join(notes, f));
-        if (n) out.push({ ...n, touches: n.touches.map((t) => rebaseTouch(t, place.checkout, here)) });
-      } catch {
-        /* unreadable: skip */
-      }
+      /* unreadable: skip */
     }
   }
+  return out;
+}
+
+/** The file name a note is known by, wherever it sits: one learning on a branch and in the tree is one learning. */
+export function noteName(n: Note): string {
+  return n.path.slice(Math.max(n.path.lastIndexOf("/"), n.path.lastIndexOf(":")) + 1);
+}
+
+/**
+ * Every learning that bears on the folder `dir`, newest first: the repo's
+ * committed ones in `.trail/learnings/`, this person's own in ~/.trail, and
+ * the ones on teammates' pushed branches that haven't merged yet (from the
+ * branch cache, so nothing here runs git). For a folder that holds several
+ * repos, its own and each repo's. Touches come back relative to `dir`, so
+ * they line up with a query run there. `children: false` leaves a folder's
+ * repos out. One file name is one learning: the working tree's copy wins,
+ * then this machine's, then a branch's. Unreadable files are skipped.
+ */
+export function listNotes(dir: string, opts: { children?: boolean; branches?: boolean } = {}): Note[] {
+  const here = resolve(dir);
+  const out: Note[] = [];
+  const seen = new Set<string>();
+  const add = (notes: Note[]) => {
+    for (const n of notes) {
+      const name = noteName(n);
+      if (seen.has(name)) continue;
+      seen.add(name);
+      out.push(n);
+    }
+  };
+  const places = notePlaces(here);
+  for (const place of opts.children === false ? places.slice(0, 1) : places) {
+    if (place.git) add(readNotesIn(learningsDir(place.checkout), place.checkout, here, "repo"));
+    add(readNotesIn(join(place.dir, "notes"), place.checkout, here, "personal"));
+    if (place.git && opts.branches !== false) add(branchNotes(place.checkout, here));
+  }
   return out.sort((a, b) => (a.date === b.date ? b.path.localeCompare(a.path) : b.date.localeCompare(a.date)));
+}
+
+/** The learnings on teammates' pushed branches, from the branch cache. */
+function branchNotes(checkout: string, here: string): Note[] {
+  const cache = readBranchCache(checkout);
+  if (!cache) return [];
+  const out: Note[] = [];
+  for (const b of cache.branches) {
+    for (const l of b.learnings) {
+      const n = parseNote(l.text, `${b.ref}:${LEARNINGS_DIR}/${l.name}`);
+      if (n) out.push({ ...n, scope: "repo", ref: b.ref, touches: n.touches.map((t) => rebaseTouch(t, checkout, here)) });
+    }
+  }
+  return out;
 }
 
 /** The first line of a section's text, or null when the note has no such section. */
@@ -175,12 +227,21 @@ export interface WriteNoteInput {
 }
 
 /**
- * Write a new note into the repo `dir` is in, and return it. Never
- * overwrites: a second note with the same name on the same day gets `-2`,
- * `-3`.
+ * Write a new learning for the repo `dir` is in, and return it: into the
+ * repo's `.trail/learnings/` (made if needed), or with `scope: "personal"`,
+ * or outside git, into ~/.trail. Never overwrites: a second one with the same
+ * name on the same day gets `-2`, `-3`.
  */
-export function writeNote(dir: string, input: WriteNoteInput): Note {
-  const notes = join(ensureRepoHome(dir).place.dir, "notes");
+export function writeNote(dir: string, input: WriteNoteInput, scope: LearningScope = "repo"): Note {
+  const { place } = ensureRepoHome(dir);
+  const inRepo = scope === "repo" && place.git;
+  let notes: string;
+  if (inRepo) {
+    ensureRepoTrail(place.checkout);
+    notes = learningsDir(place.checkout);
+  } else {
+    notes = join(place.dir, "notes");
+  }
   const base = [input.date, slug(input.title) || "note", slug(input.author, 1)].filter(Boolean).join("-");
   let name = `${base}.md`;
   for (let i = 2; existsSync(join(notes, name)); i++) name = `${base}-${i}.md`;
@@ -192,9 +253,17 @@ export function writeNote(dir: string, input: WriteNoteInput): Note {
     cost: input.cost,
     touches: input.touches ?? [],
     body: input.body,
+    scope: inRepo ? "repo" : "personal",
   };
   writeFileSync(join(notes, name), renderNote(note));
   return { ...note, path: join(notes, name) };
+}
+
+/** Where a learning is, as the agent and the person read it: `.trail/learnings/x.md`, `~/.trail/…`, or `origin/b:.trail/…`. */
+export function notePlace(n: Note): string {
+  if (n.ref) return n.path;
+  const at = n.path.lastIndexOf(`/${LEARNINGS_DIR}/`);
+  return at === -1 ? shownPath(n.path) : n.path.slice(at + 1);
 }
 
 export interface NoteTarget {
@@ -358,22 +427,44 @@ function clip(s: string, n = 88): string {
   return s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s;
 }
 
+/** What reading a note costs an agent, in tokens: its text at ~4 characters a token. */
+export function readingTokens(n: Note): number {
+  return Math.ceil(renderNote(n).length / 4);
+}
+
 /**
- * The block `ask` prints above its results: who wrote each note, when, what it
- * was about and what it cost, then the first line of each section, and the
- * path to read the rest. An agent relays the cost when it says what the turn
- * saved, which is how the saving becomes countable.
+ * What reusing a learning saves: what it took to work out, less what reading
+ * it costs. 0 when it carries no token cost, or reading it costs as much.
+ */
+export function savedByNote(n: Note): number {
+  const took = n.cost?.tokens ?? 0;
+  return Math.max(0, took - readingTokens(n));
+}
+
+/** `Anirudh's learning`, `a learning`, `Vedu's learning on vedu/jitter`. */
+export function whoseLearning(n: Note): string {
+  const who = n.author ? `${n.author}'s learning` : "a learning";
+  return n.ref ? `${who} on ${n.ref.replace(/^origin\//, "")}` : who;
+}
+
+/**
+ * The block `ask` prints above its results: whose learning each is, when,
+ * what it was about and what it cost, then the first line of each section and
+ * where to read the rest. A learning on a teammate's unmerged branch comes
+ * whole, since there's no file here to open. An agent
+ * relays the cost when it says what the turn saved, which is how the saving
+ * becomes countable.
  */
 export function formatNoteHits(hits: NoteHit[]): string[] {
   const lines: string[] = [];
   for (const { note } of hits) {
-    const who = note.author ? `${note.author}'s note${note.teammate ? ", a teammate's" : ""}` : "a note";
+    const who = `${note.author ? `${note.author}'s learning` : "a learning"}${note.teammate ? ", a teammate's" : ""}`;
     lines.push(`from ${who} · ${shortDate(note.date)} · ${note.title}`);
     const cost = costLabel(note.cost);
-    if (note.fromTrail) {
-      // No file here to open for the rest, so the whole note comes with it.
+    if (note.ref) {
+      // On a teammate's branch: no file here to open for the rest, so the whole learning comes with it.
       for (const l of note.body.trim().split("\n")) lines.push(`  ${l}`);
-      lines.push(`  shared through Trail${cost ? ` · ${cost}` : ""}`);
+      lines.push(`  on ${note.ref.replace(/^origin\//, "")}, pushed and not merged yet${cost ? ` · ${cost}` : ""}`);
       lines.push("");
       continue;
     }
@@ -381,8 +472,20 @@ export function formatNoteHits(hits: NoteHit[]): string[] {
       const lead = sectionLead(note.body, s.heading);
       if (lead) lines.push(`  ${s.label.padEnd(11)} ${clip(lead)}`);
     }
-    lines.push(`  ${shownPath(note.path)}${cost ? ` · ${cost}` : ""}`);
+    lines.push(`  ${notePlace(note)}${cost ? ` · ${cost}` : ""}`);
     lines.push("");
   }
   return lines;
+}
+
+/**
+ * The line that credits reused learnings, for the savings accumulator and the
+ * agent's closing line: what they took to work out, less what reading them
+ * here costs. Null when no shown learning carries a token cost.
+ */
+export function learningSavingsLine(hits: NoteHit[]): string | null {
+  const saved = hits.reduce((sum, h) => sum + savedByNote(h.note), 0);
+  if (saved <= 0) return null;
+  const read = hits.reduce((sum, h) => sum + readingTokens(h.note), 0);
+  return `[trail] learnings saved ≈ ${saved.toLocaleString("en-US")} tokens (estimate): what they took to work out, less the ~${read.toLocaleString("en-US")} to read them here.`;
 }

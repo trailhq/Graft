@@ -53,7 +53,7 @@
 
 ## Contents
 
-- [Trail quick start](#trail-quick-start): notes your agent leaves for the next session, and your team's
+- [Trail quick start](#trail-quick-start): learnings your agent leaves for the next session, and your team's
 - [Quick start](#quick-start)
 - [The problem](#the-problem)
 - [What Graft does](#what-graft-does)
@@ -84,9 +84,11 @@ claude
 
 Install once. `trail init` asks which agents your team uses, builds the code map and wires up Claude Code. Then work the way you always do.
 
-When a session works something out, your agent leaves a short note: what it decided, what it ruled out, and what to watch out for. The next session on that code gets the note back before it starts digging, and tells you how much work it saved. Notes stay on your machine in `~/.trail`, never in the repo.
+When a session works something out, your agent saves a learning: what it decided, what it ruled out, and what to watch out for. It goes in the repo's `.trail/learnings/`, and you commit it with the change. The next session on that code, yours or a teammate's, gets it back before it starts digging, and ends with a line saying what it saved, like `📝 Started from Anirudh's learning · saved ~27k tokens`. Teammates' Claude reads the learnings even before they install trail, and learnings on a teammate's pushed branch show up before it merges, along with any overlap with your work.
 
-When you want your team to have them, your agent offers a sign-in link at the end of a reply. Teammates on your company's email domain join in one click, and from then on everyone's agent starts from what the team already worked out. Before a PR, `trail check` compares your change with what the team decided and flags anything that goes against it.
+Before a PR, `trail check` compares your change with what the team has learned and flags anything that goes against it. It runs on your machine; nothing to sign in to.
+
+When you want the team's view across repos, your agent offers a link at the end of a reply. Sign in, create a workspace, tick the repos it gets, and invite your team with a link. The team page shows who is learning what, how often learnings are reused, and where work overlaps.
 
 Trying this branch before `@trailhq/trail` is published:
 

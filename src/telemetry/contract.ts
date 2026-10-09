@@ -78,7 +78,17 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
    *  a cost, and how many files it is about, as a bucket. The title, the text
    *  and the paths never travel. The supply side of the notes loop; the
    *  `notes` property on `query` is the demand side. */
-  note_saved: new Set<string>(['has_cost', 'touches_bucket']),
+  note_saved: new Set<string>(['has_cost', 'touches_bucket', 'scope']),
+  /** `ask` showed learnings from earlier sessions: whether any was a
+   *  teammate's, and what they took to work out less reading them, as a
+   *  bucket. The reuse half of the learnings loop; `note_saved` is supply. */
+  learning_reused: new Set<string>(['teammate', 'saved_tokens_bucket']),
+  /** Once a day per repo, from the session-start hook, for a repo trail runs
+   *  in: whether `.trail/` is committed there, how many learnings it holds,
+   *  as a bucket, and whether this machine shares it with a workspace. With
+   *  `repo_id` and the install id this counts devs and repos touched, and
+   *  repos with Trail committed. Paths and names never travel. */
+  repo_seen: new Set<string>(['trail_committed', 'learnings_bucket', 'workspace']),
   /** `trail learn` saved a correction as a takeaway on a skill (into
    *  `~/.trail/`). `new_skill` says whether it started a skill. The text never
    *  travels. */

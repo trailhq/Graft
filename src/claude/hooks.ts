@@ -3,7 +3,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { join, basename, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { readWiring } from './stats.js';
-import { formatBlastRadius, relevantRetrieval, formatOrientation, notesForPrompt } from './format.js';
+import { formatBlastRadius, relevantRetrieval, formatOrientation, notesForPrompt, overlapsForPrompt } from './format.js';
 import { indexFreshness, staleBanner } from '../context/check.js';
 import { patchStats, readStats, acquireLock, readSession, writeSession, resolveContextDir } from './state.js';
 import { graftCliPath, claudeScriptPath } from './paths.js';
@@ -19,7 +19,13 @@ import { readTrailSnapshot, trailContextLine } from '../brain/watch-trail.js';
 import { maybeAutopush, readTrailPushState, recordSeenSuggestions, type AutopushDeps } from '../brain/autopush.js';
 import { adoptRepoBrand, brand, cmd, tag } from '../brand.js';
 import { NOTE_CALL } from '../notes/session-cost.js';
-import { keepsNotes, noteCount } from '../notes/home.js';
+import { keepsNotes, noteCount, repoPlace } from '../notes/home.js';
+import { branchesStale, refreshBranches, SESSION_REFRESH_MS } from '../notes/branches.js';
+import { learningFiles } from '../notes/repo-trail.js';
+import { inWorkspace, maybeSyncInBackground } from '../cloud/workspace-sync.js';
+import { cacheDir, readJson, writeJsonAtomic } from '../util/state.js';
+import { countBucket } from '../telemetry/contract.js';
+import { track } from '../telemetry/track.js';
 import { skillsDirective } from '../skills/skills.js';
 
 /** Prompts shorter than this never trigger retrieval — they are almost always
@@ -386,9 +392,9 @@ export const NOTE_WORTHY_CALLS = 3;
 
 /** What the agent is told when a turn took real digging and left no note. */
 export const NOTE_ASK =
-  '[trail] This took real digging and the session has saved no note. Before you finish, leave one for the next session: ' +
-  '`trail note --title "<what it was about>"` with the note on stdin, under ## Decided, ## Tried and ruled out and ## Watch out. ' +
-  "A summary, never a transcript, and nothing secret. Then finish as trail's output asks, if it asks anything.";
+  '[trail] This took real digging and the session has saved no learning. Before you finish, save one for the next session: ' +
+  '`trail note --title "<what it was about>"` with the text on stdin, under ## Decided, ## Tried and ruled out and ## Watch out. ' +
+  "A summary, never a transcript, and nothing secret. If you've committed this work, commit the learning too. Then finish as trail's output asks, if it asks anything.";
 
 /**
  * Whether the turn that just ended deserves a note: it made at least
@@ -521,6 +527,55 @@ export async function trailAtSessionStart(
   }
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Once a day per repo, the `repo_seen` event: whether `.trail/` is committed
+ * here, how many learnings it holds, and whether this machine shares the repo
+ * with a workspace. Queued only, like every hook's telemetry.
+ */
+export function trackRepoSeen(dir: string, now = Date.now()): void {
+  try {
+    const place = repoPlace(dir);
+    if (!place.git) return;
+    const mark = join(cacheDir(place.checkout), 'trail-repo-seen.json');
+    if (now - (readJson<{ at?: number }>(mark)?.at ?? 0) < DAY_MS) return;
+    writeJsonAtomic(mark, { at: now }, true);
+    const tracked = execFileSync('git', ['ls-files', '--', '.trail'], { cwd: place.checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 });
+    track(
+      'repo_seen',
+      { trail_committed: String(tracked.trim().length > 0), learnings_bucket: countBucket(learningFiles(place.checkout).length), workspace: String(inWorkspace(place.checkout)) },
+      { repo: place.checkout },
+    );
+  } catch {
+    // A missed sighting undercounts one repo for one day.
+  }
+}
+
+/** The most the session-start hook waits on `git fetch` for teammates' branches. */
+export const BRANCH_FETCH_CAP_MS = 3000;
+
+/**
+ * At session start, under trail: read what teammates have pushed, so the
+ * session's first prompt already knows their learnings and where their work
+ * overlaps; send any learnings and uses the workspace hasn't seen; and count
+ * the repo once a day. The fetch is the one wait, capped at
+ * BRANCH_FETCH_CAP_MS and skipped when the branches were read in the last
+ * minute; a fetch that runs out of time still reads the branches already here.
+ * The sync only spawns a detached child.
+ */
+function trailAtStart(dir: string): void {
+  if (brand() !== 'trail' || !keepsNotes(dir)) return;
+  try {
+    const top = repoPlace(dir);
+    if (top.git && branchesStale(top.checkout, Date.now(), SESSION_REFRESH_MS)) refreshBranches(top.checkout, { fetchTimeoutMs: BRANCH_FETCH_CAP_MS });
+  } catch {
+    // Without it, the first prompt sees what the last refresh saw.
+  }
+  maybeSyncInBackground(dir);
+  trackRepoSeen(dir);
+}
+
 export async function main(event: string): Promise<void> {
   const input = readStdin();
   const dir = projectDir(input);
@@ -539,6 +594,7 @@ export async function main(event: string): Promise<void> {
     // Roll up any session that ended since we were last here. Queue-only — the
     // hook still sends nothing; the CLI or the MCP server sends it later.
     flushClosedSessions(dir);
+    trailAtStart(dir);
     const trailLine = await trail;
     if (trailLine) upkeep.push(trailLine);
     try {
@@ -594,9 +650,10 @@ export async function main(event: string): Promise<void> {
     s.lastQuery = prompt;
     const agent = input?.agent?.name;
     if (agent) s.perAgentQuery[agent] = prompt;
-    // Notes first: what an earlier session worked out matters more than where code is.
+    // Learnings first: what an earlier session worked out matters more than where code is.
     const notes = brand() === 'trail' ? notesForPrompt(ask, s) : null;
-    const txt = [notes, relevantRetrieval(ask, s)].filter(Boolean).join('\n\n');
+    const overlaps = brand() === 'trail' ? overlapsForPrompt(ask, s) : null;
+    const txt = [notes, overlaps, relevantRetrieval(ask, s)].filter(Boolean).join('\n\n');
     if (txt) emit('UserPromptSubmit', txt);
     writeSession(dir, id, s);
   }

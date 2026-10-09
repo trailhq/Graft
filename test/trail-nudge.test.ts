@@ -1,151 +1,192 @@
 /**
- * Signing in, offered by the agent: once a person has a note, `trail ask`,
- * `trail note` and `trail check` hand the agent a sign-in link to end its reply
- * with, at most once a session and in wording that changes from one session to
- * the next. A background wait picks up the sign-in, and the next command says
- * so once.
+ * Connecting a workspace, offered by the agent: once a person has a learning,
+ * `trail ask`, `trail note` and `trail check` hand the agent a link to end its
+ * reply with, at most once a session and in wording that changes from one
+ * session to the next. A background wait registers the link with Trail, picks
+ * up the sign-in, uploads the picked repos' learnings, and the next command
+ * says so once. Connected, a repo outside the workspace gets one question.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BRAND_ENV } from "../src/brand.js";
-import { readLink, readPendingSignup, writeLink } from "../src/brain/link.js";
+import { rememberRepo } from "../src/notes/home.js";
 import { writeNote } from "../src/notes/notes.js";
-import { cloudLines, NUDGE_WORDS, waitForSignIn } from "../src/cloud/nudge.js";
+import { cloudLines, NUDGE_WORDS, waitForConnect } from "../src/cloud/nudge.js";
+import { readCloud, writeCloud, type Cloud } from "../src/cloud/workspace.js";
 import { tmpRepo } from "./helpers.js";
 
-process.env.TRAIL_HOME = mkdtempSync(join(tmpdir(), "nudge-trail-home-"));
 process.env.DO_NOT_TRACK = "1";
 process.env[BRAND_ENV] = "trail";
-process.env.GRAFT_BRAIN_URL = "http://trail.test";
+process.env.TRAIL_URL = "http://trail.test";
+process.env.TRAIL_NO_FETCH = "1";
+
+/** A fresh ~/.trail for each test, so links, sessions and connections never leak between them. */
+function freshHome(): NodeJS.ProcessEnv {
+  process.env.TRAIL_HOME = mkdtempSync(join(tmpdir(), "nudge-trail-home-"));
+  return process.env;
+}
 
 function git(d: string, args: string[]) {
   spawnSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: d });
 }
 
-const slugs = new Map<string, string>();
-/** Each repo's GitHub name: a name of its own, so its notes folder is its own too. */
-const slug = (d: string) => slugs.get(d)!;
-
-/** A GitHub-backed repo with trail's notes folder, and a note in it unless `notes` is false. */
-function repo(notes = true): string {
-  const d = tmpRepo("nudge");
-  slugs.set(d, `acme/extract-${slugs.size + 1}`);
-  git(d, ["init", "-q", "-b", "main"]);
-  git(d, ["remote", "add", "origin", `https://github.com/${slug(d)}.git`]);
-  if (notes) writeNote(d, { title: "Retries trip the rate limit", body: "## Decided\nThree retries.", author: "Priya", date: "2026-10-07", touches: [] });
-  return d;
+let n = 0;
+/** A GitHub-backed repo, with a learning in its .trail/ unless `learnings` is false. */
+function repo(learnings = true): { dir: string; key: string } {
+  const dir = tmpRepo("nudge");
+  const name = `acme/extract-${++n}`;
+  git(dir, ["init", "-q", "-b", "main"]);
+  git(dir, ["config", "user.name", "Priya Raman"]);
+  git(dir, ["remote", "add", "origin", `https://github.com/${name}.git`]);
+  if (learnings) writeNote(dir, { title: "Retries trip the rate limit", body: "## Decided\nThree retries.", author: "Priya", date: "2026-10-07", touches: [] });
+  else rememberRepo(dir);
+  return { dir, key: `github.com/${name}` };
 }
 
 const noWait = () => {};
-const at = (session: string, now = Date.now()) => ({ CLAUDE_CODE_SESSION_ID: session, TRAIL_HOME: process.env.TRAIL_HOME, now });
 
 function lines(d: string, command: "ask" | "note" | "check", session: string, opts: { agent?: boolean; now?: number } = {}) {
-  const { now, ...env } = at(session, opts.now);
-  return cloudLines(d, { command, agent: opts.agent ?? true, env, now, startWait: noWait });
+  return cloudLines(d, { command, agent: opts.agent ?? true, env: { ...process.env, CLAUDE_CODE_SESSION_ID: session }, now: opts.now, startWait: noWait });
 }
 
-test("no note yet: nobody is asked to sign in", () => {
-  const d = repo(false);
+function stateOf(): { pending?: { state: string } } {
+  return JSON.parse(readFileSync(join(process.env.TRAIL_HOME!, "cloud-nudge.json"), "utf8"));
+}
+
+test("no learning yet: nobody is asked to sign in", () => {
+  freshHome();
+  assert.deepEqual(lines(repo(false).dir, "ask", "s1"), []);
+});
+
+test("a repo with no remote is never offered a workspace", () => {
+  freshHome();
+  const d = tmpRepo("nudge-local");
+  git(d, ["init", "-q"]);
+  writeNote(d, { title: "x", body: "## Decided\ny", author: "Priya", date: "2026-10-07" });
   assert.deepEqual(lines(d, "ask", "s1"), []);
 });
 
-test("once a session, with the link the agent ends its reply with, in wording that changes per session", () => {
-  const d = repo();
-  const first = lines(d, "ask", "s1");
-  assert.match(first[0]!, /^\[trail\] End your reply with this line, word for word: \[Share your notes with your team\?\]\(http:\/\/trail\.test\/get-started\?step=repo&graft_repo=acme%2Fextract-\d+&graft_state=[\w-]+&graft_mode=trail\)$/);
+test("once a session, a connect link the agent ends its reply with, in wording that changes per session", () => {
+  freshHome();
+  const { dir } = repo();
+  const first = lines(dir, "ask", "s1");
+  assert.match(first[0]!, /^\[trail\] End your reply with this line, word for word: \[Share your learnings with your team\?\]\(http:\/\/trail\.test\/connect\?state=[\w-]{32}\)$/);
   assert.match(first[1]!, /don't run trail login yourself/);
-  const state = readPendingSignup(d, slug(d), 60_000)?.state;
-  assert.ok(state && first[0]!.includes(`graft_state=${state}`), "the link carries the state the background wait claims");
-
-  assert.deepEqual(lines(d, "note", "s1"), [], "the same session isn't asked twice");
-  assert.deepEqual(lines(d, "check", "s1"), []);
-
-  const next = lines(d, "note", "s2");
-  assert.ok(next[0]!.includes(`[${NUDGE_WORDS[1]}]`), "the next session reads differently");
-  assert.ok(next[0]!.includes(`graft_state=${state}`), "and reuses the link already out");
-  assert.ok(lines(d, "ask", "s3")[0]!.includes(`[${NUDGE_WORDS[0]}]`));
+  assert.deepEqual(lines(dir, "note", "s1"), [], "not twice in one session");
+  const second = lines(dir, "check", "s2");
+  assert.ok(second[0]!.includes(NUDGE_WORDS[1]), "the next session reads differently");
+  assert.ok(second[0]!.includes(stateOf().pending!.state), "the same link, while it's good");
 });
 
-test("a person at a terminal gets the link as a plain line", () => {
-  const d = repo();
-  const out = lines(d, "ask", "t1", { agent: false });
+test("at a terminal it's one plain line", () => {
+  freshHome();
+  const { dir } = repo();
+  const out = lines(dir, "ask", "s1", { agent: false });
   assert.equal(out.length, 1);
-  assert.match(out[0]!, /^· Share your notes with your team\? http:\/\/trail\.test\/get-started\?/);
+  assert.match(out[0]!, /^· Share your learnings with your team\? http:\/\/trail\.test\/connect\?state=/);
 });
 
-test("without a session id, commands within a few hours count as one session", () => {
-  const d = repo();
-  const now = Date.now();
-  const bare = (t: number) => cloudLines(d, { command: "ask", agent: true, env: { TRAIL_HOME: process.env.TRAIL_HOME }, now: t, startWait: noWait });
-  assert.equal(bare(now).length, 2);
-  assert.deepEqual(bare(now + 60 * 60 * 1000), []);
-  assert.equal(bare(now + 5 * 60 * 60 * 1000).length, 2);
-});
-
-test("a repo already signed in is never nudged", () => {
-  const d = repo();
-  writeLink(d, { brainId: "b-1", token: "tok" });
-  assert.deepEqual(lines(d, "ask", "s1"), []);
-});
-
-function fakeFetch(answers: Array<{ status: number; body?: unknown }>, seen: string[]): typeof fetch {
-  return (async (url: string | URL, init?: RequestInit) => {
-    const path = String(url).replace("http://trail.test", "");
-    seen.push(`${init?.method ?? "GET"} ${path}`);
-    if (path.endsWith("/trail/index")) {
-      const body = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ workspace: "acme", repo: body.repo, notes: body.notes.length, skills: body.skills.length }), { status: 200 });
+/** A Trail that answers the handoff routes from memory, and records what it was sent. */
+function fakeTrail(opts: { finishAfter?: number; expire?: boolean } = {}) {
+  const sent: Array<{ path: string; body: any; auth?: string }> = [];
+  let claims = 0;
+  const fetchImpl = (async (url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    const body = init.body ? JSON.parse(String(init.body)) : undefined;
+    sent.push({ path, body, auth: (init.headers as Record<string, string>)?.authorization });
+    const json = (status: number, b: unknown) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    if (path === "/api/cli/handoffs") return json(201, { url: `http://trail.test/connect?state=${body.state}` });
+    if (path === "/api/cli/handoffs/claim") {
+      if (opts.expire) return json(410, { error: "expired" });
+      if (++claims < (opts.finishAfter ?? 1)) return json(202, { pending: true });
+      return json(200, {
+        token: "trl_test",
+        user: { name: "Priya", email: "priya@acme.test" },
+        workspace: { id: "w1", name: "Acme", slug: "acme", url: "http://trail.test/w/acme", invite_url: "http://trail.test/join/abc" },
+        repos: sent.find((s) => s.path === "/api/cli/handoffs")!.body.repo ? [sent.find((s) => s.path === "/api/cli/handoffs")!.body.repo.key] : [],
+      });
     }
-    const a = answers.shift() ?? { status: 404 };
-    return new Response(a.body === undefined ? null : JSON.stringify(a.body), { status: a.status });
+    if (path === "/api/cli/learnings") return json(200, { repo: body.repo.key, learnings: body.learnings.length, added: body.learnings.length });
+    if (path === "/api/cli/activity") return json(200, { stored: body.events.length });
+    return json(404, { error: "no route" });
   }) as typeof fetch;
+  return { fetchImpl, sent };
 }
 
-test("the background wait picks up the sign-in, shares the notes, and the next command says so once", async () => {
-  const d = repo();
-  lines(d, "ask", "s1");
-  const seen: string[] = [];
-  // Not signed in yet, then signed in.
-  const fetchImpl = fakeFetch([{ status: 200, body: {} }, { status: 200, body: { brain_id: "b-1", token: "tok" } }], seen);
-  const got = await waitForSignIn(d, { fetchImpl, sleep: async () => {}, waitMs: 60_000 });
-  assert.ok(got && "link" in got);
-  assert.deepEqual(readLink(d), { brainId: "b-1", token: "tok" });
-  assert.equal(readPendingSignup(d, slug(d), 60_000), null, "the state is spent");
-  assert.deepEqual(seen, ["POST /api/public/graft-handoffs/claim", "POST /api/public/graft-handoffs/claim", "PUT /api/public/brains/b-1/trail/index"]);
+test("the background wait registers the link with the picker's repos, then connects and uploads the picked repo's learnings", async () => {
+  freshHome();
+  const { dir, key } = repo();
+  const other = repo(false);
+  lines(dir, "ask", "s1");
+  const trail = fakeTrail({ finishAfter: 2 });
+  const got = await waitForConnect({ fetchImpl: trail.fetchImpl, sleep: async () => {} });
+  assert.ok(got && "cloud" in got);
 
-  const told = lines(d, "ask", "s1");
-  assert.deepEqual(told.slice(0, 2), ["✓ signed in · team acme", `✓ shared 1 note and 0 skills with your team for ${slug(d)}`]);
-  assert.match(told[2]!, /^\[trail\] Tell the user once, in your reply, that their notes are now shared with team acme/);
-  assert.deepEqual(lines(d, "ask", "s1"), [], "told once");
-  assert.deepEqual(lines(d, "ask", "s9"), [], "and never nudged again");
+  const reg = trail.sent.find((s) => s.path === "/api/cli/handoffs")!.body;
+  assert.equal(reg.state, stateOf().pending?.state ?? reg.state);
+  assert.deepEqual(reg.repo, { key, name: key.replace("github.com/", "") });
+  assert.deepEqual(new Set(reg.repos.map((r: any) => r.key)), new Set([key, other.key]), "every repo trail knows here, for the picker");
+  assert.equal(reg.repos.find((r: any) => r.key === key).learnings, 1);
+  assert.equal(reg.author, "Priya");
+
+  const cloud = readCloud()!;
+  assert.equal(cloud.token, "trl_test");
+  assert.equal(cloud.workspace.name, "Acme");
+  assert.deepEqual(cloud.repos, [key]);
+  const up = trail.sent.find((s) => s.path === "/api/cli/learnings")!;
+  assert.equal(up.auth, "Bearer trl_test");
+  assert.equal(up.body.repo.key, key);
+  assert.equal(up.body.learnings.length, 1);
+  assert.match(up.body.learnings[0].path, /^\.trail\/learnings\/2026-10-07-retries-trip-the-rate-limit-priya\.md$/);
+  assert.equal(up.body.learnings[0].ref, "");
+
+  // The next command says so, once, and asks the agent to tell the person.
+  const told = lines(dir, "ask", "s2");
+  assert.equal(told[0], "✓ connected to workspace Acme");
+  assert.match(told[1]!, /^✓ shared 1 learning from 1 repo · http:\/\/trail\.test\/w\/acme$/);
+  assert.match(told[2]!, /Tell the user once/);
+  assert.deepEqual(lines(dir, "ask", "s3"), [], "only once");
 });
 
-test("a spent link is dropped, so the next session gets a fresh one", async () => {
-  const d = repo();
-  const first = lines(d, "ask", "s1");
-  const got = await waitForSignIn(d, { fetchImpl: fakeFetch([{ status: 410 }], []), sleep: async () => {} });
-  assert.ok(got && "error" in got);
-  assert.equal(readPendingSignup(d, slug(d), 60_000), null);
-  const next = lines(d, "ask", "s2");
-  const state = (s: string) => /graft_state=([\w-]+)/.exec(s)?.[1];
-  assert.ok(state(next[0]!) && state(next[0]!) !== state(first[0]!));
+test("a spent link stops the wait and is forgotten, so the next session mints a new one", async () => {
+  freshHome();
+  const { dir } = repo();
+  lines(dir, "ask", "s1");
+  const before = stateOf().pending!.state;
+  const got = await waitForConnect({ fetchImpl: fakeTrail({ expire: true }).fetchImpl, sleep: async () => {} });
+  assert.ok(got && "error" in got && got.reason === "expired");
+  assert.equal(readCloud(), null);
+  const next = lines(dir, "ask", "s2");
+  assert.ok(next.length > 0);
+  assert.ok(!next[0]!.includes(before), "a new link");
 });
 
-test("the wait gives up after its window and says nothing", async () => {
-  const d = repo();
-  lines(d, "ask", "s1");
-  let t = 0;
-  const got = await waitForSignIn(d, {
-    fetchImpl: fakeFetch(Array.from({ length: 50 }, () => ({ status: 200, body: {} })), []),
-    sleep: async (ms) => void (t += ms),
-    now: () => t,
-    waitMs: 30_000,
-  });
-  assert.ok(got && "pending" in got);
-  assert.equal(readLink(d), null);
-  assert.deepEqual(lines(d, "ask", "s1"), [], "still once a session");
+function connect(repos: string[]): void {
+  const c: Cloud = {
+    url: "http://trail.test",
+    token: "trl_test",
+    user: { name: "Priya", email: "priya@acme.test" },
+    workspace: { id: "w1", name: "Acme", slug: "acme", url: "http://trail.test/w/acme", invite_url: "http://trail.test/join/abc" },
+    repos,
+    linkedAt: Date.now(),
+  };
+  writeCloud(c);
+}
+
+test("connected: a repo with learnings outside the workspace gets one question, ever", () => {
+  freshHome();
+  const inside = repo();
+  const outside = repo();
+  connect([inside.key]);
+  assert.deepEqual(lines(inside.dir, "ask", "s1"), [], "nothing to say about a repo already in it");
+  const asked = lines(outside.dir, "ask", "s1");
+  assert.equal(asked.length, 1);
+  assert.match(asked[0]!, /^\[trail\] Ask the user once, at the end of your reply: add acme\/extract-\d+ to their Trail workspace Acme/);
+  assert.match(asked[0]!, /run `trail workspace add`/);
+  assert.deepEqual(lines(outside.dir, "ask", "s2"), [], "never again");
+  rmSync(join(process.env.TRAIL_HOME!, "cloud.json"));
 });

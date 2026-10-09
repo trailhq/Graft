@@ -128,10 +128,10 @@ test("an unrelated note never rides along", () => {
   assert.deepEqual(findNotes([note()], "latency dashboards"), []);
 });
 
-test("ask's notes block names the author, the date, each section's lead and the cost", () => {
+test("ask's learnings block names the author, the date, each section's lead and the cost", () => {
   const lines = formatNoteHits([{ note: note(), score: 9, shared: [] }]);
   assert.deepEqual(lines, [
-    "from Priya's note · Oct 7 · Bbox coordinates are off on rotated PDFs",
+    "from Priya's learning · Oct 7 · Bbox coordinates are off on rotated PDFs",
     "  decided     Rotate each box in `NormalizeBox` by its own page's `/Rotate` before scaling.",
     "  ruled out   Rotating the image before OCR. Works, but doubles latency on long files.",
     "  watch out   `/Rotate` can be 270 on a single page inside an otherwise upright file.",
@@ -235,24 +235,25 @@ function notesUnder(home: string): string {
   return join(local, key!, "notes");
 }
 
-test("trail init keeps notes in ~/.trail and adds nothing about them to the repo; graft init makes no notes folder", () => {
+test("trail init makes the repo's .trail/learnings/ and says to commit it; graft init makes neither", () => {
   const home = mkdtempSync(join(tmpdir(), "notes-home-"));
   const d = repoWithCode();
   const t = run("trail", ["init", d, "--agents", "claude", "--yes", "--no-global"], home);
   assert.equal(t.status, 0, t.err);
-  assert.match(t.err, /✓ notes {6}kept in ~\/\.trail\/repos\/local\/[^ ]+ · every session you finish leaves a short note there, never in the repo/);
-  assert.match(t.err, /the code map in graft\/ and your notes stay on this machine/);
-  assert.ok(existsSync(notesUnder(home)));
-  assert.equal(existsSync(join(d, ".trail")), false);
+  assert.match(t.err, /✓ learnings {2}\.trail\/learnings\/ · sessions that take real digging leave one there, for your whole team/);
+  assert.match(t.err, /· commit .*\.trail\/ to share it/);
+  assert.ok(existsSync(join(d, ".trail", "learnings")));
+  assert.match(readFileSync(join(d, ".trail", "README.md"), "utf8"), /^# \.trail/);
   assert.equal(readFileSync(join(d, "CLAUDE.md"), "utf8"), "# extract\n\nTeam rules.\n", "the team's CLAUDE.md is untouched");
 
   const g = repoWithCode();
   const home2 = mkdtempSync(join(tmpdir(), "notes-home-"));
   assert.equal(run("graft", ["init", g, "--agents", "claude", "--yes", "--no-global"], home2).status, 0);
   assert.equal(existsSync(join(home2, ".trail")), false);
+  assert.equal(existsSync(join(g, ".trail")), false);
 });
 
-test("trail note saves the note in ~/.trail, ask shows it to the next session, uninstall leaves it", () => {
+test("trail note saves a learning in .trail/learnings/ to commit, ask shows it to the next session, uninstall leaves it", () => {
   const home = mkdtempSync(join(tmpdir(), "notes-home-"));
   const d = repoWithCode();
   run("trail", ["init", d, "--agents", "claude", "--yes", "--no-global"], home);
@@ -263,45 +264,58 @@ test("trail note saves the note in ~/.trail, ask shows it to the next session, u
 
   const saved = run("trail", ["note", d, "--title", "Bbox coordinates are off on rotated PDFs", "--minutes", "12", "--tokens", "9600"], home, BODY);
   assert.equal(saved.status, 0, saved.err);
-  assert.match(saved.out, /^✓ note saved · ~\/\.trail\/repos\/local\/[^/]+\/notes\/\d{4}-\d{2}-\d{2}-bbox-coordinates-are-off-on-rotated-priya\.md$/m);
+  assert.match(saved.out, /^✓ learning saved · \.trail\/learnings\/\d{4}-\d{2}-\d{2}-bbox-coordinates-are-off-on-rotated-priya\.md$/m);
   assert.match(saved.out, /this took 12 min and ~9\.6k tokens to figure out\. the next session that touches bbox\.go gets it for ~\d+/);
-  assert.match(saved.out, /^· kept on this machine, never in the repo$/m);
-  const [file] = readdirSync(notesUnder(home)).filter((f) => f.endsWith(".md"));
-  const written = parseNote(readFileSync(join(notesUnder(home), file!), "utf8"), "x");
+  assert.match(saved.out, /^· commit it with this change \(git add \.trail\/learnings\/[^)]+\) so your team's Claude starts from it too$/m);
+  assert.match(saved.out, /📝 Saved a learning for your team's next session/, "the closing line, for the agent's reply");
+  const [file] = readdirSync(join(d, ".trail", "learnings")).filter((f) => f.endsWith(".md"));
+  const written = parseNote(readFileSync(join(d, ".trail", "learnings", file!), "utf8"), "x");
   assert.equal(written?.author, "Priya");
   assert.deepEqual(written?.touches, ["internal/ocr/bbox.go"], "the changed file, not the wiring init wrote");
-  const status = spawnSync("git", ["status", "--porcelain"], { cwd: d, encoding: "utf8" }).stdout;
-  assert.equal(status, " M internal/ocr/bbox.go\n", "git sees only the code change");
+  const status = spawnSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: d, encoding: "utf8" }).stdout;
+  assert.equal(status, ` M internal/ocr/bbox.go\n?? .trail/learnings/${file}\n`, "the learning waits to be committed with the change");
 
   // Asked from either name, and from a subfolder of the repo.
   for (const [name, dir] of [["trail", d], ["graft", d], ["trail", join(d, "internal")]] as const) {
     const ask = run(name, ["ask", "bbox rotated pdf", dir], home);
     assert.equal(ask.status, 0, ask.err);
-    assert.match(ask.out, /from Priya's note · \w{3} \d+ · Bbox coordinates are off on rotated PDFs/);
+    assert.match(ask.out, /from Priya's learning · \w{3} \d+ · Bbox coordinates are off on rotated PDFs/);
     assert.match(ask.out, /ruled out {3}Rotating the image before OCR/);
-    assert.match(ask.out, /~\/\.trail\/repos\/local\/[^/]+\/notes\//);
+    assert.match(ask.out, /\.trail\/learnings\/\d{4}-\d{2}-\d{2}-bbox/);
+    assert.match(ask.out, /\[(trail|graft)\] learnings saved ≈ [\d,]+ tokens/, "what reusing it saved, for the tally");
   }
 
   const st = run("trail", ["status", d], home);
   assert.equal(st.status, 0, st.err);
-  assert.match(st.out, /^notes {7}1 · in ~\/\.trail\/repos\/local\/[^/]+$/m);
-  assert.equal(JSON.parse(run("trail", ["status", d, "--json"], home).out).notes.count, 1);
+  assert.match(st.out, /^learnings {3}1 in \.trail\/learnings\/$/m);
+  assert.equal(JSON.parse(run("trail", ["status", d, "--json"], home).out).learnings.repo, 1);
 
   const un = run("trail", ["uninstall", d, "-y", "--no-global"], home);
   assert.equal(un.status, 0, un.err);
-  assert.ok(existsSync(join(notesUnder(home), file!)), "notes are the person's, never uninstalled");
+  assert.ok(existsSync(join(d, ".trail", "learnings", file!)), "learnings are the team's, never uninstalled");
+});
+
+test("trail note --personal keeps it in ~/.trail, out of the repo", () => {
+  const home = mkdtempSync(join(tmpdir(), "notes-home-"));
+  const d = repoWithCode();
+  const saved = run("trail", ["note", d, "--personal", "--title", "My editor runs gofmt on save"], home, BODY);
+  assert.equal(saved.status, 0, saved.err);
+  assert.match(saved.out, /^✓ learning saved · ~\/\.trail\/repos\/local\/[^/]+\/notes\/\d{4}-\d{2}-\d{2}-my-editor-runs-gofmt-on-save-priya\.md$/m);
+  assert.match(saved.out, /^· personal: kept on this machine, out of the repo$/m);
+  assert.ok(existsSync(notesUnder(home)));
+  assert.equal(existsSync(join(d, ".trail")), false);
 });
 
 test("trail note without a body says how to write one", () => {
   const home = mkdtempSync(join(tmpdir(), "notes-home-"));
   const r = run("trail", ["note", repoWithCode(), "--title", "x"], home, "");
   assert.equal(r.status, 1);
-  assert.match(r.err, /a note needs a --title and a body/);
+  assert.match(r.err, /a learning needs a --title and a body/);
 });
 
 // --- what agents read in a repo that uses trail ---
 
-test("the skill speaks trail in a repo wired for it, keeps graft/ paths, and teaches notes", async () => {
+test("the skill speaks trail in a repo wired for it, keeps graft/ paths, and teaches learnings", async () => {
   const { skillTemplate } = await import("../src/claude/skill-template.js");
   const graft = skillTemplate("graft");
   const trail = skillTemplate("trail");
@@ -313,8 +327,9 @@ test("the skill speaks trail in a repo wired for it, keeps graft/ paths, and tea
   assert.match(trail, /`graft\/` holds a graph/, "the code map folder is still graft/");
   assert.doesNotMatch(trail, /\bgraft (ask|grep|skeleton|callers|map|build|check)\b/);
   assert.match(trail, /trail note --title/);
-  assert.match(trail, /`~\/\.trail\/`, never in the repo/);
-  assert.doesNotMatch(trail, /\.trail\/notes|gets committed/);
+  assert.match(trail, /It's written to `\.trail\/learnings\/`:\ncommit it with the change it came from/);
+  assert.match(trail, /`--personal`/);
+  assert.match(trail, /## If trail isn't installed/);
 });
 
 // Claude Code reads only a skill's description up front, so the moments to
@@ -327,25 +342,29 @@ test("the trail skill's description names when to use its commands, and the body
   assert.ok(data.description.length <= 1024, "skill descriptions are capped at 1,024 characters");
   assert.match(data.description, /ANY task in this repo/);
   assert.match(data.description, /trail ask before grepping/);
-  assert.match(data.description, /When you finish a task .* trail note/);
+  assert.match(data.description, /When a task took real digging, save a learning with trail note and commit it with the change/);
+  assert.match(data.description, /\.trail\/learnings\//, "where the learnings are, for a Claude without trail");
+  assert.match(data.description, /npm install -g @trailhq\/trail/, "and how to get the command");
   assert.doesNotMatch(data.description, /graft/, "nothing about the old name or the graft\/ folder");
   const moments = content.indexOf("## When to reach for trail");
   assert.ok(moments >= 0 && moments < content.indexOf("## The tools"), "the moments come before the tool docs");
   assert.match(content, /\*\*When you finish a task that took real digging\*\*/);
-  assert.match(data.description, /corrects how something is done here, or states a rule for it, save it with trail learn/);
+  assert.match(data.description, /corrects how something is done here, save it with trail learn/);
   assert.match(content, /\*\*When the user corrects how something is done here\*\*/);
   assert.match(content, /`trail skills show <skill>` prints it/);
 });
 
-test("the session-start directive mentions notes only in a repo that keeps them", async () => {
+test("the session-start directive mentions learnings only in a repo that keeps them", async () => {
   const { formatOrientation } = await import("../src/claude/format.js");
-  assert.doesNotMatch(formatOrientation("# map", 100), /note/);
+  assert.doesNotMatch(formatOrientation("# map", 100), /learning/);
   const some = formatOrientation("# map", 100, undefined, 3, true);
-  assert.match(some, /This repo has 3 notes from past sessions/);
-  assert.match(some, /leave a note for the next session/);
+  assert.match(some, /This repo has 3 learnings from past sessions/);
+  assert.match(some, /📝 Started from Priya's learning · saved ~9k tokens/, "the closing line, by example");
+  assert.match(some, /save a learning for the next session/);
+  assert.match(some, /commit it with the change/);
   const none = formatOrientation("# map", 100, undefined, 0, true);
   assert.doesNotMatch(none, /This repo has/);
-  assert.match(none, /leave a note for the next session/, "a repo set up for notes is told to leave one from the first session");
+  assert.match(none, /save a learning for the next session/, "a repo set up for learnings is told to leave one from the first session");
 });
 
 test("hooks speak trail only in a repo wired for it, on a machine with trail installed", async () => {

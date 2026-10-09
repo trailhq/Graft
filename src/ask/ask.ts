@@ -51,7 +51,7 @@ import { counts, tokenize, type AskIndex, type AskIndexDoc } from "./index-file.
 import { rulesForPointers, formatRules, type AppliedRule } from "../brain/attach.js";
 import { readLink, readRulesCache } from "../brain/link.js";
 import { cmd, tag } from "../brand.js";
-import { formatNoteHits, type NoteHit } from "../notes/notes.js";
+import { formatNoteHits, learningSavingsLine, type NoteHit } from "../notes/notes.js";
 
 export interface AskHit {
   kind: "concept" | "symbol" | "caller" | "callee";
@@ -116,10 +116,11 @@ export interface AskResult {
   /** The repo keeps notes on this machine, so an empty `notes` means "none
    *  about this yet" rather than "this repo keeps no notes". */
   notesChecked?: boolean;
-  /** Trail ranked these notes across the team's whole index (cloud/ask-cloud.ts). */
-  notesRanked?: boolean;
   /** One line about the notes, e.g. that this many would search better ranked. */
   notesHint?: string;
+  /** Teammates' pushed branches that change the files these results point into
+   *  (notes/branches.ts), one line each. */
+  overlaps?: string[];
   /** Token-saving estimate, set only in `--source` (retriever) mode: the whole
    * size of the distinct files these hits point into, i.e. the baseline cost of
    * reading them instead of this pack. Computed from file sizes stored at build. */
@@ -1519,8 +1520,11 @@ export function formatAsk(r: AskResult): string {
   const teamNotes = r.notes?.length
     ? formatNoteHits(r.notes)
     : r.notesChecked
-      ? ["· no notes about this yet", ""]
+      ? ["· no learnings about this yet", ""]
       : [];
+  const learned = r.notes?.length ? learningSavingsLine(r.notes) : null;
+  if (learned) teamNotes.push(learned, "");
+  if (r.overlaps?.length) teamNotes.push(...r.overlaps, "");
   if (r.notesHint) teamNotes.push(r.notesHint, "");
   if (r.hits.length === 0) {
     if (r.notes?.length) return `${head}\n\n${teamNotes.join("\n").trimEnd()}\n\n${noteBlock || "no code matches."}${escalationNudge(r)}\n`;

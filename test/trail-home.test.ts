@@ -140,7 +140,7 @@ test("a folder outside git is keyed by its path", () => {
 test("a renamed remote finds its notes again, through the repo's first commit", () => {
   home();
   const d = repo("renamed", "git@github.com:nanonets/graft.git");
-  writeNote(d, { title: "Bbox rotation", body: BODY, author: "Priya", date: "2026-10-07" });
+  writeNote(d, { title: "Bbox rotation", body: BODY, author: "Priya", date: "2026-10-07" }, "personal");
   git(d, "remote", "set-url", "origin", "git@github.com:trailhq/trail.git");
   assert.equal(repoPlace(d).key, "github.com/trailhq/trail", "reads alone don't run git");
   assert.equal(findRepoPlace(d).key, "github.com/nanonets/graft", "ask's lookup follows the first commit");
@@ -157,7 +157,7 @@ test("a renamed remote finds its notes again, through the repo's first commit", 
 test("notes from before a repo had a remote carry over once it gets one", () => {
   home();
   const d = repo("no-remote-yet");
-  writeNote(d, { title: "First note", body: BODY, author: "Priya", date: "2026-10-07" });
+  writeNote(d, { title: "First note", body: BODY, author: "Priya", date: "2026-10-07" }, "personal");
   git(d, "remote", "add", "origin", "git@github.com:acme/extract.git");
   assert.equal(ensureRepoHome(d).place.key, repoPlace(d).key);
   assert.match(repoPlace(d).key, /^local\//, "the new key points at the old folder");
@@ -167,7 +167,7 @@ test("notes from before a repo had a remote carry over once it gets one", () => 
 test("a different repo never inherits notes: no shared first commit, no alias", () => {
   const env = home();
   const a = repo("first-a", "git@github.com:acme/a.git", { "a.go": "package a\n" });
-  writeNote(a, { title: "A's note", body: BODY, author: "Priya", date: "2026-10-07" });
+  writeNote(a, { title: "A's note", body: BODY, author: "Priya", date: "2026-10-07" }, "personal");
   const b = repo("first-b", "git@github.com:acme/b.git", { "b.go": "package b\n" });
   assert.equal(findRepoPlace(b).key, "github.com/acme/b");
   assert.equal(listNotes(b).length, 0);

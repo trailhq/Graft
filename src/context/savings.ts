@@ -135,7 +135,8 @@ export function savingsLine(body: string, saved: Savings | undefined): string {
  */
 export function sumSavingsFooters(text: string): number {
   let total = 0;
-  for (const m of text.matchAll(/\[(?:graft|trail)\] tokens saved ≈ ([\d,]+)/g)) {
+  // The code a query saved reading, and the digging a reused learning saved.
+  for (const m of text.matchAll(/\[(?:graft|trail)\] (?:tokens|learnings) saved ≈ ([\d,]+)/g)) {
     total += Number(m[1].replace(/,/g, '')) || 0;
   }
   return total;

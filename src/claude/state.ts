@@ -38,6 +38,8 @@ export interface SessionState {
   /** Notes already put in front of the agent this session by the per-prompt
    * hook, by path, so each is shown once (see `notesForPrompt`). */
   injectedNotes?: string[];
+  /** Overlap lines (teammates' pushed branches on the same code) already put in front of the agent this session. */
+  injectedOverlaps?: string[];
   /** Weak-match nudges spent this session, capped so the line stays signal.
    * Optional for the same backwards-compatibility reason as above. */
   nudges?: number;
