@@ -640,7 +640,7 @@ function statementsOf(c: Candidate): Statement[] {
 function owner(c: Candidate): string {
   if (c.kind === "skill") return `skill ${c.skill.name}`;
   const a = c.note.author.trim();
-  return a ? `${a}'s note` : "a team note";
+  return a ? `${a}'s learning` : "a team learning";
 }
 
 /**

@@ -34,8 +34,8 @@ export function renderStatusline(
   }
   const top = [C.muted('◤ ') + C.indigo(brand()), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];
   top.push(freshnessSegment(stats));
-  // Past sessions' notes, so a session that starts with some knows they're there.
-  if (ctx.notes) top.push(C.amber(`${ctx.notes} note${ctx.notes === 1 ? '' : 's'}`));
+  // Past sessions' learnings, so a session that starts with some knows they're there.
+  if (ctx.notes) top.push(C.amber(`${ctx.notes} learning${ctx.notes === 1 ? '' : 's'}`));
   const saved = session?.savedTokens ?? 0;
   if (saved > 0) {
     // Dollars only once a turn has actually been billed — see context/price.ts.

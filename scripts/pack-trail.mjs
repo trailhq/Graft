@@ -34,7 +34,7 @@ const trail = {
   ...pkg,
   name: '@trailhq/trail',
   description:
-    "Your team's shared memory for coding agents: a code map on your machine, and the notes, decisions and skills your whole team shares. Formerly graft.",
+    "Your team's shared memory for coding agents: a code map on your machine, and the learnings, decisions and skills your whole team shares. Formerly graft.",
   keywords: [...new Set(['trail', ...(pkg.keywords ?? [])])],
   bin: { trail: 'dist/bin/trail.js' },
   // Built already; nothing to compile in the published tree.

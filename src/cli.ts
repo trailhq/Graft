@@ -1141,7 +1141,7 @@ grouped(program.command("note", { hidden: !TRAIL }), GROUP.memory)
   .option("--author <name>", "who wrote it (default: the first word of git config user.name)")
   .option("--minutes <n>", "what it took to work out, when the agent's transcript can't say")
   .option("--tokens <n>", "the same, in tokens")
-  .option("--json", "print the saved note as JSON")
+  .option("--json", "print the saved learning as JSON")
   .argument("[dir]", "repository root", ".")
   .action(async (dir: string, opts: NoteOptions) => {
     await runNoteCommand(resolve(dir), opts);

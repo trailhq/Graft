@@ -262,7 +262,7 @@ test("value changes: warned about, decided on, and numbers about something else"
   assert.equal(got.length, 1);
   assert.equal(got[0]!.verdict, "conflict");
   assert.equal(got[0]!.line, 3);
-  assert.equal(got[0]!.summary, "sets retries to 5, which Lena's note warned about");
+  assert.equal(got[0]!.summary, "sets retries to 5, which Lena's learning warned about");
   assert.equal(got[0]!.source.quote, "5 retries got us locked out for a minute.");
 
   // Moving to the decided value follows it, without a line.
@@ -307,7 +307,7 @@ test("an approach a note ruled out, back in the added lines, is a conflict", () 
   assert.equal(got.length, 1);
   assert.equal(got[0]!.verdict, "conflict");
   assert.equal(got[0]!.line, 12, "the first added line carrying the approach");
-  assert.equal(got[0]!.summary, "brings back global mutex, which Arun's note ruled out");
+  assert.equal(got[0]!.summary, "brings back global mutex, which Arun's learning ruled out");
   assert.equal(got[0]!.source.quote, "A global mutex around the cache: p99 tripled under load.");
 });
 
@@ -422,5 +422,5 @@ test("demo: putting defaultRetryMax back to 4 follows the decision, without a li
   assert.equal(res.findings.length, 1);
   assert.equal(res.findings[0]!.verdict, "follows");
   assert.equal(res.findings[0]!.line, undefined);
-  assert.equal(res.findings[0]!.summary, "sets defaultRetryMax to 4, as Anirudh's note says");
+  assert.equal(res.findings[0]!.summary, "sets defaultRetryMax to 4, as Anirudh's learning says");
 });
