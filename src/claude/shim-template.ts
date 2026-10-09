@@ -27,12 +27,18 @@ const { execFileSync } = require('child_process');
 const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const BAKED = ${JSON.stringify(bakedDir)};
 
-// The dist/claude dir of @nanonets/graft resolved from a base whose node_modules is searched.
+// The same code ships as @trailhq/trail and as @nanonets/graft, its old name;
+// either one answers, and the newer wins.
+const PKGS = ['@trailhq/trail', '@nanonets/graft'];
+
+// The dist/claude dir of each package resolved from a base whose node_modules is searched.
 function fromPkg(base) {
-  try {
-    const pkg = require.resolve('@nanonets/graft/package.json', { paths: [base] });
-    return path.join(path.dirname(pkg), 'dist', 'claude');
-  } catch { return null; }
+  return PKGS.map((name) => {
+    try {
+      const pkg = require.resolve(name + '/package.json', { paths: [base] });
+      return path.join(path.dirname(pkg), 'dist', 'claude');
+    } catch { return null; }
+  });
 }
 
 // The global node_modules dir per npm (handles Homebrew/Windows/volta). Queried on demand.
@@ -76,12 +82,12 @@ function best(dirs, name) {
 
 function entry(name) {
   // Cheap candidates first, and only shell out to npm when every one of them misses.
-  const cheap = [BAKED, fromPkg(dir), fromPkg(path.join(path.dirname(process.execPath), '..', 'lib'))];
+  const cheap = [BAKED, ...fromPkg(dir), ...fromPkg(path.join(path.dirname(process.execPath), '..', 'lib'))];
   const hit = best(cheap, name);
   if (hit) return path.join(hit, name);
   const gr = globalRoot();
-  const global = gr && path.join(gr, '@nanonets', 'graft', 'dist', 'claude');
-  if (global && fs.existsSync(path.join(global, name))) return path.join(global, name);
+  const global = gr && best(PKGS.map((p) => path.join(gr, ...p.split('/'), 'dist', 'claude')), name);
+  if (global) return path.join(global, name);
   return path.join(dir, 'dist', 'claude', name); // last-ditch; import will no-op if absent
 }
 

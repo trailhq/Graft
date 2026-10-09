@@ -66,7 +66,7 @@ test('every event carries the common properties, and no identifier beyond them',
   const home = sandbox('tel-common');
   const ev = track('first_run', {}, { home, env: OPEN });
   assert.ok(ev);
-  for (const k of ['app_version', 'os', 'arch', 'node_major', 'ci', 'agent_host']) {
+  for (const k of ['app_version', 'os', 'arch', 'node_major', 'ci', 'agent_host', 'cli_name']) {
     assert.ok(k in ev.properties, `missing common property ${k}`);
   }
   // distinct_id is the random install uuid and nothing else.
@@ -75,11 +75,11 @@ test('every event carries the common properties, and no identifier beyond them',
 
 // Pinned rather than counted, so adding an event is a deliberate edit here and
 // a matching row in TELEMETRY.md, never something that arrives with a feature.
-test('the contract lists exactly the twelve documented events', () => {
+test('the contract lists exactly the seventeen documented events', () => {
   assert.deepEqual(Object.keys(EVENTS).sort(), [
     'brain_signup_opened', 'brain_signup_settled', 'build_completed', 'build_failed',
-    'first_run', 'init_completed', 'install', 'query', 'session_summary', 'trail_autopush', 'trail_pulled',
-    'trail_watch_exit',
+    'first_run', 'init_completed', 'install', 'learning_reused', 'note_saved', 'query', 'repo_seen', 'session_summary', 'skills_folded', 'takeaway_saved',
+    'trail_autopush', 'trail_pulled', 'trail_watch_exit',
   ]);
 });
 

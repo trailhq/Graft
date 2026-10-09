@@ -32,7 +32,7 @@ import { mcpTargets, stripTomlSection } from './mcp-config.js';
 import { hookTargets } from './codex-hooks.js';
 import { antigravitySkillTargets } from './antigravity.js';
 import { claudeGlobalTargets } from './claude-global.js';
-import { claudeTargets } from '../claude/init.js';
+import { claudeTargets, claudeTargetsFor } from '../claude/init.js';
 import { isGraftAllowEntry, isGraftFooterRegex } from '../claude/settings-merge.js';
 import type { WriteScope } from './plan.js';
 
@@ -183,11 +183,13 @@ function removeJsonKey(path: string, topKey: string, apply: boolean): RetractAct
   const bucket = root[topKey];
   if (typeof bucket !== 'object' || bucket === null || Array.isArray(bucket)) return 'absent';
   const map = bucket as Record<string, unknown>;
-  if (!('graft' in map)) return 'absent';
+  // Either name: a repo that uses trail registers the server as `trail`.
+  const ours = ['graft', 'trail'].filter((k) => k in map);
+  if (ours.length === 0) return 'absent';
   if (!apply) {
-    return Object.keys(map).length === 1 && Object.keys(root).length === 1 ? 'deleted' : 'removed';
+    return Object.keys(map).length === ours.length && Object.keys(root).length === 1 ? 'deleted' : 'removed';
   }
-  delete map.graft;
+  for (const k of ours) delete map[k];
   if (Object.keys(map).length === 0) delete root[topKey];
   if (Object.keys(root).length === 0) return removeFile(path, true);
   writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`);
@@ -229,7 +231,7 @@ function stripClaudeSettings(path: string, apply: boolean): RetractAction {
   }
   if (typeof root !== 'object' || root === null || Array.isArray(root)) return 'skipped-unparseable';
   const before = JSON.stringify(root);
-  const isGraftCmd = (v: unknown) => JSON.stringify(v ?? '').includes('graft-statusline.cjs');
+  const isGraftCmd = (v: unknown) => /(graft|trail)-statusline\.cjs/.test(JSON.stringify(v ?? ''));
 
   for (const key of ['statusLine', 'subagentStatusLine']) {
     if (root[key] !== undefined && isGraftCmd(root[key])) delete root[key];
@@ -239,7 +241,7 @@ function stripClaudeSettings(path: string, apply: boolean): RetractAction {
     for (const event of Object.keys(root.hooks)) {
       const prior = root.hooks[event];
       if (!Array.isArray(prior)) continue;
-      const kept = prior.filter((e: unknown) => !JSON.stringify(e ?? '').includes('graft-hooks.cjs'));
+      const kept = prior.filter((e: unknown) => !/(graft|trail)-hooks\.cjs/.test(JSON.stringify(e ?? '')));
       if (kept.length === 0) delete root.hooks[event];
       else root.hooks[event] = kept;
     }
@@ -282,7 +284,7 @@ function stripCodexHooks(path: string, apply: boolean): RetractAction {
   for (const event of Object.keys(root.hooks)) {
     const prior = root.hooks[event];
     if (!Array.isArray(prior)) continue;
-    const kept = prior.filter((e: unknown) => !JSON.stringify(e ?? '').includes('graft-hooks.cjs'));
+    const kept = prior.filter((e: unknown) => !/(graft|trail)-hooks\.cjs/.test(JSON.stringify(e ?? '')));
     if (kept.length === 0) delete root.hooks[event];
     else root.hooks[event] = kept;
   }
@@ -374,7 +376,7 @@ function targets(repo: string, opts: RetractOpts): Target[] {
   }
   for (const t of mcpTargets(repo, [...exclude], { home })) keptPaths.add(t.path);
   if (exclude.has('claude')) {
-    for (const t of claudeTargets(repo)) keptPaths.add(t.path);
+    for (const n of ['graft', 'trail'] as const) for (const t of claudeTargetsFor(repo, n)) keptPaths.add(t.path);
     for (const t of claudeGlobalTargets(home)) keptPaths.add(t.path);
   }
   if (exclude.has('agents')) for (const t of hookTargets(home)) keptPaths.add(t.path);
@@ -422,13 +424,21 @@ function targets(repo: string, opts: RetractOpts): Target[] {
 
   // 3. Claude Code: settings fragments, both shims, the skill, and the .mcp.json key.
   if (!exclude.has('claude')) {
-    const [settings, statusline, hooks, skill, mcp] = claudeTargets(repo).map((t) => t.path);
+    const [settings, , , , mcp] = claudeTargets(repo).map((t) => t.path);
+    // The shims and skill under both names: a repo that moved to trail's names
+    // still comes out clean, and so does one a teammate on graft re-wired.
+    const named = (['graft', 'trail'] as const).flatMap((n) => {
+      const [, statusline, hooks, skill] = claudeTargetsFor(repo, n).map((t) => t.path);
+      return [
+        { hostId: 'claude', path: statusline, what: 'statusline shim', scope: 'repo', run: (a: boolean) => removeFile(statusline, a) },
+        { hostId: 'claude', path: hooks, what: 'hooks shim', scope: 'repo', run: (a: boolean) => removeFile(hooks, a) },
+        { hostId: 'claude', path: skill, what: `${n} skill`, scope: 'repo', run: (a: boolean) => removeFile(skill, a) },
+      ];
+    });
     for (const t of [
       { hostId: 'claude', path: settings, what: 'statusline + hooks + allowlist + footer regex', scope: 'repo', run: (a) => stripClaudeSettings(settings, a) },
-      { hostId: 'claude', path: statusline, what: 'statusline shim', scope: 'repo', run: (a) => removeFile(statusline, a) },
-      { hostId: 'claude', path: hooks, what: 'hooks shim', scope: 'repo', run: (a) => removeFile(hooks, a) },
-      { hostId: 'claude', path: skill, what: 'graft skill', scope: 'repo', run: (a) => removeFile(skill, a) },
-      { hostId: 'claude', path: mcp, what: 'mcpServers.graft', scope: 'repo', run: (a) => removeJsonKey(mcp, 'mcpServers', a) },
+      ...named,
+      { hostId: 'claude', path: mcp, what: 'mcpServers entry', scope: 'repo', run: (a) => removeJsonKey(mcp, 'mcpServers', a) },
     ] as Target[]) add(t);
   }
 

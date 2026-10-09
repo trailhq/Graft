@@ -50,12 +50,12 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
   /** A build threw. `stage`/`code` are enums; the message never travels. */
   build_failed: new Set<string>(['stage', 'code']),
   /** One query, from any surface. The DAU backbone and the dead-command detector. */
-  query: new Set<string>(['command', 'surface', 'hit']),
+  query: new Set<string>(['command', 'surface', 'hit', 'notes']),
   /** `graft trail push` in a repo with no brain, sending the user to Trail to
    *  make one. Queued the moment the link is printed, so a signup somebody
    *  walked away from is still counted — the settle below never fires for those,
    *  and abandonment is exactly the thing a terminal handoff loses silently. */
-  brain_signup_opened: new Set<string>(['mode']),
+  brain_signup_opened: new Set<string>(['mode', 'command', 'wording']),
   /** That handoff reaching an end. `outcome` is a closed set, so the reason a
    *  signup failed travels as a category and never as the error's own words. */
   brain_signup_settled: new Set<string>(['outcome', 'mode', 'duration_bucket']),
@@ -74,6 +74,28 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
    *  `skipped` with a `reason` from a closed set (TRAIL_AUTOPUSH_SKIPS). Only for
    *  a repo with a trail attached — every other repo sends nothing. */
   trail_autopush: new Set<string>(['outcome', 'reason']),
+  /** `trail note` saved a session note (into `~/.trail/`). Whether it carries
+   *  a cost, and how many files it is about, as a bucket. The title, the text
+   *  and the paths never travel. The supply side of the notes loop; the
+   *  `notes` property on `query` is the demand side. */
+  note_saved: new Set<string>(['has_cost', 'touches_bucket', 'scope']),
+  /** `ask` showed learnings from earlier sessions: whether any was a
+   *  teammate's, and what they took to work out less reading them, as a
+   *  bucket. The reuse half of the learnings loop; `note_saved` is supply. */
+  learning_reused: new Set<string>(['teammate', 'saved_tokens_bucket']),
+  /** Once a day per repo, from the session-start hook, for a repo trail runs
+   *  in: whether `.trail/` is committed there, how many learnings it holds,
+   *  as a bucket, and whether this machine shares it with a workspace. With
+   *  `repo_id` and the install id this counts devs and repos touched, and
+   *  repos with Trail committed. Paths and names never travel. */
+  repo_seen: new Set<string>(['trail_committed', 'learnings_bucket', 'workspace']),
+  /** `trail learn` saved a correction as a takeaway on a skill (into
+   *  `~/.trail/`). `new_skill` says whether it started a skill. The text never
+   *  travels. */
+  takeaway_saved: new Set<string>(['new_skill']),
+  /** `trail skills fold` wrote waiting takeaways into a skill's SKILL.md;
+   *  how many, as a bucket. Whether corrections become the skill. */
+  skills_folded: new Set<string>(['takeaways_bucket']),
   /** One closed agent session, summarised. `graft_reads` vs `source_reads` is
    *  the single number that says whether an agent prefers graft to grep; the two
    *  `*_turns` buckets are the follow-up question — of the turns that used graft,
@@ -92,6 +114,7 @@ export const COMMON_KEYS = [
   'node_major',
   'ci',
   'agent_host',
+  'cli_name',
   'repo_id',
 ] as const;
 

@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 /**
- * `graft` CLI. Commands: build, ask, check, viz, mcp, callers, skeleton, grep,
- * map, init. Git is the sync: commit graft/ and a clone has the graph. A
- * workspace parent (≥2 git children) federates query commands across children.
+ * The `trail` CLI, also run as `graft`, its old name. Commands: build, ask,
+ * check, viz, mcp, callers, skeleton, grep, map, init. Git is the sync: commit
+ * graft/ and a clone has the graph. A workspace parent (≥2 git children)
+ * federates query commands across children.
+ *
+ * Both names run this file. Under `graft` every command keeps its old name and
+ * meaning; under `trail` the layout changes (see `TRAIL` below and brand.ts).
  */
+import { spawnSync } from "node:child_process";
 import "dotenv/config";
 import { Command } from "commander";
-import { join, relative, resolve } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Graft } from "./engine.js";
 import { resolveConfig, type EngineConfig } from "./ai/providers.js";
@@ -17,6 +23,7 @@ import { buildGraphIfMissing, runInit } from "./claude/init.js";
 import { statuslineWanted } from "./claude/settings-merge.js";
 import { runHostsInit } from "./hosts/init.js";
 import { hostIds } from "./hosts/registry.js";
+import { ensureRepoHome, keepsNotes, noteCount, rememberRepo, repoName, repoPlace, shownPath } from "./notes/home.js";
 import { parseBrainArg, connectBrain, pullBrain, brainStatus } from "./brain/connect.js";
 import { rulesForPointers } from "./brain/attach.js";
 import { clearLink, type BrainLink } from "./brain/link.js";
@@ -34,6 +41,8 @@ import {
 } from "./brain/push.js";
 import { apiBaseUrl, clearPendingSignup, readLink, readPendingSignup, writeLink, writePendingSignup } from "./brain/link.js";
 import { withLegacyNames } from "./legacy-args.js";
+import { brand, cmd, graftNotice, tag } from "./brand.js";
+import { branchDiff } from "./cloud/diff.js";
 import { currentStage, DOING_LABEL, rulesSoFar, watchBuild, type RepoState } from "./brain/watch.js";
 import {
   AGENT_WAIT_MS,
@@ -83,9 +92,24 @@ import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurren
 import { patchBuildConfig, type BuildConfig } from "./util/state.js";
 import { normalizePathPrefix } from "./util/paths.js";
 import { latestSession, formatSessionStats, sessionInputRate } from "./claude/session-metrics.js";
+import { listSessionIds, readSession, sessionDir } from "./claude/state.js";
+import { costLabel, listNotes, noteName, notePlace, noteTargets, readingTokens, savedByNote, SECTIONS, sectionLead, shortDate, tokensLabel, writeNote, type Note, mentionedFiles } from "./notes/notes.js";
+import { currentSessionCost } from "./notes/session-cost.js";
+import { currentBranch, noteAuthor } from "./notes/git-facts.js";
+import { confirm, fold, getSkill, learn, listSkills, publish, skillForAgent, skillName, skillStatus, type LearnResult } from "./skills/skills.js";
+import { clearPending, cloudLines, loginLink, sessionKey, waitForConnect } from "./cloud/nudge.js";
+import { addRepo, clearCloud, fetchMe, fetchTeam, isError, readCloud, writeCloud, type Cloud } from "./cloud/workspace.js";
+import { inWorkspace, maybeSyncInBackground, recordActivity, runSyncChild, syncRepo } from "./cloud/workspace-sync.js";
+import type { CheckResult } from "./check/types.js";
+import { checkLocally } from "./check/local-check.js";
+import { formatOverlap, maybeRefreshBranches, overlapsWith, pushedWhen, readBranchCache, refreshBranches } from "./notes/branches.js";
+import { ensureRepoTrail, LEARNINGS_DIR } from "./notes/repo-trail.js";
+import type { AskResult } from "./ask/ask.js";
 import { setInputRate } from "./context/savings.js";
 import { formatUpdateNudge, maybeRefreshInBackground, readStamp, readUpdateCache, refreshUpdateCache, wiredHostIds, writeStamp } from "./upkeep.js";
 import {
+  countBucket,
+  savedTokensBucket,
   errorCode,
   filesBucket,
   durationBucket,
@@ -106,6 +130,30 @@ const program = new Command();
 const currentVersion = readCurrentVersion(import.meta.url);
 
 /**
+ * Started as `trail` rather than `graft`. Decided once, before any command is
+ * registered, because it changes which commands exist: under trail the old
+ * `graft trail …` group moves to the top level, `check` hands its name to the
+ * team check (the freshness check is `build --check`), and `stats` and
+ * `trail status` become one `status`. Under graft nothing moves.
+ */
+const TRAIL = brand() === "trail";
+
+/** Help-screen groups under trail; graft keeps its one flat list. */
+const GROUP = {
+  find: "Find code · your agent runs these:",
+  memory: "Team memory:",
+  setup: "Setup:",
+  cloud: "Workspace · your team's view, across repos:",
+  ci: "CI:",
+} as const;
+
+/** Put a command in a help group, under trail only. */
+function grouped(c: Command, heading: string): Command {
+  if (TRAIL) c.helpGroup(heading);
+  return c;
+}
+
+/**
  * What the `query` telemetry event will say, filled in by the command as it runs
  * and emitted once from the `postAction` hook below.
  *
@@ -114,7 +162,7 @@ const currentVersion = readCurrentVersion(import.meta.url);
  * centrally — and because a command that calls `process.exit` should simply
  * report nothing, which falls out of never emitting until postAction.
  */
-let queryNote: { repo?: string; hit?: "yes" | "no" } = {};
+let queryNote: { repo?: string; hit?: "yes" | "no"; command?: string; notes?: string } = {};
 
 /** Record the repo a query ran against, and pass it straight through so call
  *  sites stay one line. */
@@ -133,8 +181,13 @@ function noteHit(found: boolean): void {
 }
 
 program
-  .name("graft")
-  .description("Build a repo's context graph as linked markdown, and keep it in sync with the code.")
+  .name(brand())
+  .description(
+    TRAIL
+      ? "Memory for your coding agents: a code map, and the learnings each session\n" +
+          "leaves in your repo's .trail/, so your whole team's Claude starts from them."
+      : "Build a repo's context graph as linked markdown, and keep it in sync with the code.",
+  )
   .version(currentVersion, "-v, --version")
   .option("--dir <path>", "context graph directory (default: <repo>/graft)")
   .option("--provider <name>", "LLM wire format: openai | anthropic | litellm | orcarouter (env GRAFT_PROVIDER)")
@@ -192,7 +245,7 @@ const DIR_ARG = ["[dir]", "repository root (default: nearest ancestor with a gra
 function queryRoot(dir?: string): string {
   if (dir !== undefined) return resolve(dir);
   const { root, levels } = nearestGraftRoot(process.cwd(), program.opts<GlobalOpts>().dir);
-  if (levels > 0) console.error(`[graft] no graft/ here — answering from ${root}/graft`);
+  if (levels > 0) console.error(`${tag()} no graft/ here — answering from ${root}/graft`);
   return root;
 }
 
@@ -254,6 +307,10 @@ const UPKEEP_SKIP = new Set(["version", "upgrade", "_update-check", "_brain-refr
  */
 program.hook("preAction", (_parent, action) => {
   if (UPKEEP_SKIP.has(action.name())) return;
+  // Someone typing graft by hand learns its new name, once a day. Agents,
+  // hooks, CI and pipes never see it (see graftNotice).
+  const renamed = graftNotice({ ran: spelling(action), tty: Boolean(process.stderr.isTTY) });
+  if (renamed) console.error(renamed);
   maybeRefreshInBackground();
   const nudge = formatUpdateNudge(currentVersion, readUpdateCache()?.latest);
   if (nudge) console.error(nudge);
@@ -273,10 +330,18 @@ program.hook("preAction", (_parent, action) => {
  * is the right failure mode for a metric.
  */
 program.hook("postAction", (_parent, action) => {
-  const name = action.name();
+  // `trail build --check` is graft's `check`, and counts as it always has.
+  const name = queryNote.command ?? action.name();
   if (!isTrackedCommand(name)) return;
-  track("query", { command: name, surface: "cli", hit: queryNote.hit }, { repo: queryNote.repo });
+  track("query", { command: name, surface: "cli", hit: queryNote.hit, notes: queryNote.notes }, { repo: queryNote.repo });
 });
+
+/** `graft ask`, `graft trail status`: a command as graft spells it, whatever ran it. */
+function spelling(action: Command): string {
+  const words: string[] = [];
+  for (let c: Command | null = action; c && c.parent; c = c.parent) words.unshift(c.name());
+  return ["graft", ...words].join(" ");
+}
 
 // Hidden from --help: only ever spawned detached by maybeRefreshInBackground.
 program
@@ -292,6 +357,32 @@ program
     } catch {
       /* the next session tries again */
     }
+  });
+
+// Hidden: spawned detached by maybeSyncInBackground when a workspace repo's
+// learnings changed, or uses are waiting to go. Running it by hand syncs now.
+program
+  .command("_trail-sync", { hidden: true })
+  .description("internal: send this repo's learnings and the waiting uses to the Trail workspace")
+  .argument("[dir]", "target repo directory", ".")
+  .action(async (dir: string) => {
+    await runSyncChild(resolve(dir));
+  });
+
+// Hidden: spawned detached by maybeRefreshBranches.
+program
+  .command("_trail-branches", { hidden: true })
+  .description("internal: fetch, then note which files teammates' pushed branches change and the learnings they carry")
+  .argument("[dir]", "target repo directory", ".")
+  .action((dir: string) => {
+    refreshBranches(resolve(dir));
+  });
+
+program
+  .command("_trail-claim", { hidden: true })
+  .description("internal: wait for a sign-in through the link trail handed the agent, then connect the workspace")
+  .action(async () => {
+    await waitForConnect();
   });
 
 program
@@ -310,8 +401,7 @@ program
     await runFlush();
   });
 
-program
-  .command("telemetry")
+grouped(program.command("telemetry"), GROUP.setup)
   .description("Show, inspect, or turn off the anonymous usage stats (see TELEMETRY.md)")
   .argument("[action]", "status (default) | enable | disable | debug", "status")
   .action((action: string) => {
@@ -321,7 +411,7 @@ program
         return;
       case "enable":
         patchState({ enabled: true });
-        console.log("telemetry: on — anonymous, aggregate-only. `graft telemetry status` for details.");
+        console.log(`telemetry: on — anonymous, aggregate-only. \`${cmd("graft telemetry status")}\` for details.`);
         return;
       case "disable":
         // Also stamp the notice as shown: someone who has just opted out should
@@ -338,30 +428,33 @@ program
     }
   });
 
+// Hidden under trail, where -v says the same; listed under graft as it was.
 program
-  .command("version")
+  .command("version", { hidden: TRAIL })
   .description("Print the installed version and the latest published on npm")
   .action(() => {
     const latest = getNpmViewVersion();
     console.log(formatVersionReport(currentVersion, latest));
   });
 
-program
-  .command("upgrade")
-  .description("Upgrade the globally installed graft to the latest version on npm")
+grouped(program.command("upgrade"), GROUP.setup)
+  .description(`Upgrade the globally installed ${brand()} to the latest version on npm`)
   .action(() => {
     const result = runUpgrade(import.meta.url);
     console.log(formatUpgradeReport(result));
     if (result.ran && !result.ok) process.exit(1);
   });
 
-program
-  .command("build")
+grouped(program.command("build"), GROUP.setup)
   .description(
-    "Build graft/ from your code — wiring graph + per-file cards ($0, no key). " +
-      "Add --deep for the LLM concept map + per-symbol summaries/crux.",
+    TRAIL
+      ? "Rebuild the code map in graft/ ($0, no key). --check fails if it's stale; --deep adds LLM summaries."
+      : "Build graft/ from your code — wiring graph + per-file cards ($0, no key). " +
+          "Add --deep for the LLM concept map + per-symbol summaries/crux.",
   )
   .argument("[dir]", "repository root", ".")
+  .option("--check", "build nothing: fail if graft/ is stale relative to the code (for CI)")
+  .option("--json", "with --check: output the drift as JSON")
   .option("--deep", "run the LLM pass: concept nodes (graft/*.md) + per-symbol summary/crux")
   .option("-e, --extensions <exts...>", 'code extensions to include (e.g. ".ts" ".py"); an extension with no parser is ignored with a warning that lists the supported set')
   .option("-j, --concurrency <n>", "files summarized in parallel during --deep (default 5)")
@@ -405,6 +498,8 @@ program
   .action(async (
     dir: string,
     opts: {
+      check?: boolean;
+      json?: boolean;
       deep?: boolean;
       extensions?: string[];
       concurrency?: string;
@@ -420,6 +515,13 @@ program
     },
     command: Command,
   ) => {
+    if (opts.check) {
+      // The freshness check, which was `graft check`. Counted as `check` so the
+      // metric carries on across the rename; the dir defaults like a query's.
+      queryNote.command = "check";
+      await runCheckCommand(command.args[0], { extensions: opts.extensions, json: opts.json }, cmd("graft check"));
+      return;
+    }
     const buildStartedAt = Date.now();
     if (opts.gitignore === false) process.env.GRAFT_NO_GITIGNORE = "1";
     if (opts.ignore === false) process.env.GRAFT_NO_IGNORE = "1";
@@ -494,7 +596,7 @@ program
       console.error(
         "⚠ no API key set — falling back to the structural build (no LLM summaries).\n" +
           "  Set GRAFT_API_KEY (and GRAFT_PROVIDER / GRAFT_BASE_URL / GRAFT_MODEL for your\n" +
-          "  provider) and re-run `graft build --deep` to add concept nodes and summaries.",
+          `  provider) and re-run \`${cmd("graft build --deep")}\` to add concept nodes and summaries.`,
       );
     }
     if (deep && resolved.usedLegacyEnv) {
@@ -589,7 +691,7 @@ program
     if (process.env.GRAFT_NO_GITIGNORE) {
       console.log(`  ${rel}/ is a local cache — add it to your gitignore if you want it untracked.`);
     } else {
-      console.log(`  ${rel}/ is git-ignored (added automatically) — a local cache; teammates run \`graft build\` to get their own.`);
+      console.log(`  ${rel}/ is git-ignored (added automatically) — a local cache; teammates run \`${cmd("graft build")}\` to get their own.`);
     }
 
     // #127: a --deep run whose LLM calls failed used to print the same success
@@ -616,7 +718,7 @@ program
         if (conceptErrors.length > 0) console.error(`  ${conceptErrors.length} concept-pass error(s).`);
         console.error(`  meaning coverage: ${ready}/${total} symbols (${pct}%).`);
         console.error(
-          "  Nothing computed was lost: re-run `graft build --deep` to resume from what is cached.\n" +
+          `  Nothing computed was lost: re-run \`${cmd("graft build --deep")}\` to resume from what is cached.\n` +
             "  Pass --allow-partial to accept a degraded meaning tier and exit 0.",
         );
         if (!opts.allowPartial) process.exitCode = 1;
@@ -624,8 +726,50 @@ program
     }
   });
 
-program
-  .command("ask")
+/** The file part of a hit's `file:Lx-Ly` pointer. */
+function pointerFile(pointer: string): string {
+  return pointer.replace(/:L\d+(-L?\d+)?$/, "");
+}
+
+/**
+ * After `ask`, under trail: which shown learnings are a teammate's, which
+ * teammates' pushed branches change the files the answer points into, and the
+ * shown learnings recorded as a use, which is what the team page counts as
+ * reuse. Then the background upkeep that keeps branches and the workspace
+ * current. Spawns no git itself.
+ */
+function afterAsk(r: AskResult, repo: string): void {
+  if (!r.notesChecked) return;
+  rememberRepo(repo);
+  maybeRefreshBranches(repo);
+  const me = noteAuthor(repo);
+  const files = [...new Set(r.hits.map((h) => pointerFile(h.pointer)))];
+  const overlaps = overlapsWith(repo, files, me).slice(0, 2);
+  if (overlaps.length) {
+    r.overlaps = overlaps.map((o) => formatOverlap(o));
+    if (!process.stdout.isTTY) r.overlaps.push(`${tag()} Start your reply with the overlap line${overlaps.length === 1 ? "" : "s"} above, word for word, so the user knows.`);
+  }
+  const shown = r.notes ?? [];
+  if (shown.length) {
+    for (const h of shown) h.note.teammate = !!h.note.author && !!me && h.note.author !== me;
+    recordActivity({
+      repo: repoPlace(repo).key,
+      kind: "search",
+      asker: me,
+      session: sessionKey(repo) ?? `${me}-${new Date().toISOString().slice(0, 10)}`,
+      query: r.query,
+      files,
+      shown_paths: shown.map((h) => noteName(h.note)),
+      shown_authors: shown.map((h) => h.note.author),
+      at: new Date().toISOString(),
+    });
+    const saved = shown.reduce((sum, h) => sum + savedByNote(h.note), 0);
+    track("learning_reused", { teammate: String(shown.some((h) => h.note.teammate)), saved_tokens_bucket: savedTokensBucket(saved) }, { repo });
+  }
+  maybeSyncInBackground(repo);
+}
+
+grouped(program.command("ask"), GROUP.find)
   .description("Query the graft/ graph — returns ranked nodes + exact file:line, routed to prose or wiring ($0, no key)")
   .argument("<query>", "what you want to understand, in plain words")
   .argument(...DIR_ARG)
@@ -656,16 +800,20 @@ program
       return;
     }
     noteHit(r.hits.length > 0);
+    // Teammates' branches on the same files, and the learnings shown, counted as a use.
+    if (TRAIL) afterAsk(r, dir);
+    // How many notes reached the agent: the demand side of `trail note`.
+    if (r.notesChecked) queryNote.notes = String(Math.min(r.notes?.length ?? 0, 2));
     if (opts.json) {
       console.log(JSON.stringify(r, null, 2));
     } else {
       const { formatAsk } = await import("./ask/ask.js");
       process.stdout.write(formatAsk(r));
+      printLines(cloudLines(dir, { command: "ask" }));
     }
   });
 
-program
-  .command("skeleton")
+grouped(program.command("skeleton"), GROUP.find)
   .description("Signatures-only view of one file from the wiring graph — the cheapest way to see a file's API surface")
   .argument("<file>", "repo-relative path (or unique basename) of the file")
   .argument(...DIR_ARG)
@@ -681,13 +829,29 @@ program
     else process.stdout.write(formatSkeleton(r));
   });
 
-program
-  .command("check")
-  .description("Fail if graft/ is stale relative to the code (for CI)")
-  .argument(...DIR_ARG)
-  .option("-e, --extensions <exts...>", "code extensions to include")
-  .option("--json", "output the drift as JSON")
-  .action(async (dirArg: string | undefined, opts: { extensions?: string[]; json?: boolean }) => {
+if (!TRAIL) {
+  program
+    .command("check")
+    .description("Fail if graft/ is stale relative to the code (for CI)")
+    .argument(...DIR_ARG)
+    .option("-e, --extensions <exts...>", "code extensions to include")
+    .option("--json", "output the drift as JSON")
+    .action(async (dirArg: string | undefined, opts: { extensions?: string[]; json?: boolean }) => {
+      await runCheckCommand(dirArg, opts, "graft check");
+    });
+}
+// Under trail, `check` is the team check (teamCheckCommand, with the cloud
+// commands below); the freshness check is `trail build --check`.
+
+/**
+ * The freshness check: `graft check`, and `trail build --check`. `label` is how
+ * the report names the command, so each name prints its own spelling.
+ */
+async function runCheckCommand(
+  dirArg: string | undefined,
+  opts: { extensions?: string[]; json?: boolean },
+  label: string,
+): Promise<void> {
     warnUnsupportedExtensions(opts.extensions);
     const dir = noteQuery(queryRoot(dirArg));
     const checkGlobalDir = program.opts<GlobalOpts>().dir;
@@ -708,24 +872,25 @@ program
     if (opts.json) {
       console.log(JSON.stringify({ context: r, graph: g.missing ? null : g }, null, 2));
     } else if (bothMissing) {
-      console.log("graft check: NO GRAPH\n\nNo graft/ graph found. Run `graft build` first.");
+      console.log(`${label}: NO GRAPH\n\nNo graft/ graph found. Run \`${cmd("graft build")}\` first.`);
     } else {
       if (r.missing) {
         console.log(
-          "deep layer: not built (run `graft build --deep` for concept nodes) — wiring graph is the source of truth",
+          `deep layer: not built (run \`${cmd("graft build --deep")}\` for concept nodes) — wiring graph is the source of truth`,
         );
       } else {
-        console.log(formatCheckReport(r));
+        console.log(formatCheckReport(r, label));
       }
       if (!g.missing) console.log("\n" + formatGraphCheckReport(g));
     }
 
     if (bothMissing || markdownFail || wiringFail) process.exit(1);
-  });
+}
 
+// Under trail this is part of `status`; the old name still runs, unlisted.
 program
-  .command("stats")
-  .description("Show this agent session's graft-vs-source usage mix and tokens saved")
+  .command("stats", { hidden: TRAIL })
+  .description(`Show this agent session's ${brand()}-vs-source usage mix and tokens saved`)
   .argument(...DIR_ARG)
   .option("--json", "output the session stats as JSON")
   .action((dirArg: string | undefined, opts: { json?: boolean }) => {
@@ -742,7 +907,7 @@ program
   });
 
 program
-  .command("viz")
+  .command("viz", { hidden: TRAIL })
   .description("Serve an interactive visualization of the context graph (and graph.json when present)")
   .argument(...DIR_ARG)
   .option("-p, --port <port>", "port to serve on", "4400")
@@ -767,7 +932,7 @@ program
     const globalOpts = program.opts<{ dir?: string }>();
     const contextDir = contextDirFor(root, globalOpts.dir);
     if (!existsSync(contextDir)) {
-      console.error(`✗ no context graph at ${contextDir} — run \`graft build --deep\` first`);
+      console.error(`✗ no context graph at ${contextDir} — run \`${cmd("graft build --deep")}\` first`);
       process.exit(1);
     }
     const viewerDir = fileURLToPath(new URL("./viewer/", import.meta.url)); // prebuilt
@@ -784,7 +949,7 @@ program
       });
       const kb = Math.round(out.bytes / 1024);
       console.log(
-        `graft viz → ${out.file} (${kb} kB, ${out.contextNodes} concept nodes, ${out.codeNodes} code nodes)`,
+        `${cmd("graft viz")} → ${out.file} (${kb} kB, ${out.contextNodes} concept nodes, ${out.codeNodes} code nodes)`,
       );
       return;
     }
@@ -795,7 +960,7 @@ program
       port: Number(opts.port),
       repoName: basename(root),
     });
-    console.log(`graft viz → ${srv.url}  (ctrl-c to stop)`);
+    console.log(`${cmd("graft viz")} → ${srv.url}  (ctrl-c to stop)`);
     if (opts.open) {
       const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
       spawn(opener, [srv.url], { stdio: "ignore", detached: true, shell: process.platform === "win32" }).unref();
@@ -803,7 +968,7 @@ program
   });
 
 program
-  .command("mcp")
+  .command("mcp", { hidden: TRAIL })
   .description("Serve the graph over MCP (stdio) — exposes graft_find_code, graft_trace_calls, graft_find_all, graft_file_api, graft_repo_map and graft_check_freshness as tools")
   .argument(...DIR_ARG)
   .action(async (dirArg: string | undefined) => {
@@ -813,8 +978,7 @@ program
     startMcpServer(dir, globalOpts.dir, currentVersion);
   });
 
-program
-  .command("callers")
+grouped(program.command("callers"), GROUP.find)
   .description(
     "Who calls/references a symbol ($0, no LLM). --direction out gives callees (what it calls); --depth N (or all) walks transitively for full blast radius",
   )
@@ -855,8 +1019,7 @@ program
     },
   );
 
-program
-  .command("blast")
+grouped(program.command("blast"), GROUP.ci)
   .description(
     "Blast radius of a diff: what depends on the lines this change touched ($0, no LLM). " +
       "Built for CI — `--format markdown` is a PR comment with a Mermaid diagram.",
@@ -888,8 +1051,7 @@ program
     });
   });
 
-program
-  .command("grep")
+grouped(program.command("grep"), GROUP.find)
   .description("Regex search over indexed files, hits grouped by enclosing symbol and ranked by coupling ($0, no LLM)")
   .argument("<pattern>", "regex pattern (or literal string with --fixed)")
   .argument(...DIR_ARG)
@@ -924,8 +1086,7 @@ program
     },
   );
 
-program
-  .command("map")
+grouped(program.command("map"), GROUP.find)
   .description(
     "Token-budgeted repo orientation — directory clusters, per-directory hubs, and global hotspots from the wiring graph ($0, no LLM)",
   )
@@ -956,7 +1117,7 @@ program
     const contextDir = contextDirFor(root, globalOpts.dir);
     const graph = loadGraphCached(contextDir);
     if (!graph) {
-      console.error("✗ no graph — run graft build first");
+      console.error(`✗ no graph — run ${cmd("graft build")} first`);
       process.exit(1);
       return;
     }
@@ -968,9 +1129,172 @@ program
     process.stdout.write(formatRepoMap(map));
   });
 
-program
-  .command("init")
-  .description("Wire Graft into the AI coding agents used with this repo (instruction files + MCP server; full hooks + statusline + MCP for Claude Code)")
+// `trail note`: what a session worked out, saved for the next person. Listed
+// under trail; under graft it still runs, unlisted, for a teammate on graft in
+// a repo where someone else set up trail.
+grouped(program.command("note", { hidden: !TRAIL }), GROUP.memory)
+  .description("Save what this session decided, tried and ruled out, as a learning in the repo's .trail/learnings/ (the text on stdin)")
+  .requiredOption("--title <text>", "what the session was about, in a few words")
+  .option("-m, --body <text>", "the learning itself, instead of stdin")
+  .option("--personal", "about your own setup or habits, not the code: keep it in ~/.trail, out of the repo")
+  .option("--touches <list>", "comma-separated files or file#Symbol it's about (default: the files this session changed, in every repo it changed)")
+  .option("--author <name>", "who wrote it (default: the first word of git config user.name)")
+  .option("--minutes <n>", "what it took to work out, when the agent's transcript can't say")
+  .option("--tokens <n>", "the same, in tokens")
+  .option("--json", "print the saved learning as JSON")
+  .argument("[dir]", "repository root", ".")
+  .action(async (dir: string, opts: NoteOptions) => {
+    await runNoteCommand(resolve(dir), opts);
+  });
+
+// `trail learn` and `trail skills`: corrections become takeaways on a skill,
+// kept on this machine, and takeaways fold into its SKILL.md. Unlisted under
+// graft, like `note`, but they run.
+grouped(program.command("learn", { hidden: !TRAIL }), GROUP.memory)
+  .description("Turn a correction into a takeaway on a skill, kept in ~/.trail (the takeaway on stdin)")
+  .argument("<skill>", "the skill it belongs to, e.g. pdf-coords; a new name makes a new skill")
+  .argument("[dir]", "repository root", ".")
+  .option("-m, --text <text>", "the takeaway itself, instead of stdin")
+  .option("--description <text>", "for a new skill: what it covers")
+  .option("--section <heading>", "the SKILL.md heading it belongs under when folded")
+  .option("--author <name>", "who taught it (default: the first word of git config user.name)")
+  .action(async (skill: string, dir: string, opts: { text?: string; description?: string; section?: string; author?: string }) => {
+    const repo = resolve(dir);
+    const text = (opts.text ?? (await readStdin())).trim();
+    if (!text) {
+      console.error(`✗ a takeaway needs its text, on stdin or with -m:`);
+      console.error(`  ${cmd("graft learn")} ${skill} <<'EOF'\n  Read rotation with page.Rotation(), never pdfcpu: it drops /Rotate on linearized files.\n  EOF`);
+      process.exitCode = 1;
+      return;
+    }
+    const author = opts.author?.trim() || noteAuthor(repo);
+    let r: LearnResult;
+    try {
+      r = learn(repo, { skill, text, author, date: new Date().toISOString().slice(0, 10), description: opts.description, section: opts.section });
+    } catch (err) {
+      console.error(`✗ ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    track("takeaway_saved", { new_skill: String(r.created) }, { repo });
+    const kind = r.created ? "new skill" : r.skill.where === "repo" ? "the repo's skill" : "skill";
+    console.log(`✓ takeaway saved to ${kind} ${r.skill.name}${author ? ` · taught by ${author}` : ""}`);
+    console.log(`· your agent follows it from now on · kept on this machine, in ${shownPath(dirname(dirname(r.takeaway.path)))}`);
+    console.log(`· ${cmd("graft skills")} fold ${r.skill.name} writes it into SKILL.md`);
+  });
+
+const skillsCmd = grouped(program.command("skills", { hidden: !TRAIL }), GROUP.memory)
+  .description("List this repo's skills, and the takeaways waiting to fold into each")
+  .argument("[dir]", "repository root", ".")
+  .option("--json", "output as JSON")
+  .action((dir: string, opts: { json?: boolean }) => {
+    const repo = resolve(dir);
+    const all = listSkills(repo);
+    if (opts.json) {
+      console.log(JSON.stringify(all, null, 2));
+      return;
+    }
+    if (all.length === 0) {
+      console.log(`no skills yet · ${cmd("graft learn")} <skill> saves the first takeaway and makes the skill`);
+      return;
+    }
+    const width = Math.max(...all.map((s) => s.name.length)) + 2;
+    for (const s of all) console.log(`${s.name.padEnd(width)}${skillStatus(s)}`);
+  });
+
+/** `✗ no skill called x` and the exit code, for a name that isn't one. */
+function noSuchSkill(name: string): void {
+  console.error(`✗ no skill called ${skillName(name)} · ${cmd("graft skills")} lists them`);
+  process.exitCode = 1;
+}
+
+skillsCmd
+  .command("show")
+  .description("Print a skill with every takeaway not yet folded in: what an agent reads before working in its area")
+  .argument("<skill>", "the skill")
+  .option("-C, --dir <path>", "repository root", ".")
+  .action((skill: string, opts: { dir: string }) => {
+    const s = getSkill(resolve(opts.dir), skill);
+    if (!s) return noSuchSkill(skill);
+    process.stdout.write(skillForAgent(s));
+  });
+
+skillsCmd
+  .command("fold")
+  .description("Write a skill's waiting takeaways into its SKILL.md and bump its version")
+  .argument("[skill]", "one skill; leave out to fold every skill with takeaways waiting")
+  .option("--confirmed", "only the takeaways someone other than their teacher confirmed")
+  .option("-C, --dir <path>", "repository root", ".")
+  .action((skill: string | undefined, opts: { confirmed?: boolean; dir: string }) => {
+    const repo = resolve(opts.dir);
+    if (skill && !getSkill(repo, skill)) return noSuchSkill(skill);
+    const names = skill ? [skill] : listSkills(repo).map((s) => s.name);
+    let inRepo = false;
+    let any = false;
+    for (const n of names) {
+      const r = fold(repo, n, { confirmed: opts.confirmed });
+      if (!r) continue;
+      if (r.folded.length === 0) {
+        if (skill) console.log(`· ${r.skill} v${r.from} · nothing to fold${r.stillWaiting ? `, ${r.stillWaiting} waiting for a second person` : ""}`);
+        continue;
+      }
+      any = true;
+      inRepo ||= r.where === "repo";
+      track("skills_folded", { takeaways_bucket: countBucket(r.folded.length) }, { repo });
+      console.log(`✓ ${r.skill} v${r.from} → v${r.to} · folded ${r.folded.length} takeaway${r.folded.length === 1 ? "" : "s"}${r.stillWaiting ? `, ${r.stillWaiting} still waiting` : ""}`);
+      console.log(`  M ${r.where === "repo" ? shown(repo, r.file) : shownPath(r.file)}   ${r.sections.map((h) => `+ ${h}`).join(" ")}`);
+    }
+    if (!any) {
+      if (!skill) console.log("· nothing to fold");
+      return;
+    }
+    if (inRepo) console.log("· review with git diff, then commit");
+    else console.log(`· ${cmd("graft skills")} publish <skill> moves a skill into the repo's .claude/skills/, to commit for your team`);
+  });
+
+skillsCmd
+  .command("publish")
+  .description("Move a skill kept on this machine into the repo's .claude/skills/, ready to commit")
+  .argument("<skill>", "the skill")
+  .option("-C, --dir <path>", "repository root", ".")
+  .action((skill: string, opts: { dir: string }) => {
+    const repo = resolve(opts.dir);
+    const r = publish(repo, skill);
+    if (!r.ok) {
+      if (r.reason === "unknown") return noSuchSkill(skill);
+      console.log(`· ${skillName(skill)} is already in the repo, in .claude/skills/${skillName(skill)}/`);
+      return;
+    }
+    console.log(`✓ ${skillName(skill)} → ${shown(repo, r.file)}`);
+    console.log("· commit it to share it: Claude Code loads it for everyone who pulls. its takeaways stay on this machine");
+  });
+
+skillsCmd
+  .command("confirm")
+  .description("Say a teammate's takeaway is right, so `fold --confirmed` takes it")
+  .argument("<skill>", "the skill")
+  .argument("[takeaway]", "one takeaway file (default: every one waiting that someone else taught)")
+  .option("--author <name>", "who is confirming (default: the first word of git config user.name)")
+  .option("-C, --dir <path>", "repository root", ".")
+  .action((skill: string, takeaway: string | undefined, opts: { author?: string; dir: string }) => {
+    const repo = resolve(opts.dir);
+    if (!getSkill(repo, skill)) return noSuchSkill(skill);
+    const who = opts.author?.trim() || noteAuthor(repo);
+    const done = confirm(repo, skill, who, takeaway);
+    if (done.length === 0) {
+      console.log(`· nothing to confirm on ${skillName(skill)} — a takeaway needs someone other than its teacher`);
+      return;
+    }
+    for (const t of done) console.log(`✓ confirmed ${t.taughtBy || "a"}'s takeaway from ${shortDate(t.date)} · ${shownPath(t.path)}`);
+    console.log(`· ${cmd("graft skills")} fold ${skillName(skill)} writes it into SKILL.md`);
+  });
+
+grouped(program.command("init"), GROUP.setup)
+  .description(
+    TRAIL
+      ? "Wire trail into your agents: instruction files and MCP for each, plus hooks and a statusline for Claude Code"
+      : "Wire Graft into the AI coding agents used with this repo (instruction files + MCP server; full hooks + statusline + MCP for Claude Code)",
+  )
   .argument("[dir]", "target repo directory", ".")
   .option("--no-build", "skip building the graph (wire files only)")
   .option("--agents <ids...>", `only these agents (${hostIds().join(", ")}, claude)`)
@@ -988,6 +1312,121 @@ program
   .action(async (dir: string, opts: InitOptions) => {
     await runInitCommand(dir, opts);
   });
+
+/** Everything on stdin, or "" when nothing is piped in. */
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  const chunks: Buffer[] = [];
+  for await (const c of process.stdin) chunks.push(typeof c === "string" ? Buffer.from(c) : c);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+interface NoteOptions {
+  title: string;
+  body?: string;
+  touches?: string;
+  author?: string;
+  minutes?: string;
+  tokens?: string;
+  json?: boolean;
+  personal?: boolean;
+}
+
+async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
+  const body = (opts.body ?? (await readStdin())).trim();
+  if (!opts.title.trim() || !body) {
+    console.error(`✗ a learning needs a --title and a body, on stdin or with -m:`);
+    console.error(`  ${cmd("graft note")} --title "What it was about" <<'EOF'`);
+    console.error("  ## Decided\n  …\n  ## Tried and ruled out\n  …\n  ## Watch out\n  …\n  EOF");
+    process.exitCode = 1;
+    return;
+  }
+  const wholeNumber = (raw: string | undefined, flag: string): number | undefined => {
+    if (raw === undefined) return undefined;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) {
+      console.error(`✗ ${flag} takes a number, got "${raw}"`);
+      process.exit(1);
+    }
+    return Math.round(n);
+  };
+  const minutes = wholeNumber(opts.minutes, "--minutes");
+  const tokens = wholeNumber(opts.tokens, "--tokens");
+  // What the session spent, from the agent's own transcript when there is one;
+  // the flags win, since only the agent knows where its task began.
+  const spent = currentSessionCost(repo);
+  const cost =
+    minutes !== undefined || tokens !== undefined || spent
+      ? { minutes: minutes ?? spent?.minutes, tokens: tokens ?? spent?.tokens }
+      : undefined;
+  // Which repos it goes to: the one it was saved from, plus any other the
+  // session edited. Explicit --touches means just this repo.
+  const targets = opts.touches
+    ? [{ dir: repo, touches: opts.touches.split(",").map((t) => t.trim()).filter(Boolean) }]
+    : noteTargets(repo, spent?.edited ?? [], spent?.startedAt).map((t) => ({
+        ...t,
+        // And the files the note names, for a session that read code without editing it.
+        touches: [...new Set([...t.touches, ...mentionedFiles(t.dir, body)])].slice(0, 10),
+      }));
+  const author = opts.author?.trim() || noteAuthor(repo);
+  const date = new Date().toISOString().slice(0, 10);
+  const scope = opts.personal ? "personal" : "repo";
+  const earlier: Note[] = [];
+  const saved: Note[] = [];
+  for (const t of targets) {
+    earlier.push(...listNotes(t.dir));
+    saved.push(writeNote(t.dir, { title: opts.title, body, author, date, branch: currentBranch(t.dir), cost, touches: t.touches }, scope));
+  }
+  const touches = targets.flatMap((t) => t.touches);
+  track(
+    "note_saved",
+    { has_cost: String(cost?.tokens !== undefined || cost?.minutes !== undefined), touches_bucket: countBucket(touches.length), scope: saved[0]?.scope ?? scope },
+    { repo },
+  );
+
+  if (opts.json) {
+    console.log(JSON.stringify(saved.length === 1 ? saved[0] : saved, null, 2));
+    return;
+  }
+  for (const n of saved) console.log(`✓ learning saved · ${notePlace(n)}`);
+  const note = saved[0]!;
+  const took = costLabel(note.cost);
+  if (took) {
+    // Name a code file if the note touches one; docs are rarely what it's about.
+    const about = touches.find((t) => !/\.(md|mdx|txt)$/i.test(t.split("#")[0]!)) ?? touches[0];
+    const first = about ? ` that touches ${basename(about.split("#")[0]!)}` : "";
+    const reading = tokensLabel(readingTokens(note)).replace(" tokens", "");
+    console.log(`· this ${took.replace(" to work out", " to figure out")}. the next session${first} gets it for ${reading}`);
+  }
+  // Learnings about the same files, from someone else: this one builds on theirs.
+  const files = new Set(touches.map((t) => t.split("#")[0]));
+  const prior = earlier.find((n) => n.author !== note.author && n.touches.some((t) => files.has(t.split("#")[0])));
+  if (prior) console.log(`· builds on ${prior.author ? `${prior.author}'s` : "a"} learning from ${shortDate(prior.date)}`);
+  if (!SECTIONS.some((s) => sectionLead(body, s.heading) !== null))
+    console.log("· tip: learnings read best under ## Decided, ## Tried and ruled out and ## Watch out");
+  const repoSaved = saved.filter((n) => n.scope === "repo");
+  if (repoSaved.length) {
+    const paths = repoSaved.map(notePlace).join(" ");
+    console.log(`· commit it with this change (git add ${paths}) so your team's Claude starts from it too`);
+  } else {
+    console.log("· personal: kept on this machine, out of the repo");
+  }
+  if (!process.stdout.isTTY && TRAIL) {
+    console.log(
+      `[trail] Close your reply with this line, above any link trail asks you to end with: 📝 Saved a learning for your team's next session`,
+    );
+  }
+  for (const t of targets) {
+    rememberRepo(t.dir);
+    maybeSyncInBackground(t.dir);
+  }
+  printLines(cloudLines(repo, { command: "note" }));
+}
+
+/** Lines that close a command's output, with a blank line before them. */
+function printLines(lines: string[]): void {
+  if (lines.length) console.log(`\n${lines.join("\n")}`);
+}
 
 /** `graft init`'s flags, as commander hands them over. */
 interface InitOptions { build?: boolean; agents?: string[]; allAgents?: boolean; listAgents?: boolean; mcp?: boolean; hooks?: boolean; statusline?: boolean; dryRun?: boolean; yes?: boolean; global?: boolean; trail?: string; verbose?: boolean }
@@ -1116,6 +1555,16 @@ async function runInitCommand(
     // Today's output, file by file, behind --verbose. Everything else gets one
     // line per step: the graph, then one per agent.
     const verbose = opts.verbose === true;
+    // Under trail, each repo gets its `.trail/learnings/`, committed with the
+    // code, and its folder in ~/.trail for personal learnings and corrections.
+    const notesHome = new Map<string, { created: boolean; dir: string }>();
+    if (TRAIL)
+      for (const target of targets) {
+        const { place } = ensureRepoHome(target);
+        const created = place.git ? ensureRepoTrail(place.checkout) : false;
+        notesHome.set(target, { created, dir: place.git ? place.checkout : place.dir });
+        if (place.git) maybeRefreshBranches(place.checkout);
+      }
     const reports: WireReport[] = [];
     for (const target of targets) {
       if (verbose && target !== repo) console.error(`\n— ${relative(repo, target)}/`);
@@ -1137,14 +1586,14 @@ async function runInitCommand(
       } else if (res.built) {
         graphLine = "✓ graph built";
       } else if (res.failed) {
-        graphLine = "⚠ the graph build failed — run graft build to see why";
+        graphLine = `⚠ the graph build failed — run ${cmd("graft build")} to see why`;
       } else if (existing) {
         graphNodes = existing.meta.nodeCount;
         graphLine = `✓ graph ready · ${fmt(existing.meta.nodeCount)} nodes, ${fmt(existing.meta.edgeCount)} edges`;
       } else if (hasGraftIndex(repo)) {
         graphLine = "✓ graph ready";
       } else {
-        graphLine = "· skipped the graph build — run graft build";
+        graphLine = `· skipped the graph build — run ${cmd("graft build")}`;
       }
     }
 
@@ -1169,6 +1618,16 @@ async function runInitCommand(
       }
     }
 
+    // Under trail: where this repo's learnings are, and how many there already are.
+    if (TRAIL) {
+      const home = notesHome.get(repo);
+      if (home) {
+        const learnings = listNotes(repo, { branches: false }).filter((n) => n.scope === "repo");
+        if (learnings.length === 0) console.error(`✓ learnings  ${LEARNINGS_DIR}/ · sessions that take real digging leave one there, for your whole team`);
+        else console.error(`✓ learnings  ${learnings.length} in ${LEARNINGS_DIR}/, from ${new Set(learnings.map((n) => n.author || "someone")).size} ${new Set(learnings.map((n) => n.author)).size === 1 ? "person" : "people"}`);
+      }
+    }
+
     // The brain comes last, after the graph exists: its rules are anchored to
     // symbols, and `graft trail status` can only report how many of them resolve
     // once there is a graph to resolve them against.
@@ -1179,11 +1638,11 @@ async function runInitCommand(
         else console.error(`✓ brain: pulled ${res.ruleCount} rule(s) from ${brainLink.brainId}`);
         for (const w of res.writes) console.error(`✓ brain rules: ${w.path} (${w.action})`);
         if (res.ruleCount > 0 && res.writes.length === 0)
-          console.error("· no instruction file to write rules into — graft ask still carries them");
+          console.error(`· no instruction file to write rules into — ${cmd("graft ask")} still carries them`);
       } else if (res.warning) {
         console.error(`⚠ trail: ${res.warning}`);
       } else if (res.ruleCount === 0) {
-        console.error("✓ trail connected · no rules yet — graft trail push reads this repo into it");
+        console.error(`✓ trail connected · no rules yet — ${cmd("graft trail push")} reads this repo into it`);
       } else {
         const where = res.writes.map((w) => shown(repo, w.path)).join(", ");
         const n = `${res.ruleCount.toLocaleString("en-US")} rule${res.ruleCount === 1 ? "" : "s"}`;
@@ -1200,9 +1659,19 @@ async function runInitCommand(
         const top = parts.length > 1 ? `${parts[0]}/` : parts[0]!;
         if (!tops.includes(top)) tops.push(top);
       }
-      console.error("· restart your agents so a new session picks up graft");
+      console.error(`· restart your agents so a new session picks up ${brand()}`);
+      if (TRAIL && !tops.includes(".trail/")) tops.push(".trail/");
+      // Only what git sees as new or changed: a teammate's init over committed files has nothing to commit.
+      const changedTops = tops.filter((t) => {
+        const r = spawnSync("git", ["status", "--porcelain", "--", t], { cwd: repo, encoding: "utf8" });
+        return r.status !== 0 || r.stdout.trim().length > 0;
+      });
+      tops.splice(0, tops.length, ...changedTops);
       if (tops.length)
-        console.error(`· commit ${tops.slice(0, 4).join(" ")}${tops.length > 4 ? ` +${tops.length - 4} more` : ""} to share it — graft/ stays local and git-ignored`);
+        console.error(
+          `· commit ${tops.slice(0, 5).join(" ")}${tops.length > 5 ? ` +${tops.length - 5} more` : ""} to share it — ` +
+            (TRAIL ? "teammates' Claude reads the learnings even without trail installed; the code map in graft/ stays on this machine" : "graft/ stays local and git-ignored"),
+        );
     }
 
     // One epilogue for the whole run. A workspace parent holds no nodes of its
@@ -1278,7 +1747,7 @@ function wireTarget(
       // `global`/`home` are threaded through alongside `statusline`: the claude layer
       // writes under `~/.claude` now (hosts/claude-global.ts), so --no-global has to
       // reach it or the flag would silently mean "no out-of-repo writes, except three".
-      const res = runInit(repo, { build: opts.build, cliPath, statusline: wantStatusline, global: opts.global, home });
+      const res = runInit(repo, { build: opts.build, cliPath, statusline: wantStatusline, global: opts.global, home, brand: brand() });
       say(`✓ wrote ${res.settingsPath}`);
       for (const s of res.shims) say(`✓ wrote ${s}`);
       say(`✓ wrote ${res.skill}`);
@@ -1288,7 +1757,7 @@ function wireTarget(
         say(`· mcp claude: ${res.mcp.path} (already registered)`);
       else
         say(`✓ mcp claude: ${res.mcp.path} (${res.mcp.action}) — restart Claude Code to load the graft MCP server`);
-      say(res.built ? "✓ built the graph (graft build)" : "· skipped graph build");
+      say(res.built ? `✓ built the graph (${cmd("graft build")})` : "· skipped graph build");
       if (!wantStatusline) say("· skipped Claude Code statusLine (--no-statusline)");
       for (const w of res.warnings) say(`⚠ ${w}`);
     }
@@ -1330,7 +1799,7 @@ function wireTarget(
       if (!quiet)
         say(
           buildGraphIfMissing(repo, { build: opts.build, cliPath })
-            ? "✓ built the graph (graft build)"
+            ? `✓ built the graph (${cmd("graft build")})`
             : "· skipped graph build",
         );
     }
@@ -1371,9 +1840,8 @@ function formatRetractions(rs: Retraction[], apply: boolean): string {
   return lines.join("\n").replace(/^\n/, "");
 }
 
-program
-  .command("uninstall")
-  .description("Remove every file and config entry graft has written to this repo (the inverse of init)")
+grouped(program.command("uninstall"), GROUP.setup)
+  .description(`Remove every file and config entry ${TRAIL ? "trail or graft" : "graft"} has written to this repo (the inverse of init)`)
   .argument("[dir]", "target repo directory", ".")
   .option("-y, --yes", "actually remove (without this, prints what it would remove and exits)")
   .option("--keep-cache", "keep graft/ and the .gitignore entries — wiring only")
@@ -1396,14 +1864,10 @@ program
     console.error(
       bad.length
         ? `\n⚠ ${bad.length} file(s) could not be parsed and were left as-is — see above.`
-        : "\n✓ graft fully removed. `graft init` re-wires from scratch.",
+        : `\n✓ ${brand()} fully removed. \`${cmd("graft init")}\` re-wires from scratch.`,
     );
   });
 
-// `graft trail …` still works: see legacy-args.ts.
-const brain = program
-  .command("trail")
-  .description("The Trail attached to this repo: the rules mined from its own history");
 
 /**
  * Get this repo a trail from the terminal, by sending the user through signup
@@ -1449,7 +1913,7 @@ async function signUpForBrain(repo: string, slug: string): Promise<BrainLink | n
   spinner.stop();
   if (got === "stopped") {
     handoff.close();
-    console.error("· stopped — nothing was sent; run graft trail push again when you're ready");
+    console.error(`· stopped — nothing was sent; run ${cmd("graft trail push")} again when you're ready`);
     track("brain_signup_settled", { outcome: "stopped", mode: "terminal", duration_bucket: durationBucket(Date.now() - startedAt) }, { repo });
     process.exitCode = 130;
     return null;
@@ -1493,7 +1957,7 @@ async function signUpWithoutTerminal(repo: string, slug: string): Promise<BrainL
     console.error(`  ${url}`);
     console.error("· nothing has been read or sent yet.");
     console.error(
-      "· next: ask the user to sign up in the tab that just opened (or at the link above), then run `graft trail push` again straight away — it waits for the sign-up to finish and carries on with the push. Don't wait for them to reply first.",
+      `· next: ask the user to sign up in the tab that just opened (or at the link above), then run \`${cmd("graft trail push")}\` again straight away — it waits for the sign-up to finish and carries on with the push. Don't wait for them to reply first.`,
     );
     settled("agent_link_opened");
     process.exitCode = 1;
@@ -1514,7 +1978,7 @@ async function signUpWithoutTerminal(repo: string, slug: string): Promise<BrainL
   }
   if ("pending" in got) {
     console.error("· not signed up yet — nothing has been read or sent.");
-    console.error("· next: run `graft trail push` again to keep waiting. The link above stays valid for about 15 minutes.");
+    console.error(`· next: run \`${cmd("graft trail push")}\` again to keep waiting. The link above stays valid for about 15 minutes.`);
     settled("still_waiting");
     process.exitCode = 1;
     return null;
@@ -1526,12 +1990,18 @@ async function signUpWithoutTerminal(repo: string, slug: string): Promise<BrainL
   return null;
 }
 
-brain
-  .command("connect")
+function connectCommand(name = "connect"): Command {
+  return new Command(name)
   .description("Attach a brain to this repo and pull its rules")
   .argument("<handoff>", "<brainId>:<token>, or a bare brain id with GRAFT_BRAIN_TOKEN set")
   .argument("[dir]", "target repo directory", ".")
   .action(async (handoff: string, dir: string) => {
+    await runConnect(handoff, dir);
+  });
+}
+
+/** `graft trail connect`, and `trail login <handoff>`: attach a trail from a Trail page's handoff. */
+async function runConnect(handoff: string, dir: string): Promise<void> {
     const parsed = parseBrainArg(handoff);
     if ("error" in parsed) {
       console.error(`✗ ${parsed.error}`);
@@ -1549,28 +2019,29 @@ brain
       // read the repo yet. Saying "0 rules" without saying why reads as a
       // failure, and the next step is the whole point.
       console.error("✓ attached this repo to the brain — it has no rules yet");
-      console.error("· run `graft trail push` to read this repository into it");
+      console.error(`· run \`${cmd("graft trail push")}\` to read this repository into it`);
       return;
     }
     console.error(`✓ pulled ${res.ruleCount} rule(s) from ${parsed.brainId}`);
     for (const w of res.writes) console.error(`✓ ${w.path} (${w.action})`);
-  });
+}
 
-brain
-  .command("pull")
+function pullCommand(name = "pull"): Command {
+  return new Command(name)
   .description("Refresh the trail's rules and write every change you accepted in Trail into this repo's context files")
   .argument("[dir]", "target repo directory", ".")
   .option("--dry-run", "show what would change without writing anything or telling Trail")
   .action(async (dir: string, opts: { dryRun?: boolean }) => {
     await runTrailPullCommand(dir, opts);
   });
+}
 
 /** `graft trail pull`, and `graft claude-md pull` which is now the same thing. */
 async function runTrailPullCommand(dir: string, opts: { dryRun?: boolean }): Promise<void> {
   const repo = resolve(dir);
   const link = readLink(repo);
   if (!link) {
-    console.error("✗ this repo has no trail yet — run graft trail push first");
+    console.error(`✗ this repo has no trail yet — run ${cmd("graft trail push")} first`);
     process.exitCode = 1;
     return;
   }
@@ -1586,8 +2057,8 @@ function positiveNumber(raw: string): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-brain
-  .command("watch")
+function watchCommand(name = "watch"): Command {
+  return new Command(name)
   .description("Wait until Trail has suggestions to review or accepted changes to pull, then say so once")
   .argument("[dir]", "target repo directory", ".")
   .option("--interval <seconds>", "how often to check Trail", String(WATCH_DEFAULTS.intervalMs / 1000))
@@ -1651,9 +2122,10 @@ brain
       finish(result);
     },
   );
+}
 
-brain
-  .command("push")
+function pushCommand(name = "push"): Command {
+  return new Command(name)
   .description("Read THIS repo on your machine and build its trail — no GitHub App, works on private repos")
   .argument("[dir]", "target repo directory", ".")
   .option("--no-approve", "leave the mined rules as drafts for review")
@@ -1681,7 +2153,7 @@ brain
     }
     if (!link) {
       if (!here) {
-        console.error("✗ this directory has no GitHub origin remote — graft can only push a GitHub repository today");
+        console.error(`✗ this directory has no GitHub origin remote — ${brand()} can only push a GitHub repository today`);
         process.exitCode = 1;
         return;
       }
@@ -1706,7 +2178,7 @@ brain
     }
     const ctx = pushContext(repo);
     if (!ctx) {
-      console.error("✗ this directory has no GitHub origin remote — graft can only push a GitHub repository today");
+      console.error(`✗ this directory has no GitHub origin remote — ${brand()} can only push a GitHub repository today`);
       process.exitCode = 1;
       return;
     }
@@ -1732,14 +2204,14 @@ brain
     // non-interactive push only says what to run.
     if (wiredHostIds(repo).length === 0) {
       if (process.stdin.isTTY && tty) {
-        console.error("· graft isn't set up here yet — pick the agents your team uses:");
+        console.error(`· ${brand()} isn't set up here yet — pick the agents your team uses:`);
         await runInitCommand(
           repo,
           { build: true, mcp: true, hooks: true, statusline: true, global: true, verbose },
           { epilogue: false, push: !verbose },
         );
       } else {
-        console.error("· graft isn't set up here — run graft init so your agents read these rules");
+        console.error(`· ${brand()} isn't set up here — run ${cmd("graft init")} so your agents read these rules`);
       }
     }
 
@@ -1747,7 +2219,7 @@ brain
     // here can later go stale on its own. Without one the ingest still works;
     // its rules simply govern the repo rather than a symbol in it.
     const graph = loadGraphCached(contextDirFor(repo, program.opts<GlobalOpts>().dir));
-    if (!graph) console.error("· no graph yet — run graft build so rules can be anchored to symbols");
+    if (!graph) console.error(`· no graph yet — run ${cmd("graft build")} so rules can be anchored to symbols`);
     const reading = startSpinner(`reading ${ctx.owner}/${ctx.name} · commits, pull-request discussion and the docs in the tree`);
     const built = await buildLocalDigest(repo, graph, { autoApprove: opts.approve !== false, context: ctx });
     if ("error" in built) {
@@ -1862,6 +2334,7 @@ brain
     }
     console.error(`  ${buildPage}`);
   });
+}
 
 // `graft claude-md pull` is `graft trail pull` now: the CLAUDE.md changes are
 // the first half of what that writes. Kept so the old name keeps working, but
@@ -1876,12 +2349,12 @@ claudeMd
   .argument("[dir]", "target repo directory", ".")
   .option("--dry-run", "show what would change without writing anything or telling Trail")
   .action(async (dir: string, opts: { dryRun?: boolean }) => {
-    console.error("· graft claude-md pull is now part of graft trail pull — running that");
+    console.error(`· ${brand()} claude-md pull is now part of ${cmd("graft trail pull")} — running that`);
     await runTrailPullCommand(dir, opts);
   });
 
-brain
-  .command("status")
+function brainStatusCommand(name = "status"): Command {
+  return new Command(name)
   .description("Show the attached brain, how many rules are cached, and how many still match the code")
   .argument("[dir]", "target repo directory", ".")
   .option("--json", "machine-readable output")
@@ -1903,13 +2376,13 @@ brain
       return;
     }
     if (!link) {
-      console.error("· no brain attached — run `graft trail connect <brainId>:<token>`");
+      console.error(`· no brain attached — run \`${cmd("graft trail connect")} <brainId>:<token>\``);
       return;
     }
     console.error(`brain ${link.brainId}`);
     console.error(`  ${rules.length} rule(s) cached${fetchedAt ? `, pulled ${new Date(fetchedAt).toISOString()}` : ""}`);
     if (!graph) {
-      console.error("  no graph yet — run `graft build` to see which rules still match the code");
+      console.error(`  no graph yet — run \`${cmd("graft build")}\` to see which rules still match the code`);
       return;
     }
     const stale = applied.filter((a) => a.stale);
@@ -1921,9 +2394,10 @@ brain
     );
     for (const a of stale.slice(0, 10)) console.error(`    - ${a.rule}\n      ${a.pointer}`);
   });
+}
 
-brain
-  .command("disconnect")
+function disconnectCommand(name = "disconnect"): Command {
+  return new Command(name)
   .description("Forget the attached brain (its rules stay in the instruction files until the next init)")
   .argument("[dir]", "target repo directory", ".")
   .action((dir: string) => {
@@ -1931,6 +2405,509 @@ brain
     clearLink(resolve(dir));
     console.error(`✓ detached the brain from ${repo}`);
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/* trail login · logout · workspace                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `trail login`: connect this machine to a Trail workspace by hand. Normally
+ * nobody runs it: Claude offers the same link once there's a learning to
+ * share. Prints the link, opens it, and waits for the person to sign in and
+ * pick repos, then uploads those repos' learnings.
+ */
+function loginCommand(name = "login"): Command {
+  return new Command(name)
+    .description("Connect this machine to a Trail workspace: sign in, pick the repos it gets, invite your team")
+    .argument("[dir]", "the repo you're in, ticked first in the picker", ".")
+    .option("--server <url>", "a self-hosted Trail, e.g. https://trail.acme.internal (default: Trail cloud)")
+    .action(async (dir: string, opts: { server?: string }) => {
+      const repo = resolve(dir);
+      const server = opts.server?.trim().replace(/\/+$/, "");
+      if (server) {
+        if (!/^https?:\/\//.test(server)) {
+          console.error(`✗ --server takes a URL, like https://trail.acme.internal`);
+          process.exitCode = 1;
+          return;
+        }
+        process.env.TRAIL_URL = server;
+      }
+      const cloud = readCloud();
+      if (cloud) {
+        console.error(`✓ already connected to workspace ${cloud.workspace.name} · ${cloud.workspace.url}`);
+        return;
+      }
+      rememberRepo(repo);
+      const url = loginLink(repo);
+      console.error(`· sign in and pick the repos your workspace gets:\n  ${url}`);
+      if (process.stdout.isTTY) openBrowser(url);
+      console.error("· waiting for you to finish in the browser (ctrl-c stops; Claude picks it up later too)");
+      const got = await waitForConnect({ waitMs: 10 * 60 * 1000 });
+      if (got && "cloud" in got) printLines(cloudLines(repo, { command: "note", agent: false }));
+      else if (got && "error" in got) {
+        console.error(`✗ ${got.error} · run ${cmd("graft login")} again for a new link`);
+        process.exitCode = 1;
+      } else console.error(`· not connected yet · the link stays good for a day`);
+    });
+}
+
+function logoutCommand(name = "logout"): Command {
+  return new Command(name)
+    .description("Disconnect this machine from its Trail workspace (learnings stay in your repos)")
+    .action(() => {
+      const cloud = readCloud();
+      clearPending();
+      if (!clearCloud()) {
+        console.error("· not connected to a workspace");
+        return;
+      }
+      console.error(`✓ disconnected from workspace ${cloud?.workspace.name ?? ""} · learnings stay in your repos' .trail/`.replace("  ", " "));
+    });
+}
+
+/** The repo at `repo`, as the workspace names it. */
+function workspaceRepo(repo: string): { key: string; name: string; checkout: string; git: boolean } {
+  const place = repoPlace(repo);
+  return { key: place.key, name: repoName(place.key, place.checkout), checkout: place.checkout, git: place.git };
+}
+
+function workspaceCommand(name = "workspace"): Command {
+  const ws = new Command(name)
+    .description("Your Trail workspace: its repos, the team page and the invite link")
+    .argument("[dir]", "repository root", ".")
+    .option("--json", "output as JSON")
+    .action(async (dir: string, opts: { json?: boolean }) => {
+      const repo = resolve(dir);
+      const cloud = readCloud();
+      if (!cloud) {
+        console.log("· not connected to a workspace");
+        console.log(`· Claude offers a link once this repo has learnings, or run ${cmd("graft login")}`);
+        return;
+      }
+      const me = await fetchMe(cloud);
+      if (isError(me)) {
+        console.error(`✗ ${me.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      // What the workspace has now, for every command that reads cloud.json.
+      writeCloud({ ...cloud, workspace: me.workspace, repos: me.repos.map((r) => r.key) });
+      if (opts.json) {
+        console.log(JSON.stringify(me, null, 2));
+        return;
+      }
+      console.log(`${me.workspace.name} · ${me.workspace.url}`);
+      console.log(`invite  ${me.workspace.invite_url}`);
+      console.log("");
+      const here = workspaceRepo(repo);
+      const width = Math.max(...me.repos.map((r) => r.name.length), here.name.length) + 3;
+      for (const r of me.repos) {
+        const by = r.added_by ? ` · added by ${r.added_by}` : "";
+        console.log(`  ✓ ${r.name.padEnd(width)}${r.learnings} learning${r.learnings === 1 ? "" : "s"}${by}`);
+      }
+      if (here.git && !me.repos.some((r) => r.key === here.key)) {
+        console.log(`  · ${here.name.padEnd(width)}not in the workspace · ${cmd("graft workspace add")} shares its learnings`);
+      }
+    });
+  ws.command("add")
+    .description("Add this repo to your workspace and share its learnings")
+    .argument("[dir]", "repository root", ".")
+    .action(async (dir: string) => {
+      const repo = resolve(dir);
+      const cloud = readCloud();
+      if (!cloud) {
+        console.error(`✗ not connected to a workspace · run ${cmd("graft login")}`);
+        process.exitCode = 1;
+        return;
+      }
+      const here = workspaceRepo(repo);
+      if (!here.git) {
+        console.error("✗ not a git repository");
+        process.exitCode = 1;
+        return;
+      }
+      const added = await addRepo(cloud, { key: here.key, name: here.name });
+      if (isError(added)) {
+        console.error(`✗ ${added.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      const next: Cloud = { ...cloud, repos: added.repos.map((r) => r.key) };
+      writeCloud(next);
+      rememberRepo(repo);
+      const res = await syncRepo(here.checkout, next);
+      if (isError(res)) {
+        console.error(`✓ added ${here.name} to ${cloud.workspace.name} · its learnings go up in the background (${res.error})`);
+        return;
+      }
+      console.error(`✓ added ${here.name} to ${cloud.workspace.name} · shared ${res.learnings} learning${res.learnings === 1 ? "" : "s"}`);
+      console.error(`· ${cloud.workspace.url}`);
+    });
+  return ws;
+}
+
+/* -------------------------------------------------------------------------- */
+/* trail team · trail check                                                   */
+/* -------------------------------------------------------------------------- */
+
+/** Fold a long line at `width`, indenting what wraps. */
+function wrap(text: string, width: number, indent: string): string[] {
+  const out: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/)) {
+    if (line && line.length + 1 + word.length > width) {
+      out.push(line);
+      line = indent + word;
+    } else line = line ? `${line} ${word}` : word;
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+function teamCommand(name = "team"): Command {
+  return new Command(name)
+    .description("What the team learned this week, who's working on what, and where work overlaps")
+    .argument("[dir]", "repository root", ".")
+    .option("--days <n>", "how far back to look", "7")
+    .option("--json", "output as JSON")
+    .action(async (dir: string, opts: { days: string; json?: boolean }) => {
+      const repo = resolve(dir);
+      const days = Math.max(1, Math.min(90, Number(opts.days) || 7));
+      const cloud = readCloud();
+      if (!cloud) {
+        localTeam(repo, days, opts.json === true);
+        return;
+      }
+      maybeSyncInBackground(repo);
+      const here = workspaceRepo(repo);
+      const t = await fetchTeam(cloud, { repo: cloud.repos.includes(here.key) ? here.key : undefined, days });
+      if (isError(t)) {
+        console.error(`✗ ${t.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(t, null, 2));
+        return;
+      }
+      const period = days === 7 ? "this week" : `the last ${days} days`;
+      console.log(`${period} in ${t.repo || t.workspace}`);
+      console.log(
+        `${t.people} ${t.people === 1 ? "person" : "people"} · ${t.sessions} session${t.sessions === 1 ? "" : "s"} · ` +
+          `${t.new_learnings} new learning${t.new_learnings === 1 ? "" : "s"} · reused ${t.reused}×`,
+      );
+      if (t.members.length) {
+        console.log("");
+        const nameW = Math.max(...t.members.map((m) => m.name.length)) + 3;
+        const topicW = Math.min(36, Math.max(...t.members.map((m) => m.topics.join(", ").length)) + 3);
+        for (const m of t.members) {
+          const learnings = m.learnings ? `${m.learnings} learning${m.learnings === 1 ? "" : "s"}` : "";
+          const reused = m.reused ? `  reused ${m.reused}×` : "";
+          console.log(`  ${m.name.padEnd(nameW)}${m.topics.join(", ").padEnd(topicW)}${learnings.padEnd(12)}${reused}`.trimEnd());
+        }
+      }
+      const overlaps = [...t.overlaps.map((o) => o.text), ...branchOverlapTexts(repo)];
+      if (overlaps.length) {
+        console.log("\noverlap");
+        for (const o of overlaps) for (const [i, l] of wrap(o, 66, "    ").entries()) console.log(i === 0 ? `  ● ${l}` : l);
+      }
+      if (t.url) console.log(`\n  team page: ${t.url}`);
+    });
+}
+
+/** Pairs of teammates' pushed branches that change the same files, from this clone's branch cache. */
+function branchOverlapTexts(repo: string, now = Date.now()): string[] {
+  const branches = readBranchCache(repo)?.branches ?? [];
+  const out: string[] = [];
+  for (let i = 0; i < branches.length; i++) {
+    for (let j = i + 1; j < branches.length; j++) {
+      const a = branches[i]!;
+      const b = branches[j]!;
+      if (!a.author || !b.author || a.author === b.author) continue;
+      const shared = a.files.filter((f) => !f.startsWith(".trail/") && b.files.includes(f));
+      if (!shared.length) continue;
+      const files = shared.length <= 2 ? shared.join(" and ") : `${shared.slice(0, 2).join(", ")} and ${shared.length - 2} more`;
+      out.push(
+        `${a.author}'s ${a.ref.replace(/^origin\//, "")} (pushed ${pushedWhen(a.at, now)}) and ${b.author}'s ${b.ref.replace(/^origin\//, "")} (pushed ${pushedWhen(b.at, now)}) both change ${files}`,
+      );
+      if (out.length >= 5) return out;
+    }
+  }
+  return out;
+}
+
+/**
+ * `trail team` before this machine is connected: what this clone can see on
+ * its own. Who wrote which learnings lately, and where teammates' pushed
+ * branches overlap. Reuse and the team page need the workspace.
+ */
+function localTeam(repo: string, days: number, json: boolean): void {
+  maybeRefreshBranches(repo);
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const recent = listNotes(repo).filter((n) => n.scope === "repo" && n.date >= since);
+  const byAuthor = new Map<string, Note[]>();
+  for (const n of recent) byAuthor.set(n.author || "someone", [...(byAuthor.get(n.author || "someone") ?? []), n]);
+  const overlaps = branchOverlapTexts(repo);
+  if (json) {
+    console.log(JSON.stringify({ days, learnings: recent.length, members: [...byAuthor].map(([name, ns]) => ({ name, learnings: ns.length, titles: ns.map((n) => n.title) })), overlaps }, null, 2));
+    return;
+  }
+  const here = workspaceRepo(repo);
+  console.log(`${days === 7 ? "this week" : `the last ${days} days`} in ${here.name} · from this clone`);
+  console.log(`${byAuthor.size} ${byAuthor.size === 1 ? "person" : "people"} · ${recent.length} new learning${recent.length === 1 ? "" : "s"}`);
+  if (byAuthor.size) {
+    console.log("");
+    const nameW = Math.max(...[...byAuthor.keys()].map((k) => k.length)) + 3;
+    for (const [name, ns] of byAuthor) {
+      const latest = ns[0]!.title.length > 40 ? `${ns[0]!.title.slice(0, 39)}…` : ns[0]!.title;
+      console.log(`  ${name.padEnd(nameW)}${latest.padEnd(42)}${ns.length} learning${ns.length === 1 ? "" : "s"}`);
+    }
+  }
+  if (overlaps.length) {
+    console.log("\noverlap");
+    for (const o of overlaps) for (const [i, l] of wrap(o, 66, "    ").entries()) console.log(i === 0 ? `  ● ${l}` : l);
+  }
+  console.log("\n· reuse and the team page, across your repos, are in a Trail workspace");
+  printLines(cloudLines(repo, { command: "check" }));
+}
+
+function teamCheckCommand(name = "check"): Command {
+  return new Command(name)
+    .description("Check your branch's diff against everything the team has learned: the repo's learnings, yours and your skills")
+    .argument("[dir]", "repository root", ".")
+    .option("--base <ref>", "compare against where the branch left this ref (default: origin's default branch)")
+    .option("--json", "output as JSON")
+    .action(async (dir: string, opts: { base?: string; json?: boolean }) => {
+      await runTeamCheck(resolve(dir), opts);
+    });
+}
+
+/** A unified diff without the sections for `.trail/` files: a learning is never the change being checked. */
+function withoutTrailFiles(diff: string): string {
+  return diff
+    .split(/(?=^diff --git )/m)
+    .filter((part) => !/^diff --git a\/\.trail\//.test(part))
+    .join("");
+}
+
+/**
+ * `trail check`, on this machine: the branch's diff against the learnings in
+ * the repo's `.trail/` (teammates' pushed branches included), this person's
+ * own, and the repo's skills. No sign-in, no server. Exits 1 on a conflict.
+ */
+async function runTeamCheck(repo: string, opts: { base?: string; json?: boolean }): Promise<void> {
+  const d = branchDiff(repo, opts.base);
+  if (!d) {
+    console.error("✗ not a git repository");
+    process.exitCode = 1;
+    return;
+  }
+  const files = d.files.filter((f) => !f.startsWith(".trail/"));
+  if (files.length === 0) {
+    console.log(`· nothing to check: no changes against ${d.base}`);
+    return;
+  }
+  maybeRefreshBranches(repo);
+  if (d.truncated) console.error("⚠ the diff is over 400 KB; only the first 400 KB is checked");
+  const me = noteAuthor(repo);
+  const r = checkLocally({ diff: withoutTrailFiles(d.diff), files, notes: listNotes(repo), skills: listSkills(repo), asker: me });
+  const sources = r.findings.map((f) => f.source).filter((s) => s.path);
+  recordActivity({
+    repo: repoPlace(repo).key,
+    kind: "check",
+    asker: me,
+    session: sessionKey(repo) ?? `${me}-${new Date().toISOString().slice(0, 10)}`,
+    query: "",
+    files,
+    shown_paths: [...new Set(sources.map((s) => s.path!.slice(s.path!.lastIndexOf("/") + 1)))],
+    shown_authors: [...new Set(sources.map((s) => s.author ?? ""))],
+    at: new Date().toISOString(),
+  });
+  const overlaps = overlapsWith(repo, files, me).slice(0, 3);
+  if (opts.json) {
+    console.log(JSON.stringify({ ...r, overlaps }, null, 2));
+  } else {
+    printCheck(r);
+    if (overlaps.length) console.log(`\n${overlaps.map((o) => formatOverlap(o)).join("\n")}`);
+    printLines(cloudLines(repo, { command: "check" }));
+  }
+  maybeSyncInBackground(repo);
+  if (r.findings.some((f) => f.verdict === "conflict")) process.exitCode = 1;
+}
+
+function printCheck(r: CheckResult): void {
+  console.log(
+    `checking ${r.files} changed file${r.files === 1 ? "" : "s"} against ${r.notes} learning${r.notes === 1 ? "" : "s"} and ${r.skills} skill${r.skills === 1 ? "" : "s"}\n`,
+  );
+  const conflicts = r.findings.filter((f) => f.verdict === "conflict");
+  for (const f of [...conflicts, ...r.findings.filter((x) => x.verdict !== "conflict")]) {
+    const mark = f.verdict === "conflict" ? "✗" : "✓";
+    console.log(`${mark} ${f.file}${f.line ? `:${f.line}` : ""}`);
+    console.log(`  ${f.summary}`);
+    const s = f.source;
+    if (f.verdict === "conflict" && s.quote) {
+      const who = [s.author, s.date ? shortDate(s.date) : ""].filter(Boolean).join(" · ");
+      for (const l of wrap(`${who ? `${who}: ` : ""}${s.quote}`, 70, "  ")) console.log(`  ${l.trimStart()}`);
+    }
+  }
+  if (r.findings.length === 0) console.log("✓ nothing the team has learned bears on this change");
+  console.log("");
+  console.log(
+    conflicts.length
+      ? `· ${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"} · fix ${conflicts.length === 1 ? "it" : "them"}, or say why in the commit message or PR description`
+      : "· no conflicts",
+  );
+}
+
+/** Tokens saved by this repo's agent sessions touched in the last 7 days. */
+function savedThisWeek(repo: string, now = Date.now()): number {
+  const since = now - 7 * 24 * 60 * 60 * 1000;
+  let total = 0;
+  for (const id of listSessionIds(repo)) {
+    try {
+      if (statSync(join(sessionDir(repo), `${id}.json`)).mtimeMs < since) continue;
+    } catch {
+      continue;
+    }
+    total += readSession(repo, id).savedTokens ?? 0;
+  }
+  return total;
+}
+
+/** 212345 → `212k`, 1_250_000 → `1.3M`. */
+function shortCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
+
+/**
+ * `trail status`: what was `graft stats` and `graft trail status`, on one
+ * screen. The code map and whether it matches the code, the learnings for
+ * this repo, the workspace, and what the agents saved this week.
+ */
+function statusCommand(name = "status"): Command {
+  return new Command(name)
+    .description("Code map, learnings, workspace and tokens saved, on one screen")
+    .argument(...DIR_ARG)
+    .option("--json", "machine-readable output")
+    .action(async (dirArg: string | undefined, opts: { json?: boolean }) => {
+      const repo = queryRoot(dirArg);
+      const graph = loadGraphCached(contextDirFor(repo, program.opts<GlobalOpts>().dir));
+      const g = graph ? await engineFrom().checkGraph(repo) : null;
+      const fresh = g && !g.missing ? g.ok : null;
+      const kept = keepsNotes(repo);
+      const all = kept ? listNotes(repo) : [];
+      const inRepo = all.filter((n) => n.scope === "repo" && !n.ref).length;
+      const onBranches = all.filter((n) => n.ref).length;
+      const personal = all.filter((n) => n.scope === "personal").length;
+      const cloud = readCloud();
+      const shared = cloud ? inWorkspace(repo, cloud) : false;
+      const { link, rules } = brainStatus(repo);
+      const anchored = link && graph ? rulesForPointers(graph.nodes.map((n) => `${n.path}:${n.span}`), rules, graph) : [];
+      const matching = anchored.filter((a) => !a.stale).length;
+      const saved = savedThisWeek(repo);
+
+      if (opts.json) {
+        console.log(
+          JSON.stringify(
+            {
+              codeMap: graph ? { nodes: graph.meta.nodeCount, inSync: fresh } : null,
+              learnings: kept ? { repo: inRepo, branches: onBranches, personal } : null,
+              workspace: cloud ? { name: cloud.workspace.name, url: cloud.workspace.url, repos: cloud.repos.length, thisRepo: shared } : null,
+              rules: link ? { brainId: link.brainId, cached: rules.length, anchored: anchored.length, matching } : null,
+              week: { savedTokens: saved },
+            },
+            null,
+            2,
+          ),
+        );
+        return;
+      }
+      const fmt = (x: number) => x.toLocaleString("en-US");
+      const row = (k: string, v: string) => console.log(`${k.padEnd(11)} ${v}`);
+      if (!graph) row("code map", `✗ not built · run ${cmd("graft build")}`);
+      else if (fresh === false) row("code map", `⚠ ${fmt(graph.meta.nodeCount)} nodes · behind the code, refreshed on the next query`);
+      else row("code map", `✓ ${fmt(graph.meta.nodeCount)} nodes · in sync with the code`);
+      if (kept) {
+        const parts = [`${inRepo} in ${LEARNINGS_DIR}/`];
+        if (onBranches) parts.push(`${onBranches} on teammates' branches`);
+        if (personal) parts.push(`${personal} personal in ${shownPath(repoPlace(repo).dir)}`);
+        row("learnings", parts.join(" · "));
+      }
+      if (!cloud) row("workspace", "not connected · Claude offers a link once there are learnings to share");
+      else
+        row(
+          "workspace",
+          `${cloud.workspace.name} · ${cloud.repos.length} repo${cloud.repos.length === 1 ? "" : "s"}${shared ? ", this one included" : `, not this one (${cmd("graft workspace add")})`} · ${cloud.workspace.url}`,
+        );
+      if (link)
+        row("rules", `${fmt(rules.length)} cached from Trail` + (graph && anchored.length ? `, ${fmt(matching)} of ${fmt(anchored.length)} anchored still match the code` : ""));
+      row("this week", saved > 0 ? `~${shortCount(saved)} tokens saved` : "nothing saved yet");
+    });
+}
+
+if (TRAIL) {
+  // The old `graft trail …` group, at the top level: `trail push`, `trail
+  // login`. `connect` and `watch` still run, unlisted — connect so the
+  // handoff links Trail already sent keep working.
+  for (const c of [teamCheckCommand(), teamCommand()]) program.addCommand(c.helpGroup(GROUP.memory));
+  for (const c of [workspaceCommand(), loginCommand(), logoutCommand()]) program.addCommand(c.helpGroup(GROUP.cloud));
+  // The brain's rules (`trail push`, `trail pull`) still run, unlisted: a
+  // workspace is how a team shares now.
+  program.addCommand(pushCommand(), { hidden: true });
+  program.addCommand(pullCommand(), { hidden: true });
+  program.addCommand(connectCommand(), { hidden: true });
+  program.addCommand(watchCommand(), { hidden: true });
+  program.addCommand(statusCommand().helpGroup(GROUP.setup));
+
+  // `trail trail push` and the rest, for fingers that learned graft.
+  const habit = program.command("trail", { hidden: true }).description("The old graft trail … commands");
+  for (const c of [connectCommand(), pullCommand(), watchCommand(), pushCommand(), statusCommand(), disconnectCommand()])
+    habit.addCommand(c);
+
+  // Help lists the groups in this order, and the commands within each.
+  const order = ["ask", "grep", "skeleton", "callers", "map", "note", "check", "team", "learn", "skills", "init", "build", "status", "upgrade", "uninstall", "telemetry", "workspace", "login", "logout", "push", "pull", "blast"];
+  const rank = (c: Command) => {
+    const i = order.indexOf(c.name());
+    return i === -1 ? order.length : i;
+  };
+  (program.commands as Command[]).sort((a, b) => rank(a) - rank(b));
+
+  // One line each in the list; `trail <command> --help` keeps the long text.
+  const summaries: Record<string, string> = {
+    ask: "ranked answer, with the code inlined at each file:line",
+    grep: "every occurrence, grouped by enclosing symbol",
+    skeleton: "a file's whole API in ~200 tokens",
+    callers: "who calls it, or what it calls with --direction out",
+    map: "directory clusters, hubs and hotspots",
+    note: "save what this session worked out, as a learning in .trail/",
+    learn: "turn a correction into a takeaway on a skill",
+    skills: "list skills, show one, fold takeaways in, publish to the repo",
+    init: "wire trail into your agents",
+    build: "rebuild the code map · --check fails if it's stale",
+    status: "code map, learnings, workspace and tokens saved",
+    upgrade: "install the latest trail",
+    uninstall: "remove everything trail or graft wrote to this repo",
+    telemetry: "show or turn off the anonymous usage stats",
+    check: "check your diff against everything the team has learned",
+    team: "what the team learned this week, and where work overlaps",
+    workspace: "your workspace's repos, team page and invite link",
+    login: "connect a Trail workspace (Claude offers you the link)",
+    logout: "disconnect this machine from its workspace",
+    blast: "what depends on the lines this diff touched",
+  };
+  for (const c of program.commands) if (summaries[c.name()]) c.summary(summaries[c.name()]!);
+  program.addHelpText("after", "\ntrail <command> --help for flags · every graft command still works");
+} else {
+  // `graft trail …` still works: see legacy-args.ts.
+  const brain = program
+    .command("trail")
+    .description("The Trail attached to this repo: the rules mined from its own history");
+  for (const c of [connectCommand(), pullCommand(), watchCommand(), pushCommand(), brainStatusCommand(), disconnectCommand()])
+    brain.addCommand(c);
+}
 
 program.parseAsync(withLegacyNames(process.argv)).catch((err) => {
   console.error(err instanceof Error ? err.message : err);

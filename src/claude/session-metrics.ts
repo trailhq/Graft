@@ -73,13 +73,15 @@ export function isGraftMcpTool(toolName: string): boolean {
   return GRAFT_MCP_TOOL_NAMES.has(bare);
 }
 
-/** Whether a shell command line invokes the graft CLI (any of its install shapes). */
+/** Whether a shell command line invokes the CLI under either name (any of its install shapes). */
 export function commandInvokesGraft(command: string): boolean {
   const c = command.trim();
-  if (/dist[/\\]cli\.js/.test(c)) return true; // running from a source checkout
-  // `graft …`, `graft-dev …`, `npx [-y] [@nanonets/]graft …`, at the start of the
-  // line or of a &&/;/| segment — not "mygraft" or a path that merely contains it.
-  return /(^|[|&;]\s*)(npx\s+(-y\s+)?(@nanonets\/)?)?graft(-dev)?\b/i.test(c);
+  // running from a source checkout
+  if (/dist[/\\](cli|bin[/\\](trail|graft))\.js/.test(c)) return true;
+  // `graft …`, `graft-dev …`, `npx [-y] [@nanonets/]graft …`, and the same for
+  // `trail` / `@trailhq/trail`, at the start of the line or of a &&/;/| segment —
+  // not "mygraft" or a path that merely contains it.
+  return /(^|[|&;]\s*)(npx\s+(-y\s+)?(@nanonets\/|@trailhq\/)?)?(graft|trail)(-dev)?\b/i.test(c);
 }
 
 /**

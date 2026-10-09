@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readFileSync, chmodSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -10,22 +10,38 @@ import { claudeDistDir } from './paths.js';
 import { mergeJsonKey, serverEntry, type McpWrite } from '../hosts/mcp-config.js';
 import { hasGraftIndex } from '../graph/root.js';
 import type { PlannedWrite } from '../hosts/plan.js';
+import { repoWiredForTrail, type Brand } from '../brand.js';
 
 /**
  * The files `runInit` writes — pure, no writes, so `--dry-run` and the picker
  * can report them up front. All repo-local: the Claude Code layer never writes
  * outside the project.
  */
-export function claudeTargets(dir: string): PlannedWrite[] {
+export function claudeTargets(dir: string, initBrand?: Brand): PlannedWrite[] {
+  return claudeTargetsFor(dir, wiringName(dir, initBrand));
+}
+
+/**
+ * The name the Claude Code wiring goes by in `dir`: trail's where `trail init`
+ * is wiring it now (`initBrand`) or already did, graft's everywhere else.
+ * Otherwise decided by the repo, not the machine, so a teammate on graft
+ * refreshing the wiring writes the same files and never flips them back.
+ */
+export function wiringName(dir: string, initBrand?: Brand): Brand {
+  return initBrand === 'trail' || repoWiredForTrail(dir) ? 'trail' : 'graft';
+}
+
+/** `claudeTargets` under one name. Uninstall walks both, so either set comes out. */
+export function claudeTargetsFor(dir: string, name: Brand): PlannedWrite[] {
   const t = (path: string, what: string, kind: PlannedWrite['kind'] = 'claude'): PlannedWrite =>
     ({ hostId: 'claude', id: 'claude', path, scope: 'repo', kind, what });
   return [
-    t(join(dir, '.claude', 'settings.json'), 'graft statusline + hook blocks'),
-    t(join(dir, '.claude', 'helpers', 'graft-statusline.cjs'), 'statusline shim'),
-    t(join(dir, '.claude', 'helpers', 'graft-hooks.cjs'), 'hooks shim'),
-    t(join(dir, '.claude', 'skills', 'graft', 'SKILL.md'), 'graft skill'),
+    t(join(dir, '.claude', 'settings.json'), `${name} statusline + hook blocks`),
+    t(join(dir, '.claude', 'helpers', `${name}-statusline.cjs`), 'statusline shim'),
+    t(join(dir, '.claude', 'helpers', `${name}-hooks.cjs`), 'hooks shim'),
+    t(join(dir, '.claude', 'skills', name, 'SKILL.md'), `${name} skill`),
     // Tagged 'mcp' so the picker doesn't label Claude Code as having no MCP.
-    t(join(dir, '.mcp.json'), 'mcpServers.graft', 'mcp'),
+    t(join(dir, '.mcp.json'), `mcpServers.${name}`, 'mcp'),
   ];
 }
 
@@ -64,17 +80,18 @@ export interface InitResult {
 
 export function runInit(
   dir: string,
-  opts: { build?: boolean; cliPath?: string; statusline?: boolean; global?: boolean; home?: string } = {},
+  opts: { build?: boolean; cliPath?: string; statusline?: boolean; global?: boolean; home?: string; brand?: Brand } = {},
 ): InitResult {
   // Same list `--dry-run` and the picker report, so the two can't drift apart.
-  const [settings, statusline, hooks, skill, mcpTarget] = claudeTargets(dir).map((t) => t.path);
+  const name = wiringName(dir, opts.brand);
+  const [settings, statusline, hooks, skill, mcpTarget] = claudeTargetsFor(dir, name).map((t) => t.path);
 
   mkdirSync(dirname(statusline), { recursive: true });
 
   const settingsPath = settings;
   let existing: Record<string, any> = {};
   try { existing = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch { /* none/invalid → start fresh */ }
-  const { merged, warnings } = mergeGraftSettings(existing, { statusline: opts.statusline });
+  const { merged, warnings } = mergeGraftSettings(existing, { statusline: opts.statusline, name });
   writeFileSync(settingsPath, `${JSON.stringify(merged, null, 2)}\n`);
 
   const sl = statusline;
@@ -87,12 +104,21 @@ export function runInit(
   // greps source. Overwritten each run (graft owns this file), like the shims above.
   const skillPath = skill;
   mkdirSync(dirname(skillPath), { recursive: true });
-  writeFileSync(skillPath, skillTemplate());
+  writeFileSync(skillPath, skillTemplate(name));
+
+  // A repo moving from graft's names to trail's: the graft-named shims and
+  // skill go, so the agent doesn't load two copies. Their settings entries
+  // were already replaced by the merge above.
+  if (name === 'trail') {
+    const [, oldSl, oldHk, oldSkill] = claudeTargetsFor(dir, 'graft').map((t) => t.path);
+    for (const f of [oldSl, oldHk]) rmSync(f, { force: true });
+    rmSync(dirname(oldSkill), { recursive: true, force: true });
+  }
 
   // Register the graft MCP server in the project's .mcp.json so Claude Code
   // exposes graft_find_code/graft_trace_calls/etc. as tools — the same keyed merge the
   // other hosts use (existing servers preserved; unparseable files skipped).
-  const mcp = mergeJsonKey('claude', mcpTarget, 'mcpServers', serverEntry());
+  const mcp = mergeJsonKey('claude', mcpTarget, 'mcpServers', serverEntry({ brand: name }), name, name === 'trail' ? ['graft'] : []);
 
   // The same wiring again, one level up in `~/.claude`, because everything above
   // this line can be erased by a `.gitignore` and lost to `git worktree add`. See

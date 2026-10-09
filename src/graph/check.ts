@@ -27,6 +27,7 @@ import { listSourceFiles } from "./build.js";
 import { readGraph, wiringPath } from "./write.js";
 import { readFingerprint } from "./fingerprint.js";
 import { readSourceFile } from "../util/source.js";
+import { cmd } from "../brand.js";
 
 export interface GraphCheckResult {
   ok: boolean;
@@ -166,7 +167,7 @@ export async function checkGraph(
 /** Render a graph-check result as a human-readable report. */
 export function formatGraphCheckReport(r: GraphCheckResult): string {
   if (r.missing) {
-    return "graph check: NO GRAPH\n\nNo graft/.graph/wiring.json found. Run `graft build` first.";
+    return `graph check: NO GRAPH\n\nNo graft/.graph/wiring.json found. Run \`${cmd("graft build")}\` first.`;
   }
   if (r.ok) {
     // A share, not a bare count: "1203 not yet summarized" reads the same whether
@@ -195,8 +196,8 @@ export function formatGraphCheckReport(r: GraphCheckResult): string {
     for (const id of r.stale) lines.push(`  ! ${id}`);
   }
   lines.push("");
-  if (structural) lines.push("Run `graft build` to rebuild the structure, then commit graft/.");
-  if (r.stale.length) lines.push("Run `graft build --deep` to refresh stale summaries.");
+  if (structural) lines.push(`Run \`${cmd("graft build")}\` to rebuild the structure, then commit graft/.`);
+  if (r.stale.length) lines.push(`Run \`${cmd("graft build --deep")}\` to refresh stale summaries.`);
   return lines.join("\n");
 }
 
@@ -214,7 +215,7 @@ function formatPendingNote(r: GraphCheckResult, pct: number): string {
   // meaning replies, so name the nodes and point at the last build's errors.
   return (
     `meaning tier ${pct}% complete — ${r.pending} of ${r.nodes} node(s) pending${named}. ` +
-    `Run \`graft build --deep\` to summarize them; if a deep build already left these pending, ` +
+    `Run \`${cmd("graft build --deep")}\` to summarize them; if a deep build already left these pending, ` +
     `that meaning pass failed — see that build's errors (re-running alone will not clear them)`
   );
 }

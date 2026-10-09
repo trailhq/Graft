@@ -141,6 +141,23 @@ test("agent signup: the link carries no port, because nothing is listening", () 
   assert.equal(url.searchParams.get("graft_state"), "st");
 });
 
+test("trail links go to the pages host when it differs from the API, and say they're trail's", () => {
+  const prev = { web: process.env.TRAIL_WEB_URL, api: process.env.GRAFT_BRAIN_URL, brand: process.env.TRAIL_INVOKED_AS };
+  process.env.TRAIL_WEB_URL = "http://localhost:5176/";
+  process.env.GRAFT_BRAIN_URL = "http://localhost:8095";
+  process.env.TRAIL_INVOKED_AS = "trail";
+  try {
+    const url = new URL(signupUrl({ repo: "acme/app", state: "st" }));
+    assert.equal(url.origin, "http://localhost:5176");
+    assert.equal(url.searchParams.get("graft_mode"), "trail");
+  } finally {
+    for (const [k, v] of [["TRAIL_WEB_URL", prev.web], ["GRAFT_BRAIN_URL", prev.api], ["TRAIL_INVOKED_AS", prev.brand]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
 test("agent signup: a fresh state is long enough for Trail to accept", () => {
   // Trail refuses anything under 32 characters of base64url.
   assert.match(newSignupState(), /^[A-Za-z0-9_-]{32,128}$/);

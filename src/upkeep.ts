@@ -31,7 +31,8 @@ import { homedir } from 'node:os';
 import { readJson, writeJsonAtomic, cacheDir } from './util/state.js';
 import { HOSTS } from './hosts/registry.js';
 import { START } from './hosts/sections.js';
-import { getNpmViewVersion, readCurrentVersion } from './cli-meta.js';
+import { getNpmViewVersion, readCurrentVersion, readPackageName } from './cli-meta.js';
+import { brand } from './brand.js';
 import { cacheIsStale, markRulesChecked, readLink, readRulesCache } from './brain/link.js';
 import { graftCliPath } from './claude/paths.js';
 
@@ -183,7 +184,7 @@ export function maybeRefreshBrainRules(repo: string, now = Date.now()): boolean 
  * "you're up to date". */
 export function formatUpdateNudge(current: string, latest: string | null | undefined): string | null {
   if (!isNewer(latest, current)) return null;
-  return `⬆ graft ${current} → ${latest} available: run \`npm i -g @nanonets/graft@latest\` (restart your agent after).`;
+  return `⬆ ${brand()} ${current} → ${latest} available: run \`npm i -g ${readPackageName(import.meta.url)}@latest\` (restart your agent after).`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -264,7 +265,7 @@ export function writeStamp(
  */
 export function wiredHostIds(repo: string): string[] {
   const ids: string[] = [];
-  if (existsSync(join(repo, '.claude', 'helpers', 'graft-hooks.cjs'))) ids.push('claude');
+  if (['graft', 'trail'].some((n) => existsSync(join(repo, '.claude', 'helpers', `${n}-hooks.cjs`)))) ids.push('claude');
   for (const host of HOSTS) {
     const path = join(repo, host.relPath);
     if (!existsSync(path)) continue;

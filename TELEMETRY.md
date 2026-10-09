@@ -34,6 +34,7 @@ Every event carries only these common properties:
 | `node_major` | `20` | Major version only |
 | `ci` | `false` | Always false — CI never sends (see below) |
 | `agent_host` | `claude-code` / `cursor` / `mcp` / `cli` | Which surface graft ran under |
+| `cli_name` | `trail` / `graft` | Which of the two names started the process (graft is trail's old name) |
 | `repo_id` | a random UUID | See "How it stays anonymous" |
 
 The events:
@@ -45,12 +46,17 @@ The events:
 | `init_completed` | `agents` (the ids you selected, sorted), `consent` | `graft init` finishes |
 | `build_completed` | `files_bucket`, `langs`, `mode` (`fast`/`deep`), `duration_bucket`, `incremental` | A build succeeds |
 | `build_failed` | `stage`, `code` — both fixed enums | A build throws |
-| `query` | `command`, `surface` (`cli`/`mcp`/`hook`), `hit` (`ask` only) | Any query command |
-| `brain_signup_opened` | `mode` (`terminal`/`agent`) | `graft trail push` on a repo with no brain opens your browser to make one |
-| `brain_signup_settled` | `outcome` (`linked`/`timed_out`/`bad_callback`/`stopped`, and for an agent-run push `agent_link_opened`/`still_waiting`/`expired`/`unsupported`), `mode` (`terminal`/`agent`), `duration_bucket` | That handoff ends, one way or the other — for an agent-run push, each of its runs |
+| `query` | `command`, `surface` (`cli`/`mcp`/`hook`), `hit` (`ask` only), `notes` (`0`/`1`/`2`, how many session notes `ask` showed; only in a repo that keeps notes) | Any query command |
+| `brain_signup_opened` | `mode` (`terminal`/`agent`/`nudge`), and for a nudge `command` (`ask`/`note`/`check`) and `wording` (`share`/`learned`) | `graft trail push` on a repo with no brain opens your browser to make one, or a trail command hands the agent a sign-in link to pass on (at most once a session) |
+| `brain_signup_settled` | `outcome` (`linked`/`timed_out`/`bad_callback`/`stopped`, and for an agent-run push `agent_link_opened`/`still_waiting`/`expired`/`unsupported`), `mode` (`terminal`/`agent`/`nudge`), `duration_bucket` | That handoff ends, one way or the other — for an agent-run push, each of its runs; for a nudge, each background wait for the sign-in (`linked`/`timed_out`/`expired`/`unsupported`) |
 | `trail_pulled` | `outcome` (`written`/`already_present`/`nothing_accepted`/`skipped`/`error`/`dry_run`), `kinds` (which kinds of context file were written: `claude_md`, `folder_claude_md`, `agents_md`, `cursor_rule`, `skill`), `files_bucket`, `changes_bucket`, `skipped_bucket`, `suggested_bucket` (every change Trail has suggested for the wired agents' files, whatever became of it) | `graft trail pull` (or `graft claude-md pull`) finishes |
 | `trail_watch_exit` | `reason` (`suggestions`/`accepted`/`timeout`/`refused`/`no_trail`), `suggested_bucket`, `accepted_bucket`, `duration_bucket` (how long it waited) | `graft trail watch` ends |
 | `trail_autopush` | `outcome` (`started`/`skipped`), `reason` when skipped (`disabled`/`no_head`/`head_unchanged`/`throttled`/`spawn_failed`) | A Claude Code or Codex session starts in a repo with a trail attached, and the hook decides whether to refresh it with a background `graft trail push`. Repos without a trail send nothing |
+| `note_saved` | `has_cost` (`true`/`false`), `touches_bucket` (how many files the learning is about, bucketed), `scope` (`repo`/`personal`) | `trail note` saves a learning, in the repo's `.trail/` or on this machine. The title, the text and the paths are never sent |
+| `learning_reused` | `teammate` (`true`/`false`), `saved_tokens_bucket` | `trail ask` shows learnings from earlier sessions. Which ones, and their text, are never sent |
+| `repo_seen` | `trail_committed` (`true`/`false`), `learnings_bucket`, `workspace` (`true`/`false`) | Once a day per repo, when a Claude Code session starts in a repo trail runs in. The repo's name and paths are never sent; it's identified only by the random `repo_id` every event carries |
+| `takeaway_saved` | `new_skill` (`true`/`false`) | `trail learn` saves a correction as a takeaway on a skill, on this machine (`~/.trail/`). Its text is never sent |
+| `skills_folded` | `takeaways_bucket` (how many takeaways were folded, bucketed) | `trail skills fold` writes takeaways into a skill's SKILL.md |
 | `session_summary` | `graft_reads_bucket`, `source_reads_bucket`, `saved_tokens_bucket`, `graft_turns_bucket`, `reported_turns_bucket` | Once, after an agent session ends |
 
 Two rules govern every value above, and both are enforced in code rather than by
@@ -72,7 +78,7 @@ An example event, in full:
   "timestamp": "2026-08-21T09:14:22.417Z",
   "properties": {
     "app_version": "0.12.0", "os": "darwin", "arch": "arm64",
-    "node_major": "20", "ci": "false", "agent_host": "claude-code",
+    "node_major": "20", "ci": "false", "agent_host": "claude-code", "cli_name": "trail",
     "repo_id": "6f2c1e90-...", "distinct_id": "b1f3a9c2-...",
     "files_bucket": "200-999", "langs": "go,ts", "mode": "deep",
     "duration_bucket": "30s-2m", "incremental": "true",

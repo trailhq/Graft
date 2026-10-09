@@ -13,6 +13,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { PlannedWrite } from './plan.js';
 import { readJsonObject, type ConfigWrite } from './config-write.js';
+import { trailOnPath } from '../brand.js';
 
 /** MCP registration reports the same write-result record every installer does. */
 export type McpWrite = ConfigWrite;
@@ -45,6 +46,10 @@ export interface McpTarget extends PlannedWrite {
  */
 const NPX_LAUNCH = { command: 'npx', args: ['-y', '@nanonets/graft', 'mcp'] };
 const BIN_LAUNCH = { command: 'graft', args: ['mcp'] };
+// The same server under trail's name, for a repo that uses trail: its tools are
+// `trail_*` (and it still answers `graft_*`).
+const TRAIL_NPX_LAUNCH = { command: 'npx', args: ['-y', '@trailhq/trail', 'mcp'] };
+const TRAIL_BIN_LAUNCH = { command: 'trail', args: ['mcp'] };
 
 function graftOnPath(): boolean {
   const r = spawnSync('graft', ['--version'], { stdio: 'ignore', timeout: 5000 });
@@ -59,9 +64,11 @@ function graftOnPath(): boolean {
  * don't depend on whether the machine running them happens to have graft installed.
  * `opts.onPath` is the same override for direct unit tests of both branches.
  */
-export function serverEntry(opts: { onPath?: boolean } = {}): { command: string; args: string[] } {
+export function serverEntry(opts: { onPath?: boolean; brand?: 'graft' | 'trail' } = {}): { command: string; args: string[] } {
+  const trail = opts.brand === 'trail';
   const forced = process.env.GRAFT_MCP_NPX;
-  if (forced !== undefined && forced !== '' && forced !== '0' && forced !== 'false') return NPX_LAUNCH;
+  if (forced !== undefined && forced !== '' && forced !== '0' && forced !== 'false') return trail ? TRAIL_NPX_LAUNCH : NPX_LAUNCH;
+  if (trail) return (opts.onPath ?? trailOnPath()) ? TRAIL_BIN_LAUNCH : TRAIL_NPX_LAUNCH;
   return (opts.onPath ?? graftOnPath()) ? BIN_LAUNCH : NPX_LAUNCH;
 }
 
@@ -75,7 +82,12 @@ function dirExists(p: string): boolean {
   try { return statSync(p).isDirectory(); } catch { return false; }
 }
 
-export function mergeJsonKey(id: string, path: string, topKey: string, entry: object): McpWrite {
+/**
+ * `key` is the server's name in the file (`graft`, or `trail` in a repo that
+ * uses trail); `drop` names entries this write replaces, so a repo moving to
+ * trail doesn't start the same server twice.
+ */
+export function mergeJsonKey(id: string, path: string, topKey: string, entry: object, key = 'graft', drop: string[] = []): McpWrite {
   const loaded = readJsonObject(path);
   if (loaded === 'unparseable') return { id, path, action: 'skipped-unparseable' };
   const { root, existed } = loaded;
@@ -83,9 +95,11 @@ export function mergeJsonKey(id: string, path: string, topKey: string, entry: ob
   if (typeof bucket !== 'object' || bucket === null || Array.isArray(bucket)) {
     return { id, path, action: 'skipped-unparseable' };
   }
-  if (JSON.stringify(bucket.graft) === JSON.stringify(entry)) return { id, path, action: 'unchanged' };
+  const dropping = drop.filter((k) => k in bucket);
+  if (JSON.stringify(bucket[key]) === JSON.stringify(entry) && dropping.length === 0) return { id, path, action: 'unchanged' };
   const action = existed ? 'updated' : 'created';
-  bucket.graft = entry;
+  for (const k of dropping) delete bucket[k];
+  bucket[key] = entry;
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`);
   return { id, path, action };
