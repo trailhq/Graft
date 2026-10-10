@@ -6,7 +6,8 @@
  * a server that is missing, slow, or errors degrades to "no enrichment", never a
  * crash — the AST graph stands on its own.
  */
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { readFileSync } from "node:fs";
 import {
@@ -28,20 +29,38 @@ export interface CallHierarchyItem {
 
 const uriOf = (abs: string): string => pathToFileURL(abs).toString();
 
+const systemDir = (): string => win32.join(process.env.SystemRoot || "C:\\Windows", "System32");
+
+export interface SpawnSpec {
+  command: string;
+  args: string[];
+  /** extra environment for the child */
+  env?: Record<string, string>;
+  windowsVerbatimArguments?: boolean;
+  /** Windows: the server is a child of cmd.exe, so stopping it means stopping the tree */
+  killTree?: boolean;
+}
+
 /** How to spawn a server. On Windows, Node refuses to spawn a `.cmd`/`.bat` (npm's
  * shims, e.g. typescript-language-server.cmd) without a shell (EINVAL since the
- * CVE-2024-27980 fix), so those go through cmd.exe as one quoted command line —
- * quoted because the path often has spaces (C:\Users\First Last\...). Passed as a
- * single string, not command + args, which `shell: true` would join unquoted. */
-export function spawnSpec(
-  command: string,
-  args: string[],
-  platform: NodeJS.Platform = process.platform,
-): { command: string; args: string[]; shell: boolean } {
+ * CVE-2024-27980 fix), so those run through cmd.exe, hardened:
+ * - the absolute cmd.exe (a bare name would be looked up in the cwd, the repo);
+ * - the shim path goes in an environment variable, so cmd.exe expands it once and
+ *   a literal `%NAME%` or `&` in the path stays as is; `/v:off` keeps `!` literal;
+ * - NoDefaultCurrentDirectoryInExePath: npm's shim runs a bare `node` when there's
+ *   no node.exe beside it, and cmd.exe would otherwise try the cwd (the repo) first.
+ * The args are graft's own constants (`--stdio`), so they're passed as they are. */
+export function spawnSpec(command: string, args: string[], platform: NodeJS.Platform = process.platform): SpawnSpec {
   if (platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
-    return { command: [`"${command}"`, ...args].join(" "), args: [], shell: true };
+    return {
+      command: process.env.ComSpec || win32.join(systemDir(), "cmd.exe"),
+      args: ["/d", "/v:off", "/s", "/c", `""%GRAFT_LSP_SHIM%"${args.map((a) => " " + a).join("")}"`],
+      env: { GRAFT_LSP_SHIM: command, NoDefaultCurrentDirectoryInExePath: "1" },
+      windowsVerbatimArguments: true,
+      killTree: true,
+    };
   }
-  return { command, args, shell: false };
+  return { command, args };
 }
 
 export class LspClient {
@@ -50,6 +69,7 @@ export class LspClient {
   private opened = new Set<string>();
   private ready = false;
   private spawnFailed = false;
+  private killTree = false;
 
   constructor(
     command: string,
@@ -59,7 +79,13 @@ export class LspClient {
     private readonly callTimeoutMs = 15000,
   ) {
     const s = spawnSpec(command, args);
-    this.proc = spawn(s.command, s.args, { cwd: root, stdio: ["pipe", "pipe", "pipe"], shell: s.shell });
+    this.killTree = !!s.killTree;
+    this.proc = spawn(s.command, s.args, {
+      cwd: root,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: s.env ? { ...process.env, ...s.env } : process.env,
+      windowsVerbatimArguments: s.windowsVerbatimArguments,
+    });
     // ENOENT (bad path) OR an immediate exit (e.g. a rustup shim whose component
     // isn't installed) must fail fast, not hang a request for the full timeout.
     this.proc.on("error", () => { this.spawnFailed = true; });
@@ -189,6 +215,14 @@ export class LspClient {
     this.ready = false;
     try { this.conn.dispose(); } catch { /* ignore */ }
     try { this.proc.stdin.destroy(); } catch { /* ignore */ }
+    // Launched through cmd.exe (Windows .cmd shim): killing cmd.exe alone would leave the
+    // server running and holding our pipes open, so graft couldn't exit.
+    if (this.killTree && this.proc.pid !== undefined && this.proc.exitCode === null) {
+      try {
+        execFileSync(win32.join(systemDir(), "taskkill.exe"), ["/pid", String(this.proc.pid), "/T", "/F"], { stdio: "ignore", timeout: 10000 });
+      } catch { /* already gone */ }
+    }
     try { this.proc.kill("SIGKILL"); } catch { /* ignore */ }
+    try { this.proc.stdout.destroy(); this.proc.stderr.destroy(); } catch { /* ignore */ }
   }
 }
