@@ -1,21 +1,34 @@
 /**
  * `graft build --lsp` on Windows (#385): finding a server on PATH without `where.exe`
  * (cmd.exe has no `command -v`, and `where` also searches the current folder), skipping
- * npm's extensionless sh script, and launching npm's `.cmd` shims, which Node refuses to
- * start without a shell — without letting the repo being mapped supply programs, without
- * cmd.exe rewriting the path, and without leaving the server running on dispose.
+ * npm's extensionless sh script, and starting npm's `.cmd` shims, which Node refuses to
+ * spawn without a shell: their JavaScript entry point runs with Node directly, so the
+ * repo being mapped can't supply `node` and odd install paths don't break the launch.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findOnWindowsPath } from "../src/graph/lsp/registry.js";
-import { spawnSpec, LspClient } from "../src/graph/lsp/client.js";
+import { npmShimEntry, spawnSpec, LspClient } from "../src/graph/lsp/client.js";
 
 const onWindows = { skip: process.platform !== "win32" };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Windows keeps a just-killed process's hold on its cwd for a moment: retry the cleanup. */
+async function removeDir(dir: string): Promise<void> {
+  for (let i = 0; ; i++) {
+    try { rmSync(dir, { recursive: true, force: true }); return; } catch (e) { if (i >= 40) throw e; await sleep(100); }
+  }
+}
+
+/** What npm (cmd-shim) writes for a bin: the current format. */
+const npmShim = (entry: string) => [
+  "@ECHO off", "GOTO start", ":find_dp0", "SET dp0=%~dp0", "EXIT /b", ":start", "SETLOCAL", "CALL :find_dp0", "",
+  'IF EXIST "%dp0%\\node.exe" (', '  SET "_prog=%dp0%\\node.exe"', ") ELSE (", '  SET "_prog=node"', "  SET PATHEXT=%PATHEXT:;.JS;=;%", ")", "",
+  `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\${entry}" %*`, "",
+].join("\r\n");
 
 test("findOnWindowsPath: npm's .cmd shim is found, its extensionless sh script is not", () => {
   const files = new Set(["C:\\npm\\typescript-language-server", "C:\\npm\\typescript-language-server.cmd"]);
@@ -38,98 +51,92 @@ test("findOnWindowsPath: relative and empty PATH entries are never searched (no 
   assert.equal(findOnWindowsPath("gopls", "", has), null);
 });
 
-test("spawnSpec: a Windows .cmd runs through the absolute cmd.exe with the path in an env var", () => {
-  const cmd = "C:\\Users\\A B\\AppData\\Roaming\\npm\\typescript-language-server.cmd";
-  const s = spawnSpec(cmd, ["--stdio"], "win32");
-  assert.match(s.command, /^[A-Za-z]:\\.*cmd\.exe$/i, "an absolute cmd.exe");
-  assert.deepEqual(s.args, ["/d", "/v:off", "/s", "/c", '""%GRAFT_LSP_SHIM%" --stdio"']);
-  assert.deepEqual(s.env, { GRAFT_LSP_SHIM: cmd, NoDefaultCurrentDirectoryInExePath: "1" });
-  assert.equal(s.windowsVerbatimArguments, true);
-  assert.equal(s.killTree, true);
+test("npmShimEntry: the entry point of npm's shim, current and older formats", () => {
+  const shim = "C:\\Users\\A B\\AppData\\Roaming\\npm\\typescript-language-server.cmd";
+  assert.equal(npmShimEntry(shim, npmShim("node_modules\\typescript-language-server\\lib\\cli.mjs")),
+    "C:\\Users\\A B\\AppData\\Roaming\\npm\\node_modules\\typescript-language-server\\lib\\cli.mjs");
+  assert.equal(npmShimEntry("C:\\p\\node_modules\\.bin\\tsx.cmd", npmShim("..\\tsx\\dist\\cli.mjs")), "C:\\p\\node_modules\\tsx\\dist\\cli.mjs");
+  const older = '@IF EXIST "%~dp0\\node.exe" (\r\n  "%~dp0\\node.exe"  "%~dp0\\node_modules\\pyright\\langserver.index.js" %*\r\n) ELSE (\r\n  node  "%~dp0\\node_modules\\pyright\\langserver.index.js" %*\r\n)\r\n';
+  assert.equal(npmShimEntry("C:\\npm\\pyright-langserver.cmd", older), "C:\\npm\\node_modules\\pyright\\langserver.index.js");
 });
 
-test("spawnSpec: everything else is spawned directly, unchanged", () => {
-  assert.deepEqual(spawnSpec("C:\\mingw64\\bin\\clangd.exe", ["--background-index"], "win32"),
-    { command: "C:\\mingw64\\bin\\clangd.exe", args: ["--background-index"] });
-  assert.deepEqual(spawnSpec("/usr/local/bin/typescript-language-server", ["--stdio"], "darwin"),
-    { command: "/usr/local/bin/typescript-language-server", args: ["--stdio"] });
+test("npmShimEntry: not an npm shim → null", () => {
+  assert.equal(npmShimEntry("C:\\x\\run.cmd", "@echo off\r\nC:\\tools\\server.exe %*\r\n"), null);
+  assert.equal(npmShimEntry("C:\\x\\run.cmd", ""), null);
 });
 
-/** The environment without NoDefaultCurrentDirectoryInExePath, which some shells (and CI
- * agents) already set; the tests must see what spawnSpec itself adds. */
-function cleanEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) if (k.toLowerCase() === "nodefaultcurrentdirectoryinexepath") delete env[k];
-  return env;
+test("spawnSpec: an npm shim runs its entry point with Node directly, preferring the node.exe beside it", () => {
+  const shim = "C:\\npm\\typescript-language-server.cmd";
+  const read = () => npmShim("node_modules\\typescript-language-server\\lib\\cli.mjs");
+  const entry = "C:\\npm\\node_modules\\typescript-language-server\\lib\\cli.mjs";
+  assert.deepEqual(spawnSpec(shim, ["--stdio"], "win32", read, () => false), { command: process.execPath, args: [entry, "--stdio"] });
+  assert.deepEqual(spawnSpec(shim, ["--stdio"], "win32", read, (p) => p === "C:\\npm\\node.exe"), { command: "C:\\npm\\node.exe", args: [entry, "--stdio"] });
+});
+
+test("spawnSpec: everything else is spawned exactly as before", () => {
+  const no = () => { throw new Error("must not read"); };
+  assert.deepEqual(spawnSpec("C:\\mingw64\\bin\\clangd.exe", ["--background-index"], "win32", no), { command: "C:\\mingw64\\bin\\clangd.exe", args: ["--background-index"] });
+  assert.deepEqual(spawnSpec("C:\\x\\run.cmd", [], "win32", () => "@echo off\r\nserver.exe\r\n"), { command: "C:\\x\\run.cmd", args: [] }, "a non-npm .cmd");
+  assert.deepEqual(spawnSpec("C:\\x\\gone.cmd", [], "win32", () => { throw new Error("ENOENT"); }), { command: "C:\\x\\gone.cmd", args: [] }, "unreadable");
+  assert.deepEqual(spawnSpec("/usr/local/bin/typescript-language-server", ["--stdio"], "darwin", no), { command: "/usr/local/bin/typescript-language-server", args: ["--stdio"] });
+});
+
+/** A fake npm install of `bin` under `prefix`: the real shim format, running `script`. */
+function fakeNpmBin(prefix: string, bin: string, script: string): string {
+  const pkg = join(prefix, "node_modules", bin);
+  mkdirSync(pkg, { recursive: true });
+  writeFileSync(join(pkg, "cli.js"), script);
+  const shim = join(prefix, `${bin}.cmd`);
+  writeFileSync(shim, npmShim(`node_modules\\${bin}\\cli.js`));
+  return shim;
 }
 
-/** Runs a spec (or, with `bare`, the same cmd.exe line minus spawnSpec's env) to completion
- * in `cwd`; resolves its output. */
-function run(command: string, args: string[], cwd: string, bare = false): Promise<string> {
-  const s = spawnSpec(command, args);
-  return new Promise((resolve, reject) => {
-    const env = bare ? { ...cleanEnv(), GRAFT_LSP_SHIM: command } : { ...cleanEnv(), ...s.env };
-    const p = spawn(s.command, s.args, { cwd, stdio: ["ignore", "pipe", "pipe"], env, windowsVerbatimArguments: s.windowsVerbatimArguments });
-    let out = "";
-    p.stdout.on("data", (d) => { out += d; });
-    p.stderr.on("data", (d) => { out += d; });
-    p.on("error", reject);
-    p.on("close", () => resolve(out));
-  });
-}
-
-test("Windows: a .cmd in a folder with spaces, %, & and ! in its name starts and gets its args", onWindows, async () => {
+test("Windows: an npm shim under a prefix with & % ^ ! starts, gets its args, and the repo can't supply node", onWindows, async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft lsp "));
   try {
-    const odd = join(dir, "100% & %USERNAME% !x");
-    mkdirSync(odd);
-    const cmd = join(odd, "fake-server.cmd");
-    writeFileSync(cmd, "@echo off\r\necho started %*\r\n");
-    assert.equal((await run(cmd, ["--stdio"], dir)).trim(), "started --stdio");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("Windows: a program planted in the repo folder isn't run in place of a bare command", onWindows, async () => {
-  // npm's shim runs a bare `node` when there's no node.exe beside it; cmd.exe would look in
-  // the cwd (the repo being mapped) first. Stand-in: the shim calls a bare `graftprobe`,
-  // which exists only in the cwd.
-  const dir = mkdtempSync(join(tmpdir(), "graft lsp "));
-  try {
+    const prefix = join(dir, "npm & 100% ^ !x");
+    const shim = fakeNpmBin(prefix, "fake-server", 'console.log("started " + process.argv.slice(2).join(" "))');
     const repo = join(dir, "repo");
-    const bin = join(dir, "bin");
     mkdirSync(repo);
-    mkdirSync(bin);
-    writeFileSync(join(repo, "graftprobe.cmd"), "@echo off\r\necho HIJACKED\r\n");
-    const shim = join(bin, "fake-server.cmd");
-    writeFileSync(shim, "@echo off\r\ngraftprobe\r\necho done\r\n");
-    assert.ok((await run(shim, [], repo, true)).includes("HIJACKED"), "control: without the setting, cmd.exe does use the cwd");
-    const out = await run(shim, [], repo);
-    assert.ok(!out.includes("HIJACKED"), `the repo's graftprobe.cmd ran: ${out}`);
-    assert.ok(out.includes("done"));
+    // A planted `node`: a .cmd for cmd.exe's lookup, and a node.exe (any harmless program;
+    // it just mustn't be what runs) for a bare spawn("node").
+    writeFileSync(join(repo, "node.cmd"), "@echo off\r\necho HIJACKED\r\n");
+    copyFileSync(join(process.env.SystemRoot || "C:\\Windows", "System32", "whoami.exe"), join(repo, "node.exe"));
+    const s = spawnSpec(shim, ["--stdio"]);
+    const env = { ...process.env, PATH: `.;${process.env.PATH}` }; // even with "." on PATH
+    const out = await new Promise<string>((resolve, reject) => {
+      const p = spawn(s.command, s.args, { cwd: repo, env, stdio: ["ignore", "pipe", "pipe"] });
+      let text = "";
+      p.stdout.on("data", (d) => { text += d; });
+      p.stderr.on("data", (d) => { text += d; });
+      p.on("error", reject);
+      p.on("close", () => resolve(text));
+    });
+    assert.equal(out.trim(), "started --stdio");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    await removeDir(dir);
   }
 });
 
-test("Windows: dispose stops a .cmd-launched server even when it ignores stdin closing", onWindows, async () => {
+test("Windows: dispose stops an npm-shim server that ignores stdin closing", onWindows, async () => {
   const dir = mkdtempSync(join(tmpdir(), "graft lsp "));
   try {
     const pidFile = join(dir, "server.pid");
-    const server = join(dir, "server.js");
-    writeFileSync(server, `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1e9);`);
-    const shim = join(dir, "stubborn-server.cmd");
-    writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${server}"\r\n`);
+    const shim = fakeNpmBin(join(dir, "npm"), "stubborn-server",
+      `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1e9);`);
     const client = new LspClient(shim, [], dir, "javascript");
-    for (let i = 0; i < 100 && !existsSync(pidFile); i++) await sleep(50);
-    const pid = Number(readFileSync(pidFile, "utf8"));
-    const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
-    assert.ok(alive(), "the server started");
-    await client.dispose();
-    for (let i = 0; i < 60 && alive(); i++) await sleep(50);
-    assert.equal(alive(), false, "the server behind cmd.exe was stopped");
+    let pid = 0;
+    try {
+      for (let i = 0; i < 100 && !pid; i++) { await sleep(50); if (existsSync(pidFile)) pid = Number(readFileSync(pidFile, "utf8")); }
+      const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+      assert.ok(pid && alive(), "the server started");
+      await client.dispose();
+      for (let i = 0; i < 60 && alive(); i++) await sleep(50);
+      assert.equal(alive(), false, "the server was stopped");
+    } finally {
+      await client.dispose();
+    }
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    await removeDir(dir);
   }
 });

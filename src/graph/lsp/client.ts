@@ -6,10 +6,10 @@
  * a server that is missing, slow, or errors degrades to "no enrichment", never a
  * crash — the AST graph stands on its own.
  */
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { win32 } from "node:path";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { win32 } from "node:path";
 import {
   createMessageConnection,
   StreamMessageReader,
@@ -29,36 +29,36 @@ export interface CallHierarchyItem {
 
 const uriOf = (abs: string): string => pathToFileURL(abs).toString();
 
-const systemDir = (): string => win32.join(process.env.SystemRoot || "C:\\Windows", "System32");
-
-export interface SpawnSpec {
-  command: string;
-  args: string[];
-  /** extra environment for the child */
-  env?: Record<string, string>;
-  windowsVerbatimArguments?: boolean;
-  /** Windows: the server is a child of cmd.exe, so stopping it means stopping the tree */
-  killTree?: boolean;
+/** The JavaScript entry point an npm Windows shim (`<bin>.cmd`) runs: its last line is
+ * `"%_prog%" "%dp0%\<entry>.js" %*` (older npm: `"%~dp0\<entry>.js"`). Null for anything
+ * else. */
+export function npmShimEntry(shimPath: string, shimText: string): string | null {
+  const m = /"%(?:dp0%|~dp0)\\([^"]+\.[cm]?js)"\s+%\*/i.exec(shimText);
+  return m ? win32.join(win32.dirname(shimPath), m[1]) : null;
 }
 
-/** How to spawn a server. On Windows, Node refuses to spawn a `.cmd`/`.bat` (npm's
- * shims, e.g. typescript-language-server.cmd) without a shell (EINVAL since the
- * CVE-2024-27980 fix), so those run through cmd.exe, hardened:
- * - the absolute cmd.exe (a bare name would be looked up in the cwd, the repo);
- * - the shim path goes in an environment variable, so cmd.exe expands it once and
- *   a literal `%NAME%` or `&` in the path stays as is; `/v:off` keeps `!` literal;
- * - NoDefaultCurrentDirectoryInExePath: npm's shim runs a bare `node` when there's
- *   no node.exe beside it, and cmd.exe would otherwise try the cwd (the repo) first.
- * The args are graft's own constants (`--stdio`), so they're passed as they are. */
-export function spawnSpec(command: string, args: string[], platform: NodeJS.Platform = process.platform): SpawnSpec {
-  if (platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
-    return {
-      command: process.env.ComSpec || win32.join(systemDir(), "cmd.exe"),
-      args: ["/d", "/v:off", "/s", "/c", `""%GRAFT_LSP_SHIM%"${args.map((a) => " " + a).join("")}"`],
-      env: { GRAFT_LSP_SHIM: command, NoDefaultCurrentDirectoryInExePath: "1" },
-      windowsVerbatimArguments: true,
-      killTree: true,
-    };
+/** How to spawn a server. npm-installed servers (typescript-language-server,
+ * pyright-langserver) are `.cmd` shims on Windows, which Node refuses to spawn without a
+ * shell (EINVAL since the CVE-2024-27980 fix). Going through cmd.exe would let the repo
+ * being mapped supply the `node` the shim runs (it searches the cwd and any relative PATH
+ * entry) and breaks on `&`/`%`/`^` in the install path, so instead run the shim's entry
+ * point with Node directly: the node.exe beside the shim, as the shim itself prefers, else
+ * the Node running graft. Any other `.cmd`/`.bat` is spawned as before (and fails cleanly:
+ * no enrichment). */
+export function spawnSpec(
+  command: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  readText: (p: string) => string = (p) => readFileSync(p, "utf8"),
+  exists: (p: string) => boolean = existsSync,
+): { command: string; args: string[] } {
+  if (platform === "win32" && /\.cmd$/i.test(command)) {
+    let entry: string | null = null;
+    try { entry = npmShimEntry(command, readText(command)); } catch { entry = null; }
+    if (entry) {
+      const beside = win32.join(win32.dirname(command), "node.exe");
+      return { command: exists(beside) ? beside : process.execPath, args: [entry, ...args] };
+    }
   }
   return { command, args };
 }
@@ -69,7 +69,6 @@ export class LspClient {
   private opened = new Set<string>();
   private ready = false;
   private spawnFailed = false;
-  private killTree = false;
 
   constructor(
     command: string,
@@ -79,13 +78,7 @@ export class LspClient {
     private readonly callTimeoutMs = 15000,
   ) {
     const s = spawnSpec(command, args);
-    this.killTree = !!s.killTree;
-    this.proc = spawn(s.command, s.args, {
-      cwd: root,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: s.env ? { ...process.env, ...s.env } : process.env,
-      windowsVerbatimArguments: s.windowsVerbatimArguments,
-    });
+    this.proc = spawn(s.command, s.args, { cwd: root, stdio: ["pipe", "pipe", "pipe"] });
     // ENOENT (bad path) OR an immediate exit (e.g. a rustup shim whose component
     // isn't installed) must fail fast, not hang a request for the full timeout.
     this.proc.on("error", () => { this.spawnFailed = true; });
@@ -215,14 +208,6 @@ export class LspClient {
     this.ready = false;
     try { this.conn.dispose(); } catch { /* ignore */ }
     try { this.proc.stdin.destroy(); } catch { /* ignore */ }
-    // Launched through cmd.exe (Windows .cmd shim): killing cmd.exe alone would leave the
-    // server running and holding our pipes open, so graft couldn't exit.
-    if (this.killTree && this.proc.pid !== undefined && this.proc.exitCode === null) {
-      try {
-        execFileSync(win32.join(systemDir(), "taskkill.exe"), ["/pid", String(this.proc.pid), "/T", "/F"], { stdio: "ignore", timeout: 10000 });
-      } catch { /* already gone */ }
-    }
     try { this.proc.kill("SIGKILL"); } catch { /* ignore */ }
-    try { this.proc.stdout.destroy(); this.proc.stderr.destroy(); } catch { /* ignore */ }
   }
 }
