@@ -28,6 +28,22 @@ export interface CallHierarchyItem {
 
 const uriOf = (abs: string): string => pathToFileURL(abs).toString();
 
+/** How to spawn a server. On Windows, Node refuses to spawn a `.cmd`/`.bat` (npm's
+ * shims, e.g. typescript-language-server.cmd) without a shell (EINVAL since the
+ * CVE-2024-27980 fix), so those go through cmd.exe as one quoted command line —
+ * quoted because the path often has spaces (C:\Users\First Last\...). Passed as a
+ * single string, not command + args, which `shell: true` would join unquoted. */
+export function spawnSpec(
+  command: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[]; shell: boolean } {
+  if (platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
+    return { command: [`"${command}"`, ...args].join(" "), args: [], shell: true };
+  }
+  return { command, args, shell: false };
+}
+
 export class LspClient {
   private proc: ChildProcessWithoutNullStreams;
   private conn: MessageConnection;
@@ -42,7 +58,8 @@ export class LspClient {
     private readonly languageId: string,
     private readonly callTimeoutMs = 15000,
   ) {
-    this.proc = spawn(command, args, { cwd: root, stdio: ["pipe", "pipe", "pipe"] });
+    const s = spawnSpec(command, args);
+    this.proc = spawn(s.command, s.args, { cwd: root, stdio: ["pipe", "pipe", "pipe"], shell: s.shell });
     // ENOENT (bad path) OR an immediate exit (e.g. a rustup shim whose component
     // isn't installed) must fail fast, not hang a request for the full timeout.
     this.proc.on("error", () => { this.spawnFailed = true; });

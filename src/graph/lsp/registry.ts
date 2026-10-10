@@ -23,15 +23,28 @@ export const LSP_SERVERS: readonly LspServer[] = [
   { languages: ["typescript", "javascript", "tsx"], command: "typescript-language-server", args: ["--stdio"], languageId: "typescript" },
 ];
 
+/** The first runnable path in `where.exe` output (one match per line). npm puts an
+ * extensionless sh script next to its `.cmd` shim and `where` lists it first, but
+ * Windows can't run it — so take the first `.exe`/`.cmd`/`.bat`/`.com`. */
+export function firstRunnableWindowsPath(whereOutput: string): string | null {
+  return whereOutput.split(/\r?\n/).map((l) => l.trim()).find((l) => /\.(exe|cmd|bat|com)$/i.test(l)) ?? null;
+}
+
 const resolved = new Map<string, string | null>();
 /** Resolve a command to its ABSOLUTE path via the login shell's PATH. `spawn`
  * resolves against `process.env.PATH`, which often omits `~/.cargo/bin`,
  * `~/go/bin`, etc. where these servers live — so `command -v` can find a server
- * that `spawn(cmd)` then can't. Spawning the absolute path avoids that mismatch. */
+ * that `spawn(cmd)` then can't. Spawning the absolute path avoids that mismatch.
+ * On Windows `execSync` runs through cmd.exe, which has no `command -v`: use
+ * `where.exe` there. */
 function resolveCommand(cmd: string): string | null {
   if (resolved.has(cmd)) return resolved.get(cmd)!;
   let abs: string | null = null;
-  try { abs = execSync(`command -v ${cmd}`, { encoding: "utf8" }).trim() || null; } catch { abs = null; }
+  try {
+    abs = process.platform === "win32"
+      ? firstRunnableWindowsPath(execSync(`where.exe ${cmd}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }))
+      : execSync(`command -v ${cmd}`, { encoding: "utf8" }).trim() || null;
+  } catch { abs = null; }
   resolved.set(cmd, abs);
   return abs;
 }
