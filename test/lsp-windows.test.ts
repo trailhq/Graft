@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findOnWindowsPath } from "../src/graph/lsp/registry.js";
 import { npmShimEntry, spawnSpec, LspClient } from "../src/graph/lsp/client.js";
+import { enrichWithLsp } from "../src/graph/lsp/enrich.js";
+import type { GraphV1 } from "../src/graph/types.js";
 
 const onWindows = { skip: process.platform !== "win32" };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -35,12 +37,18 @@ test("findOnWindowsPath: npm's .cmd shim is found, its extensionless sh script i
   assert.equal(findOnWindowsPath("typescript-language-server", "C:\\npm", (p) => files.has(p)), "C:\\npm\\typescript-language-server.cmd");
 });
 
-test("findOnWindowsPath: PATH order wins, then .com/.exe/.bat/.cmd within a folder", () => {
+test("findOnWindowsPath: PATH order wins, then .com/.exe/.cmd within a folder", () => {
   const files = new Set(["C:\\a\\clangd.cmd", "C:\\a\\clangd.exe", "C:\\b\\clangd.exe"]);
   const has = (p: string) => files.has(p);
   assert.equal(findOnWindowsPath("clangd", "C:\\a;C:\\b", has), "C:\\a\\clangd.exe");
   assert.equal(findOnWindowsPath("clangd", "C:\\b;C:\\a", has), "C:\\b\\clangd.exe");
   assert.equal(findOnWindowsPath("clangd", '"C:\\b";', has), "C:\\b\\clangd.exe", "a quoted PATH entry");
+});
+
+test("findOnWindowsPath: a .bat is never picked (graft can't start one without a shell)", () => {
+  const files = new Set(["C:\\a\\clangd.bat", "C:\\b\\clangd.exe"]);
+  assert.equal(findOnWindowsPath("clangd", "C:\\a;C:\\b", (p) => files.has(p)), "C:\\b\\clangd.exe");
+  assert.equal(findOnWindowsPath("clangd", "C:\\a", (p) => files.has(p)), null);
 });
 
 test("findOnWindowsPath: relative and empty PATH entries are never searched (no current-folder hijack)", () => {
@@ -69,8 +77,23 @@ test("spawnSpec: an npm shim runs its entry point with Node directly, preferring
   const shim = "C:\\npm\\typescript-language-server.cmd";
   const read = () => npmShim("node_modules\\typescript-language-server\\lib\\cli.mjs");
   const entry = "C:\\npm\\node_modules\\typescript-language-server\\lib\\cli.mjs";
-  assert.deepEqual(spawnSpec(shim, ["--stdio"], "win32", read, () => false), { command: process.execPath, args: [entry, "--stdio"] });
-  assert.deepEqual(spawnSpec(shim, ["--stdio"], "win32", read, (p) => p === "C:\\npm\\node.exe"), { command: "C:\\npm\\node.exe", args: [entry, "--stdio"] });
+  const a = spawnSpec(shim, ["--stdio"], "win32", read, () => false);
+  assert.deepEqual([a.command, a.args], [process.execPath, [entry, "--stdio"]]);
+  const b = spawnSpec(shim, ["--stdio"], "win32", read, (p) => p === "C:\\npm\\node.exe");
+  assert.deepEqual([b.command, b.args], ["C:\\npm\\node.exe", [entry, "--stdio"]]);
+});
+
+test("spawnSpec: the Node started for an npm shim gets no NODE_OPTIONS (a checkout's .env can set it)", () => {
+  const saved = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = "--require ./payload.cjs";
+  try {
+    const s = spawnSpec("C:\\npm\\x.cmd", [], "win32", () => npmShim("node_modules\\x\\cli.js"), () => false);
+    assert.ok(s.env, "an explicit environment");
+    assert.ok(!Object.keys(s.env!).some((k) => k.toUpperCase() === "NODE_OPTIONS"));
+    assert.equal(s.env!.PATH ?? s.env!.Path, process.env.PATH ?? process.env.Path, "everything else is kept");
+  } finally {
+    if (saved === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = saved;
+  }
 });
 
 test("spawnSpec: everything else is spawned exactly as before", () => {
@@ -137,6 +160,61 @@ test("Windows: dispose stops an npm-shim server that ignores stdin closing", onW
       await client.dispose();
     }
   } finally {
+    await removeDir(dir);
+  }
+});
+
+test("Windows: a checkout's NODE_OPTIONS preload doesn't run in the npm-shim server", onWindows, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft lsp "));
+  const saved = process.env.NODE_OPTIONS;
+  try {
+    const marker = join(dir, "PRELOADED");
+    const payload = join(dir, "payload.cjs");
+    writeFileSync(payload, `require("fs").writeFileSync(${JSON.stringify(marker)}, "x");`);
+    const shim = fakeNpmBin(join(dir, "npm"), "fake-server", 'console.log("started")');
+    // As dotenv would load it from the checkout's .env. Forward slashes: inside quotes,
+    // NODE_OPTIONS treats a backslash as an escape.
+    process.env.NODE_OPTIONS = `--require "${payload.replace(/\\/g, "/")}"`;
+    const s = spawnSpec(shim, []);
+    const runWith = (env: NodeJS.ProcessEnv) => new Promise<string>((resolve, reject) => {
+      const p = spawn(s.command, s.args, { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      p.stdout.on("data", (d) => { out += d; });
+      p.on("error", reject);
+      p.on("close", () => resolve(out));
+    });
+    assert.equal((await runWith(s.env ?? process.env)).trim(), "started");
+    assert.equal(existsSync(marker), false, "the preload did not run");
+    await runWith(process.env); // control: with NODE_OPTIONS passed through, it does run
+    assert.equal(existsSync(marker), true, "control: NODE_OPTIONS would have preloaded the payload");
+  } finally {
+    if (saved === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = saved;
+    await removeDir(dir);
+  }
+});
+
+test("Windows: a server Windows refuses to start (a .cmd that isn't an npm shim) means no enrichment, not a failed build", onWindows, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft lsp "));
+  const savedPath = process.env.PATH;
+  try {
+    writeFileSync(join(dir, "typescript-language-server.cmd"), "@echo off\r\nC:\tools\tsls.exe %*\r\n");
+    process.env.PATH = dir;
+    const graph: GraphV1 = {
+      meta: { version: 1, nodeCount: 2, edgeCount: 0, languages: ["javascript"], scopes: [] },
+      nodes: [
+        { id: "a.js", name: "a.js", kind: "file", path: "a.js", span: "L1-L1",
+          signature: null, exported: true, origin: "ast", body_hash: "x", summary_state: "pending", summary: null, crux: null },
+        { id: "a.js#f", name: "f", kind: "function", path: "a.js", span: "L1-L1",
+          signature: null, exported: true, origin: "ast", body_hash: "y", summary_state: "pending", summary: null, crux: null },
+      ],
+      edges: [],
+    };
+    const r = await enrichWithLsp(graph, dir);
+    assert.equal(r.added, 0);
+    assert.match(String(r.server), /typescript-language-server\.cmd$/i, "the .cmd was found, then skipped");
+    assert.equal(graph.edges.length, 0, "graph untouched");
+  } finally {
+    process.env.PATH = savedPath;
     await removeDir(dir);
   }
 });

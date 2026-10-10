@@ -25,7 +25,7 @@ export const LSP_SERVERS: readonly LspServer[] = [
   { languages: ["typescript", "javascript", "tsx"], command: "typescript-language-server", args: ["--stdio"], languageId: "typescript" },
 ];
 
-/** Windows: the first runnable `<cmd>.com/.exe/.bat/.cmd` in PATH order, searching only
+/** Windows: the first `<cmd>.com/.exe/.cmd` in PATH order, searching only
  * absolute PATH folders. Not `where.exe`: it (and cmd.exe finding `where.exe` itself)
  * searches the current folder first, so a checkout could plant
  * `typescript-language-server.cmd` and have `graft build --lsp` run it. The extension
@@ -35,7 +35,7 @@ export function findOnWindowsPath(cmd: string, pathVar = process.env.PATH ?? "",
   for (const entry of pathVar.split(";")) {
     const dir = entry.trim().replace(/^"(.*)"$/, "$1");
     if (!/^([a-zA-Z]:[\\/]|\\\\)/.test(dir)) continue; // relative or empty ("." = the current folder)
-    for (const ext of [".com", ".exe", ".bat", ".cmd"]) {
+    for (const ext of [".com", ".exe", ".cmd"]) { // .cmd: npm's shims (see spawnSpec); a .bat can't be started without a shell
       const p = win32.join(dir, cmd + ext);
       if (exists(p)) return p;
     }
