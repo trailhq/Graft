@@ -284,6 +284,23 @@ test("explicit ignored repository mounts preserve parent and child ignores and r
     assert.equal(graphOf(parent).nodes.length, 0);
     assert.deepEqual(readBuildConfig(parent)?.includeIgnoredRepos, []);
 
+    const repoFlags = selected.flatMap((path) => ["--include-repo", path]);
+    expectCliOk(["build", parent, "--all-dirs", ...repoFlags]);
+    const combined = graphOf(parent);
+    assert.ok(combined.nodes.some((n) => n.path === "root.ts"), "normal project source is indexed alongside selected repos");
+    assert.ok(combined.nodes.some((n) => n.path === `${selected[0]}/src/value.ts`));
+    assert.ok(combined.nodes.some((n) => n.path === `${selected[1]}/src/value.ts`));
+    assert.ok(!combined.nodes.some((n) => n.path.includes("historical-repos/other/")));
+    assert.ok(!combined.nodes.some((n) => n.path.endsWith("ignored.generated.ts")));
+    write(parent, "src/added.ts", "export const newProjectValue = 10;\n");
+    write(targets[1], "src/added.ts", "export const newReferenceValue = 20;\n");
+    assert.equal((await ensureFreshGraph(parent)).refreshed, true);
+    assert.ok(graphOf(parent).nodes.some((n) => n.path === "src/added.ts"));
+    assert.ok(graphOf(parent).nodes.some((n) => n.path === `${selected[1]}/src/added.ts`));
+    expectCliOk(["build", parent]);
+    assert.ok(graphOf(parent).nodes.some((n) => n.path === "root.ts"));
+    assert.ok(graphOf(parent).nodes.some((n) => n.path === `${selected[0]}/src/value.ts`));
+
     for (const args of [
       ["build", parent, "--include-ignored-repos"],
       ["build", parent, "--include-ignored-repos", "--only-dir", "source-material"],
@@ -292,6 +309,15 @@ test("explicit ignored repository mounts preserve parent and child ignores and r
       const result = runCli(args);
       assert.equal(result.status, 1, result.describe());
       assert.match(result.stderr, /include-ignored-repos/);
+    }
+    for (const args of [
+      ["build", parent, "--all-dirs", "--only-dir", "src"],
+      ["build", parent, "--include-repo", "source-material"],
+      ["build", parent, "--include-repo", selected[0], "--no-include-ignored-repos"],
+      ["build", parent, "--include-repo", selected[0], "--no-follow-nested-repos"],
+    ]) {
+      const result = runCli(args);
+      assert.equal(result.status, 1, result.describe());
     }
     assert.equal(readFileSync(join(parent, ".gitignore"), "utf8"), ignore);
   } finally {

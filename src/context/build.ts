@@ -122,7 +122,7 @@ export interface BuildResult {
  * fingerprint — the same source `checkGraph` / `probeDrift` use, so a later
  * `--deep` without the flag still skips files the wiring pass excluded. */
 function resolveOnlyDirs(outDir: string, explicit?: readonly string[]): Set<string> | undefined {
-  const list = explicit && explicit.length > 0 ? explicit : (readFingerprint(outDir)?.onlyDirs ?? []);
+  const list = explicit ?? readFingerprint(outDir)?.onlyDirs ?? [];
   return list.length > 0 ? new Set(list) : undefined;
 }
 
