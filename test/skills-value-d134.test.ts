@@ -18,6 +18,6 @@ test('one run: its failed commands, beside the run it came from', () => {
 
 test('more runs: the sum said as a sum, and no single run beside it', () => {
   assert.equal(line(week(3, 6, 4)), 'Last week in this repo, on this machine: release-npm ran 3 times, 6 failed commands in all.');
-  assert.equal(line(week(2, 1, 4), 9, 1), 'Last week in this repo, on this machine: release-npm ran 2 times, 1 failed command in all; the timeout guardrail stopped 9 commands; 1 known error came with its fix.');
+  assert.equal(line(week(2, 1, 4), 9, 1), 'Last week in this repo, on this machine: release-npm ran 2 times, 1 failed command in all; the timeout learning stopped 9 commands; 1 known error came with its fix.');
   assert.equal(line(week(2, 0, null)), 'Last week in this repo, on this machine: release-npm ran 2 times, 0 failed commands in all.');
 });

@@ -13,6 +13,10 @@ import { buildGraph } from "../src/graph/build.js";
 import { extractFile } from "../src/graph/extract.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import type { GraphV1, NodeV1 } from "../src/graph/types.js";
+import { warmDepthGrammars } from "../src/graph/depth-parser.js";
+
+// extractFile is synchronous; its WASM grammars load once, up front.
+await warmDepthGrammars(["r"]);
 
 function nodeById(graph: GraphV1, id: string): NodeV1 | undefined {
   return graph.nodes.find((n) => n.id === id);

@@ -103,13 +103,13 @@ test("trail forget ls-<id> moves a skill lesson aside; an unknown lesson id is a
   assert.equal(readLessons(skillDir).length, 1);
   const r = await trail(h, ["forget", "ls-4f2e1a"]);
   assert.equal(r.code, 0, r.err);
-  assert.deepEqual(r.out, ["✓ lesson ls-4f2e1a forgotten · it no longer rides with release-npm"]);
+  assert.deepEqual(r.out, ["✓ learning ls-4f2e1a forgotten · it no longer rides with release-npm"]);
   assert.deepEqual(readLessons(skillDir), []);
   assert.equal(readdirSync(join(skillDir, "lessons", ".forgotten")).length, 1, "moved, not deleted");
   assert.ok(existsSync(join(skillDir, "SKILL.md")), "the skill stays");
   const again = await trail(h, ["skills", "forget", "ls-4f2e1a"]);
   assert.equal(again.code, 1);
-  assert.match(again.err, /no lesson called ls-4f2e1a/);
+  assert.match(again.err, /no learning called ls-4f2e1a/);
 });
 
 test("trail forget l-<id> and trail forget no-timeout retire the learning (it stops loading; the file stays)", async () => {
@@ -118,14 +118,14 @@ test("trail forget l-<id> and trail forget no-timeout retire the learning (it st
   const id = parseNote(readFileSync(wall, "utf8"), wall)!.id!;
   const r = await trail(h, ["forget", id]);
   assert.equal(r.code, 0, r.err);
-  assert.match(r.out[0]!, /^✓ lesson forgotten: /);
+  assert.match(r.out[0]!, /^✓ learning forgotten: /);
   assert.equal(parseNote(readFileSync(wall, "utf8"), wall)!.status, "retired");
   assert.match((await trail(h, ["forget", id])).out[0]!, /was already forgotten/);
 
   const guard = writeEveryRepo(guardrailLearning("timeout-missing", "every repo", "\"timeout: command not found\" on 6 days", new Date(NOW)), "no-timeout.md", h.env);
   const g = await trail(h, ["forget", "no-timeout"]);
   assert.equal(g.code, 0, g.err);
-  assert.match(g.out[0]!, /^✓ guardrail forgotten: /);
+  assert.match(g.out[0]!, /^✓ always-follow learning forgotten: /);
   assert.equal(parseNote(readFileSync(guard, "utf8"), guard)!.status, "retired");
   const none = await trail(h, ["forget", "no-timeout"]);
   assert.equal(none.code, 1, "a retired guardrail is not forgotten twice; the name falls through to skills");
@@ -159,7 +159,7 @@ test("trail skills draft init-<n> --print shows init's pending skill compiled ag
     assert.equal(JSON.stringify(readInitRecord(SHOP, env)), before, "the record unchanged");
     const g = await trail(h, ["skills", "draft", "init-2", "--print"]);
     assert.equal(g.code, 1);
-    assert.match(g.err, /item 2 is a guardrail, not a skill/);
+    assert.match(g.err, /item 2 is an always-follow learning, not a skill/);
     const n = await trail(h, ["skills", "draft", "init-7", "--print"]);
     assert.equal(n.code, 1);
     assert.match(n.err, /no item 7 waits for an answer in this repo/);
@@ -202,14 +202,14 @@ test("trail skills adds 2.12's lines: lessons per skill, out of date here, unuse
   const r = await trail(here, ["skills"]);
   assert.equal(r.code, 0, r.err);
   const text = r.out.join("\n");
-  assert.match(text, /^release-npm +yours, in shop · .* · 1 lesson · may be out of date: it runs npm run build, and package\.json has no build script now$/m);
+  assert.match(text, /^release-npm +yours, in shop · .* · 1 learning · may be out of date: it runs npm run build, and package\.json has no build script now$/m);
   assert.match(text, /^report-users +yours, in assign · .* · unused since Aug 1 \(not in the list agents see; asking for it still brings it\)$/m);
   assert.doesNotMatch(text, /report-users.*may be out of date/, "another repo's skill is not checked here");
-  const g = r.out.indexOf("guardrails:");
+  const g = r.out.indexOf("always follow:");
   assert.ok(g > 0, text);
   assert.match(r.out[g + 1]!, /^ {2}no-timeout +every repo · stops `timeout N` while this Mac has no timeout$/);
   assert.ok(r.out.includes('errors Trail knows here (30 days): "rootless Docker not found" 3 times, fixed 2 times'), text);
-  assert.ok(r.out.includes("lessons: 2 (trail skills show <name> lists them)"), text);
+  assert.ok(r.out.includes("new learnings: 2 (trail skills show <name> lists them)"), text);
 
   const j = JSON.parse((await trail(here, ["skills", "--json"])).out.join("\n"));
   const rel = j.skills.find((s: { name: string }) => s.name === "release-npm");
@@ -221,7 +221,7 @@ test("trail skills adds 2.12's lines: lessons per skill, out of date here, unuse
   assert.equal(j.lessons, 2);
 
   const show = await trail(here, ["skills", "show", "release-npm"]);
-  assert.ok(show.out.includes("  Lesson (the person, Oct 28): bump the version before npm publish"), show.out.join("\n"));
+  assert.ok(show.out.includes("  New learning (the person, Oct 28): bump the version before npm publish"), show.out.join("\n"));
   // Elsewhere (no repo): no out-of-date check, no errors line.
   const away = await trail(h, ["skills"]);
   assert.doesNotMatch(away.out.join("\n"), /may be out of date|errors Trail knows here/);

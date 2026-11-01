@@ -35,7 +35,7 @@ const SKILL_LINES = [
   "- When Trail offers to keep a job, it gives you 2 lines to end your reply with, so the person can answer; Trail reads their answer to the last one, so keep it as it is.",
   // 1b (design 1.7): two lines; the second says "keep its lines as they are", not "word for word" (D101: no line orders a recital).
   "- When `trail init` gives you a list, show it as written and run `trail keep` only with the numbers the person typed.",
-  "- When Trail offers a lesson, keep its lines as they are; run `trail skills lesson` only after the person typed yes.",
+  "- When Trail offers a learning, keep its lines as they are; run `trail skills lesson` only after the person typed yes.",
   // Phase 2 (1.8): the one line on trail skills update.
   "- Trail may ask you to run `trail skills update <name> --offer <id>` only after the person typed yes to the change it showed.",
   "- Never write or edit a skill's steps yourself. Never run `trail skills keep`, `trail skills on` or `trail skills offers on`: those are the person's.",
@@ -55,4 +55,11 @@ test("the trail skill carries the nine learned-skills lines, word for word, each
   assert.deepEqual(lines.slice(at + 1, at + 4 + SKILL_LINES.length).filter((l) => l.startsWith("- ")), SKILL_LINES);
   assert.doesNotMatch(trail, /—/);
   assert.doesNotMatch(skillTemplate("graft"), /trail skills add/, "graft's skill is unchanged");
+});
+
+test("the skill asks for a plain headline a teammate understands and puts the files in the body", () => {
+  const src = skillTemplate("trail").replace(/\s+/g, ' ');
+  assert.equal(src.split('--title "<the decision in plain words a teammate understands, no file names>"').length - 1, 2, "both save lines ask for the plain headline");
+  assert.match(src, /Put files, commands and values in the body under "In the code:"\./);
+  assert.doesNotMatch(src, /the fact, not the task/);
 });

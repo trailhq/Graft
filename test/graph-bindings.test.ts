@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { extractFile } from "../src/graph/extract.js";
+import { warmDepthGrammars } from "../src/graph/depth-parser.js";
+
+// extractFile is synchronous; its WASM grammars load once, up front.
+await warmDepthGrammars(["python", "typescript", "go"]);
 
 function callEdges(src: string, lang: "python" | "typescript" | "go", file = `x.${lang === "python" ? "py" : lang === "go" ? "go" : "ts"}`) {
   return extractFile(file, src, lang).rawEdges.filter((e) => e.relation === "calls");

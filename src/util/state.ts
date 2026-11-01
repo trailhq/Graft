@@ -215,3 +215,7 @@ export function acquireLockIn(cache: string): boolean {
 export function releaseLockIn(cache: string): void {
   try { rmSync(join(cache, LOCK_FILE)); } catch { /* already gone */ }
 }
+/** Whether someone holds the lock in `cache`: the file is there and not yet old enough to reclaim. */
+export function lockHeldIn(cache: string): boolean {
+  try { return Date.now() - statSync(join(cache, LOCK_FILE)).mtimeMs < LOCK_STALE_MS; } catch { return false; }
+}

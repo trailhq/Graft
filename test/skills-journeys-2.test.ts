@@ -98,7 +98,7 @@ test("J07 then the fold (story 4): the lesson the person kept comes back as a on
   const st = state({ injected: [{ ...injFor(l, "0.22.4", "r-1112-0002"), at: new Date(Date.parse(calls[0]!.at) - 60_000).toISOString() }] });
   const s = stop(l, st, calls, "r-1112-0002", l.id);
   assert.ok(s.block, `no offer: ${s.why}`);
-  assert.match(s.block!, /\nFold your Oct 30 lesson into release-npm as step 3\? 1 line changes\. \(yes \/ show me \/ no\)\n/);
+  assert.match(s.block!, /\nFold your Oct 30 learning into release-npm as step 3\? 1 line changes\. \(yes \/ show me \/ no\)\n/);
   assert.match(s.block!, /If they answer yes, run: trail skills update release-npm --offer o-[0-9a-f]{6}/);
   const show = captureAnswer(st, "show me", l.env, NOW);
   assert.match(show.out!.context!, /trail skills draft r-1112-0002 --print/);

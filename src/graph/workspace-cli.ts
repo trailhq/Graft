@@ -52,7 +52,7 @@ export interface WorkspaceBuildOptions {
  * parent's `graft/` with `workspace.json`. Prints the one-time split warning
  * first when migrating away from a mega-graph. */
 export async function runWorkspaceBuild(root: string, opts: WorkspaceBuildOptions): Promise<void> {
-  // Native grammars load once per process, so the children share one answer:
+  // Depth grammars load once per process, so the children share one answer:
   // collected here and printed once at the end, not once per repo.
   const fellBack = { languages: new Set<string>(), packages: new Set<string>() };
   const buildChild = async (childDir: string, childName: string): Promise<void> => {

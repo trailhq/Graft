@@ -30,24 +30,42 @@
  * because `graft/` is gitignored and so was never checked out. The gate covers that
  * too — it copies the parent checkout's graph in (`./seed.ts`) and then treats the
  * difference between the two checkouts as ordinary drift, which is exactly what it is.
+ *
+ * The other absence is a repo on trail that this machine never built: trail was
+ * installed without `trail init` here, or the clone is new. Its learnings arrive,
+ * its queries find no code, and the agent goes back to grep for the rest of the
+ * session. So the first query there starts a full build in the background and
+ * waits a while for it (`buildMissingMap`).
  */
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { contextDirFor } from "../context/node-file.js";
-import { acquireLockIn, releaseLockIn } from "../util/state.js";
+import { isTrailMapDir } from "../context/map-dir.js";
+import { homeFolderRefusal } from "../init-guard.js";
+import { acquireLockIn, lockHeldIn, releaseLockIn } from "../util/state.js";
 import { CACHE_DIR } from "../context/node-file.js";
 import { buildGraph } from "./build.js";
 import { driftCount, isClean, probeDrift, readFingerprint, type Drift } from "./fingerprint.js";
 import { invalidateGraphCaches } from "./load.js";
 import { seedGraph, type SeedResult } from "./seed.js";
 import { wiringPath } from "./write.js";
-import { tag } from "../brand.js";
+import { cmd, tag } from "../brand.js";
 
 /** How long to wait for another process's in-flight rebuild before giving up and
  * answering from the current graph. Long enough to ride out a small repo's build,
  * short enough that a tool call never feels hung. */
 const LOCK_WAIT_MS = 2000;
 const LOCK_POLL_MS = 50;
+
+/** How long a query waits for a repo's first build before answering without code.
+ * A big repo (8k files) builds in about 75s, and the agent's shell gives a command
+ * two minutes; a reply with code in it on the first try is worth the wait, once. */
+const FIRST_BUILD_WAIT_MS = 90_000;
+const FIRST_BUILD_POLL_MS = 250;
+/** The first build's own time limit, well past the end-of-turn rebuild's two minutes. */
+const FIRST_BUILD_TIMEOUT_MS = 10 * 60_000;
 
 export interface RefreshResult {
   /** True when the graph on disk was rebuilt by this call. */
@@ -62,6 +80,9 @@ export interface RefreshOptions {
   contextDir?: string;
   /** Skip everything (the `--no-refresh` flag). */
   disabled?: boolean;
+  /** How long to wait for a first build of a repo on trail; 0 starts it and answers
+   * at once. Default `GRAFT_FIRST_BUILD_WAIT_MS`, else FIRST_BUILD_WAIT_MS. */
+  firstBuildWaitMs?: number;
 }
 
 const CLEAN: RefreshResult = { refreshed: false };
@@ -74,6 +95,67 @@ function envDisabled(): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** The wait for a first build: the option, else `GRAFT_FIRST_BUILD_WAIT_MS` (the hooks
+ * set 0, since their own budget is seconds), else the default. */
+function firstBuildWait(opts: RefreshOptions): number {
+  if (opts.firstBuildWaitMs !== undefined) return opts.firstBuildWaitMs;
+  const v = process.env.GRAFT_FIRST_BUILD_WAIT_MS;
+  const ms = v === undefined || v === "" ? NaN : Number(v);
+  return Number.isFinite(ms) && ms >= 0 ? ms : FIRST_BUILD_WAIT_MS;
+}
+
+/**
+ * Start a full `build` of `dir` in a detached child that outlives this query. The
+ * caller holds the lock; the child (`claude/sync-run.ts`) releases it when the
+ * build ends, however it ends. Plain `build`: structural, $0, offline.
+ */
+function startFirstBuild(dir: string): boolean {
+  const run = process.env.GRAFT_TEST_SYNC_RUN ?? fileURLToPath(new URL("../claude/sync-run.js", import.meta.url));
+  if (!existsSync(run)) return false;
+  const child = spawn(process.execPath, [run, dir, String(FIRST_BUILD_TIMEOUT_MS)], { detached: true, stdio: "ignore", windowsHide: true });
+  child.on("error", () => { /* the lock ages out, and the next query starts it again */ });
+  child.unref();
+  return true;
+}
+
+/**
+ * No graph here and none to copy in. A repo on trail gets one built: its team
+ * committed `.trail/` and this person installed trail, so a build is what they
+ * asked for, and answering "no matching nodes" sends the agent back to grep for
+ * good. Anywhere else (a graft repo, a `--dir` map, the home folder) nothing is
+ * built behind the user's back, as before.
+ *
+ * The first query to get here starts the build and waits up to `firstBuildWait`;
+ * queries arriving meanwhile wait on the same lock. Returns a note when the map
+ * is now there and the query should go on, or what to answer with when it isn't.
+ */
+async function buildMissingMap(dir: string, outDir: string, opts: RefreshOptions, busy?: boolean): Promise<string | RefreshResult> {
+  const own = !opts.contextDir && !process.env.GRAFT_DIR && isTrailMapDir(dir, outDir) && homeFolderRefusal(dir) === null;
+  if (!own) {
+    return busy
+      ? { refreshed: false, note: "another process is still copying the graph into this worktree — retry the query in a moment" }
+      : CLEAN;
+  }
+  const lockCache = join(outDir, CACHE_DIR);
+  const started = Date.now();
+  // The lock free and still no map: nobody is building it, so this query starts it.
+  // Taken here, released by the child.
+  if (!lockHeldIn(lockCache) && acquireLockIn(lockCache) && !startFirstBuild(dir)) releaseLockIn(lockCache);
+  const deadline = started + firstBuildWait(opts);
+  while (lockHeldIn(lockCache) && Date.now() < deadline) await sleep(FIRST_BUILD_POLL_MS);
+  if (existsSync(wiringPath(outDir))) {
+    invalidateGraphCaches(outDir);
+    return `built this repo's code map for the first time (${Math.round((Date.now() - started) / 1000)}s)`;
+  }
+  if (lockHeldIn(lockCache)) {
+    return {
+      refreshed: false,
+      note: "no code map here yet: building one in the background (about a minute on a big repo). Until it's done, answers carry learnings but no code — run the same command again in a minute instead of rewording it",
+    };
+  }
+  return { refreshed: false, note: `couldn't build this repo's code map — run \`${cmd("graft build")}\` to see why` };
 }
 
 /**
@@ -154,6 +236,7 @@ export async function ensureFreshGraph(root: string, opts: RefreshOptions = {}):
     const dir = resolve(root);
     const outDir = contextDirFor(dir, opts.contextDir);
     let seededFrom: string | undefined;
+    let builtNote: string | undefined;
     if (!existsSync(wiringPath(outDir))) {
       // One case has a graph to work with even though this checkout has none: a git
       // worktree, whose parent checkout's `graft/` git could not check out. Copy it
@@ -161,18 +244,16 @@ export async function ensureFreshGraph(root: string, opts: RefreshOptions = {}):
       // checkouts, and repairing it is what makes the copied graph honest here.
       const seed = await seedUnderLock(dir, outDir, opts.contextDir);
       seededFrom = seed.from;
-      // Still nothing (not a worktree, parent never built, or a concurrent seed we
-      // lost the race for and which we now re-check for): the caller's own "no graph
-      // — run graft build" message is the right answer. Auto-building a whole repo
-      // under a query is a surprise, and it's the one case where the user hasn't
-      // opted into graft at all yet.
+      // Still nothing (not a worktree, parent never built, or a concurrent seed or
+      // first build we lost the race for): a repo on trail gets its map built; any
+      // other repo gets the caller's own "no graph — run graft build" message.
       if (!existsSync(wiringPath(outDir))) {
-        return seed.busy
-          ? { refreshed: false, note: "another process is still copying the graph into this worktree — retry the query in a moment" }
-          : CLEAN;
+        const built = await buildMissingMap(dir, outDir, opts, seed.busy);
+        if (typeof built !== "string") return built;
+        builtNote = built;
       }
     }
-    const seedNote = seededFrom ? `copied the graph from the main checkout (${seededFrom})` : undefined;
+    const seedNote = seededFrom ? `copied the graph from the main checkout (${seededFrom})` : builtNote;
 
     // null = no fingerprint at all: a graph built before this mechanism existed,
     // or by a different extractor build. Rebuild once — that lays the fingerprint

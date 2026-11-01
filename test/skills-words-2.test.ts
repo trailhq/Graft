@@ -1,8 +1,7 @@
 /**
  * The words rule for phase 2 (design 0 rule 6, c0): every string a person or
- * an agent reads says learnings, skills, lessons, guardrails, preferences or
- * decisions, never notes, rules, memory, remember or workflows, and has no em
- * dash. The 1a words test already reads every file in src/skills (so the new
+ * an agent reads says learnings, always follow or skills, never notes,
+ * rules, memory, remember or workflows, and has no em dash. The 1a words test already reads every file in src/skills (so the new
  * offer, fold, version and value-line files count as they land) and 1b's test
  * reads ANCHOR_COPY by value (so c4's additions count). This one adds:
  *

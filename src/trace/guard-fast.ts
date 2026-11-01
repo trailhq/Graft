@@ -23,9 +23,9 @@ import { ASSIGN, words } from './shell-scan.js';
 
 /** J16's words, then the way out (R29), as information about the denied command (D88). */
 export const SURE_FAIL_REASON = '[trail] Trail, the tool this person installed, stopped this command before it ran: '
-  + 'this Mac has no timeout program (a guardrail this person kept), so it would fail with "timeout: command not found". '
+  + 'this Mac has no timeout program (an always-follow learning this person kept), so it would fail with "timeout: command not found". '
   + "The usual fix is the same command without timeout, using the Bash tool's own timeout parameter or run_in_background. "
-  + 'If timeout is installed here now, the person can drop this guardrail with trail forget no-timeout.';
+  + 'If timeout is installed here now, the person can drop this learning with trail forget no-timeout.';
 
 /**
  * Where `timeout` lives when the hook's PATH is narrower than the shell's (4.11 step 3, R29). `$HOME` is env.HOME,

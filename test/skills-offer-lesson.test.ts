@@ -79,7 +79,7 @@ test("J07's shape: 'it didn't push the tag' and the fix command give the two lin
   assert.equal(o.repo, SHOP);
   assert.deepEqual(offerLinesOf(o, l.tx, l.env), [
     "You corrected release-npm: it didn't push the tag.",
-    'Add a lesson to it, just for you: "push the tag too: git push origin --tags"? (yes / no)',
+    'Add a learning to it, just for you: "push the tag too: git push origin --tags"? (yes / no)',
   ]);
   assert.equal(o.correction!.fixCallId, "toolu_a0");
   assert.equal(o.correction!.typed.offset, l.offset);
@@ -89,7 +89,7 @@ test("J07 word for word: git push origin v1.4.3 puts back as v{version}, which l
   const l = lab();
   const o = offerOf(l);
   assert.equal(o.correction!.fix, null);
-  assert.equal(offerLinesOf(o, l.tx, l.env)![1], 'Add a lesson to it, just for you: "push the tag too"? (yes / no)');
+  assert.equal(offerLinesOf(o, l.tx, l.env)![1], 'Add a learning to it, just for you: "push the tag too"? (yes / no)');
 });
 
 test("nothing the person typed is in the pending offer (P17): a pointer, a sha and the agent's fix command", () => {
@@ -132,7 +132,7 @@ test("a never-save, gated or bypassing fix command leaves the phrase alone", () 
     const l = lab({ after: [{ cmd }] });
     const o = offerOf(l);
     assert.equal(o.correction!.fix, null, cmd);
-    assert.equal(offerLinesOf(o, l.tx, l.env)![1], 'Add a lesson to it, just for you: "push the tag too"? (yes / no)', cmd);
+    assert.equal(offerLinesOf(o, l.tx, l.env)![1], 'Add a learning to it, just for you: "push the tag too"? (yes / no)', cmd);
   }
 });
 

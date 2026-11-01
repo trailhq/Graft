@@ -57,7 +57,7 @@ test("J06 as a lesson: one step compiles, so what fixed it is offered with its e
   assert.equal(o.repair!.as, "lesson");
   assert.deepEqual(o.lines, [
     'Tests pass. This is the 2nd time this week that go failed on "rootless Docker not found" and needed Colima\'s socket.',
-    `Keep what fixed it as a lesson, just for you in every repo: "'rootless Docker not found': ${REL}"? (yes / no)`,
+    `Keep what fixed it as a learning, just for you in every repo: "'rootless Docker not found': ${REL}"? (yes / no)`,
   ]);
   assert.match(o.repair!.lessonSha!, /^[0-9a-f]{64}$/);
   assert.equal(o.repo, SHOP);
@@ -83,7 +83,7 @@ test("the Colima-shaped step-too-long: colima start and a test step past 300 cha
   const o = stop(b, 50).offer!;
   assert.ok(o, "offered");
   assert.equal(o.repair!.as, "lesson");
-  assert.equal(o.lines![1], `Keep what fixed it as a lesson, just for you in every repo: "'rootless Docker not found': colima start, then DOCKER_HOST=unix:///home/dev/.colima/default/docker.sock"? (yes / no)`);
+  assert.equal(o.lines![1], `Keep what fixed it as a learning, just for you in every repo: "'rootless Docker not found': colima start, then DOCKER_HOST=unix:///home/dev/.colima/default/docker.sock"? (yes / no)`);
 });
 
 test("in {days} days when the first time was more than a week ago", () => {
@@ -160,7 +160,7 @@ test("repairLines: this repo for git-https-auth, every repo for a machine wall; 
   const [l1, l2] = repairLines({ checkLine: "Shipped: main moved on origin.", nth: 3, days: 12, cls: "git-https-auth", delta, program: "git", as: "lesson", steps: 1, lessonText: text, where: "this repo" });
   // fix-lab5: line 1 names what the step does (its program and subcommand), not its raw text; line 2 shows the text.
   assert.equal(l1, "Shipped: main moved on origin. This is the 3rd time in 12 days that git failed on the HTTPS push asking for a username and needed git remote set-url first.");
-  assert.equal(l2, `Keep what fixed it as a lesson, just for you in this repo: "${text}"? (yes / no)`);
+  assert.equal(l2, `Keep what fixed it as a learning, just for you in this repo: "${text}"? (yes / no)`);
   // The lab's real Colima step: a status check with its fallback start, output joined. Line 1 says what it does.
   const colima = [{ kind: "enable-step" as const, name: "colima", text: "colima status 2>&1 || colima start", callId: "t2" }, { kind: "env" as const, name: "DOCKER_HOST", text: "DOCKER_HOST=unix://$HOME/.colima/default/docker.sock", callId: "t3" }];
   const [c1] = repairLines({ checkLine: "Tests pass.", nth: 2, days: 2, cls: "docker-rootless", delta: colima, program: "go", as: "skill", steps: 2, lessonText: null, where: "every repo" });

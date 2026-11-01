@@ -52,20 +52,20 @@ import { noteWalls, programKey, readWalls, repairsSeen } from '../trace/wall-sta
 const FRESH_MS = 2 * 60 * 60_000;
 const AHEAD_MS = 5_000;
 
-const NOT = 'trail · lesson not kept: ';
+const NOT = 'trail · learning not kept: ';
 export const LESSON_DENY = {
   flags: `${NOT}\`trail skills lesson\` takes only a skill name and --offer <id>.`,
-  noOffer: `${NOT}there is no lesson offer with that id in this session, so there is nothing the person said yes to.`,
-  noYes: "the person didn't say yes to this lesson in this session",
-  changed: 'the lesson changed after the offer, so it is not the one the person said yes to',
+  noOffer: `${NOT}there is no learning offer with that id in this session, so there is nothing the person said yes to.`,
+  noYes: "the person didn't say yes to this learning in this session",
+  changed: 'the learning changed after the offer, so it is not the one the person said yes to',
   refused: 'its text would tell an agent to skip a check or run a step that cannot be undone',
   // D111: 1a's refusals in a lesson's words.
-  subagent: `${NOT}only the main session can keep a lesson.`,
+  subagent: `${NOT}only the main session can keep a learning.`,
   noPerson: `${NOT}this session runs without a person at the keyboard (headless, CI or a scratch folder), so Trail keeps nothing from it.`,
   busy: `${NOT}Trail was busy. Run the same command again.`,
 } as const;
 const skillDeny = (name: string, id: string) => `${NOT}the offer was for the skill ${flatLine(name, 60)}. Run: trail skills lesson ${flatLine(name, 60)} --offer ${flatLine(id, 40)}`;
-const wallDeny = (id: string) => `${NOT}that offer keeps a lesson about an error, not one on a skill. Run: trail skills lesson --offer ${flatLine(id, 40)}`;
+const wallDeny = (id: string) => `${NOT}that offer keeps a learning about an error, not one on a skill. Run: trail skills lesson --offer ${flatLine(id, 40)}`;
 const tamperDeny = (what: string) => `${NOT}this session changed Trail's own files (${flatLine(what, 120)}), so Trail can't trust its record of what was offered.`;
 
 /* -------------------------------------------------------------- the decision */

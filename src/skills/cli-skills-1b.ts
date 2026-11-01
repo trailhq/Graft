@@ -47,7 +47,7 @@ export function initDraftCommand(n: number, cwd: string, env: NodeJS.ProcessEnv,
   const key = repoPlace(cwd, env).key;
   const p = key ? readInitRecord(key, env).pending.find((x) => x.n === n) : undefined;
   if (!p) return { code: 1, lines: [`✗ no item ${n} waits for an answer in this repo · look back again: trail init --look-back`] };
-  if (p.kind !== 'skill' || !p.skill) return { code: 1, lines: [`✗ item ${n} is a ${p.kind}, not a skill: it has no steps to show`] };
+  if (p.kind !== 'skill' || !p.skill) return { code: 1, lines: [`✗ item ${n} is ${p.kind === 'guardrail' ? 'an always-follow learning' : 'a learning'}, not a skill: it has no steps to show`] };
   const r = recompileInitSkill(p.skill.src, key, env, now);
   if (!r.ok) return { code: 1, lines: [`✗ ${one(p.plainName)}: its past session changed or is gone, so Trail can't show the steps.`] };
   return { code: 0, lines: initDraft({ ...r.compiled, name: p.plainName || r.compiled.name }) };
@@ -97,7 +97,7 @@ function retire(n: Note, env: NodeJS.ProcessEnv): CliOut {
   const what = n.kind === 'guardrail' ? 'guardrail' : n.kind === 'lesson' ? 'lesson' : 'learning';
   const name = what === 'guardrail' ? basename(path, '.md') : one(n.title, 60);
   return {
-    code: 0, lines: [`✓ ${what} forgotten: ${one(n.title, 80)} · it stops loading; the file stays, marked retired: ${shownPath(path)}`],
+    code: 0, lines: [`✓ ${what === 'guardrail' ? 'always-follow learning' : 'learning'} forgotten: ${one(n.title, 80)} · it stops loading; the file stays, marked retired: ${shownPath(path)}`],
     dropped: { what, name, back: `change status: retired to status: active in ${shownPath(path)}` },
   };
 }
@@ -125,7 +125,7 @@ function forgetSkillLesson(id: string, env: NodeJS.ProcessEnv): CliOut | null {
         mkdirSync(gone, { recursive: true, mode: 0o700 });
         renameSync(path, join(gone, f));
         return {
-          code: 0, lines: [`✓ lesson ${id} forgotten · it no longer rides with ${one(skill)}`],
+          code: 0, lines: [`✓ learning ${id} forgotten · it no longer rides with ${one(skill)}`],
           dropped: { what: 'lesson', name: id, back: `move ${f} from ${shownPath(gone)}/ back into ${shownPath(dir)}/` },
         };
       } catch { /* the next one */ }
@@ -139,7 +139,7 @@ function forgetSkillLesson(id: string, env: NodeJS.ProcessEnv): CliOut | null {
  * the caller tries a skill of that name; a lesson-id shape that matches nothing is an error, never a skill (b4 review).
  */
 export function forgetLearning(arg: string, cwd: string, env: NodeJS.ProcessEnv): CliOut | null {
-  if (SKILL_LESSON_ID.test(arg)) return forgetSkillLesson(arg, env) ?? { code: 1, lines: [`✗ no lesson called ${one(arg, 40)}`] };
+  if (SKILL_LESSON_ID.test(arg)) return forgetSkillLesson(arg, env) ?? { code: 1, lines: [`✗ no learning called ${one(arg, 40)}`] };
   if (LEARNING_ID.test(arg)) {
     const n = learningFiles(cwd, env).map(readLearning).find((x) => x?.id === arg);
     return n ? retire(n, env) : { code: 1, lines: [`✗ no learning called ${one(arg, 40)} here`] };

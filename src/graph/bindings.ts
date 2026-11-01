@@ -8,7 +8,7 @@
  * Only `import type` from extract.ts (never a value) — extract.ts imports
  * `collectBindings` from here, so a value import back would be a cycle.
  */
-import type Parser from "tree-sitter";
+import type { SyntaxNode } from "./depth-parser.js";
 import type { Language, WalkCtx } from "./extract.js";
 
 /** Variable/field → bare type name, keyed by scope. Scope keys mirror
@@ -42,7 +42,7 @@ const FN_VALUE_TYPES = new Set(["arrow_function", "function", "function_expressi
  * `idName`, so a binding recorded inside a Go method body is stored under the
  * same scope key extract.ts's walk will look it up with), or null if `node`
  * isn't a definition. */
-export function defName(node: Parser.SyntaxNode, lang: Language): string | null {
+export function defName(node: SyntaxNode, lang: Language): string | null {
   if (lang === "java") {
     return JAVA_DEF_TYPES.has(node.type) ? (node.childForFieldName("name")?.text ?? null) : null;
   }
@@ -108,7 +108,7 @@ export function defName(node: Parser.SyntaxNode, lang: Language): string | null 
  * deliberately absent here: neither has a body a binding could be set in (a
  * property initializer's closure is the one vanishing exception, mis-keying
  * only bindings set inside itself). */
-function swiftDefName(node: Parser.SyntaxNode): string | null {
+function swiftDefName(node: SyntaxNode): string | null {
   if (node.type === "class_declaration") {
     if (node.children.some((c) => c.type === "extension")) {
       const ut = node.namedChildren.find((c) => c.type === "user_type");
@@ -150,7 +150,7 @@ const R_RIGHT_ASSIGN_OPS = new Set(["->", "->>"]);
  * absorbed into the function's own `body` field, not an outer wrapper).
  * Null if `node` isn't one of these two shapes.
  */
-export function rDefName(node: Parser.SyntaxNode): string | null {
+export function rDefName(node: SyntaxNode): string | null {
   if (node.type === "binary_operator") {
     const op = node.childForFieldName("operator")?.text;
     if (!op || !R_ASSIGN_OPS.has(op)) return null;
@@ -171,7 +171,7 @@ export function rDefName(node: Parser.SyntaxNode): string | null {
 
 /** The receiver parameter's own variable name for a Go method (`func (w *Worker) …`
  * → `w`). Null if it can't be read. */
-export function goReceiverVarOf(node: Parser.SyntaxNode): string | null {
+export function goReceiverVarOf(node: SyntaxNode): string | null {
   const recv = node.childForFieldName("receiver");
   const param = recv?.namedChildren.find((c) => c.type === "parameter_declaration");
   return param?.childForFieldName("name")?.text ?? null;
@@ -181,7 +181,7 @@ export function goReceiverVarOf(node: Parser.SyntaxNode): string | null {
  * (`func (w *Worker) …` → `Worker`). Mirrors extract.ts's own `goReceiverType`
  * (duplicated, not imported, per this file's no-value-import-of-extract rule).
  * Null if it can't be read. */
-function goReceiverTypeOf(node: Parser.SyntaxNode): string | null {
+function goReceiverTypeOf(node: SyntaxNode): string | null {
   const recv = node.childForFieldName("receiver");
   const param = recv?.namedChildren.find((c) => c.type === "parameter_declaration");
   let type = param?.childForFieldName("type");
@@ -234,7 +234,7 @@ function goFieldType(receiver: string, ctx: RecvCtx): string | undefined {
   return owner ? (ctx.bindings.lookup([owner], `self.${field}`) ?? undefined) : undefined;
 }
 
-function isClassNode(node: Parser.SyntaxNode, lang: Language): boolean {
+function isClassNode(node: SyntaxNode, lang: Language): boolean {
   if (lang === "python") return node.type === "class_definition";
   if (lang === "java") return JAVA_TYPE_DECLS.has(node.type);
   if (lang === "typescript" || lang === "tsx") {
@@ -270,7 +270,7 @@ const JAVA_TYPE_DECLS: ReadonlySet<string> = new Set([
 ]);
 
 /** Pass 1 over a parsed file: collect variable->type bindings. Pure. */
-export function collectBindings(root: Parser.SyntaxNode, lang: Language): FileBindings {
+export function collectBindings(root: SyntaxNode, lang: Language): FileBindings {
   const bindings = new FileBindings();
   const aliases = new Map<string, string>();
   collectAliases(root, lang, aliases);
@@ -280,7 +280,7 @@ export function collectBindings(root: Parser.SyntaxNode, lang: Language): FileBi
 
 /** Import aliases (`... as F`) can be declared anywhere relative to their use
  * textually, so this scans the whole tree once, ahead of the scope-aware walk. */
-function collectAliases(node: Parser.SyntaxNode, lang: Language, aliases: Map<string, string>): void {
+function collectAliases(node: SyntaxNode, lang: Language, aliases: Map<string, string>): void {
   if (lang === "python" && node.type === "aliased_import") {
     const nameNode = node.childForFieldName("name");
     const aliasNode = node.childForFieldName("alias");
@@ -301,7 +301,7 @@ function collectAliases(node: Parser.SyntaxNode, lang: Language, aliases: Map<st
  * path (distinct from `scope` once we're inside one of its methods) — that's
  * where `self.attr`/`this.attr` bindings live. */
 function visit(
-  node: Parser.SyntaxNode,
+  node: SyntaxNode,
   lang: Language,
   scope: string[],
   classScope: string | null,
@@ -336,7 +336,7 @@ function resolveAlias(name: string, aliases: Map<string, string>): string {
   return aliases.get(name) ?? name;
 }
 
-function pyTypeName(node: Parser.SyntaxNode | null | undefined, aliases: Map<string, string>): string | null {
+function pyTypeName(node: SyntaxNode | null | undefined, aliases: Map<string, string>): string | null {
   if (!node) return null;
   if (node.type === "identifier") return resolveAlias(node.text, aliases);
   if (node.type === "type") {
@@ -346,7 +346,7 @@ function pyTypeName(node: Parser.SyntaxNode | null | undefined, aliases: Map<str
   return null;
 }
 
-function callTypeName(node: Parser.SyntaxNode | null | undefined, aliases: Map<string, string>): string | null {
+function callTypeName(node: SyntaxNode | null | undefined, aliases: Map<string, string>): string | null {
   if (node?.type !== "call") return null;
   const fn = node.childForFieldName("function");
   if (fn?.type !== "identifier") return null;
@@ -364,7 +364,7 @@ function callTypeName(node: Parser.SyntaxNode | null | undefined, aliases: Map<s
  * a field: bound at the type's scope, both bare (`repo.save()`) and
  * `self.`-prefixed (`self.repo.save()`), like Java's fields. */
 function handleSwift(
-  node: Parser.SyntaxNode,
+  node: SyntaxNode,
   scope: string[],
   classScope: string | null,
   bindings: FileBindings,
@@ -402,7 +402,7 @@ function handleSwift(
  * nested nodes and never leak in), unwrapping one level of optional (`Animal?`).
  * Collections, tuples, and function types bind nothing — no single confident
  * receiver type to name. */
-function swiftTypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+function swiftTypeName(node: SyntaxNode | null | undefined): string | null {
   if (!node) return null;
   if (node.type === "optional_type") {
     return swiftTypeName(node.namedChildren.find((c) => c.type === "user_type"));
@@ -415,7 +415,7 @@ function swiftTypeName(node: Parser.SyntaxNode | null | undefined): string | nul
 /** The type constructed by an initializer call (`Vet()` → `Vet`), or null when
  * the callee isn't a bare UpperCamelCase name — a lowercase callee is an
  * ordinary function whose return type a single-file pass cannot know. */
-function swiftCtorTypeName(call: Parser.SyntaxNode | null | undefined): string | null {
+function swiftCtorTypeName(call: SyntaxNode | null | undefined): string | null {
   if (call?.type !== "call_expression") return null;
   const fn = call.namedChildren[0];
   if (fn?.type !== "simple_identifier") return null;
@@ -427,7 +427,7 @@ function swiftCtorTypeName(call: Parser.SyntaxNode | null | undefined): string |
  * (`$x = new Foo()`). Keyed by the `$var` text (with the `$`) so a
  * `$var->method()` call site resolves through resolveRecvType's bindings
  * lookup, exactly like Python's annotated params and Go's receiver. */
-function handlePhp(node: Parser.SyntaxNode, scope: string[], bindings: FileBindings): void {
+function handlePhp(node: SyntaxNode, scope: string[], bindings: FileBindings): void {
   if (node.type === "simple_parameter") {
     const type = phpTypeName(node.childForFieldName("type"));
     const name = node.childForFieldName("name");
@@ -450,7 +450,7 @@ function handlePhp(node: Parser.SyntaxNode, scope: string[], bindings: FileBindi
  * `===` on wrappers for the same reason as extract.ts: wrapper identity is not
  * stable across traversals, so `===` can spuriously fall through to `{closure}`
  * and desync this scope segment from the one extract.ts mints. */
-function phpClosureName(node: Parser.SyntaxNode): string {
+function phpClosureName(node: SyntaxNode): string {
   const parent = node.parent;
   if (parent?.type === "assignment_expression" && parent.childForFieldName("right")?.id === node.id) {
     const left = parent.childForFieldName("left");
@@ -462,7 +462,7 @@ function phpClosureName(node: Parser.SyntaxNode): string {
 /** A PHP type hint's class name: unwrap `?T` (optional_type) and `named_type`,
  * de-qualify a namespaced name to its trailing segment. Null for primitives,
  * unions, and intersections (no single confident class to bind). */
-function phpTypeName(node: Parser.SyntaxNode | null): string | null {
+function phpTypeName(node: SyntaxNode | null): string | null {
   if (!node) return null;
   if (node.type === "named_type" || node.type === "optional_type") {
     return phpTypeName(node.namedChildren[0] ?? null);
@@ -473,13 +473,13 @@ function phpTypeName(node: Parser.SyntaxNode | null): string | null {
 }
 
 /** The class name of a `new Foo()` / `new App\Foo()`, de-qualified. */
-function phpNewType(node: Parser.SyntaxNode): string | null {
+function phpNewType(node: SyntaxNode): string | null {
   const cls = node.namedChildren.find((c) => c.type === "name" || c.type === "qualified_name");
   return cls ? cls.text.replace(/^.*\\/, "") : null;
 }
 
 function handlePy(
-  node: Parser.SyntaxNode,
+  node: SyntaxNode,
   scope: string[],
   classScope: string | null,
   bindings: FileBindings,
@@ -511,7 +511,7 @@ function handlePy(
 }
 
 function tsAnnotationTypeName(
-  typeAnn: Parser.SyntaxNode | null | undefined,
+  typeAnn: SyntaxNode | null | undefined,
   aliases: Map<string, string>,
 ): string | null {
   if (!typeAnn || typeAnn.type !== "type_annotation") return null;
@@ -519,7 +519,7 @@ function tsAnnotationTypeName(
   return t?.type === "type_identifier" ? resolveAlias(t.text, aliases) : null;
 }
 
-function tsNewTypeName(value: Parser.SyntaxNode | null | undefined, aliases: Map<string, string>): string | null {
+function tsNewTypeName(value: SyntaxNode | null | undefined, aliases: Map<string, string>): string | null {
   if (value?.type !== "new_expression") return null;
   const ctor = value.childForFieldName("constructor");
   if (ctor?.type !== "identifier") return null;
@@ -527,7 +527,7 @@ function tsNewTypeName(value: Parser.SyntaxNode | null | undefined, aliases: Map
 }
 
 function handleTs(
-  node: Parser.SyntaxNode,
+  node: SyntaxNode,
   scope: string[],
   classScope: string | null,
   bindings: FileBindings,
@@ -586,7 +586,7 @@ function handleTs(
  * (`this.repo.save()`), since resolveRecvType normalizes `this.` to `self.`.
  */
 function handleJava(
-  node: Parser.SyntaxNode,
+  node: SyntaxNode,
   scope: string[],
   classScope: string | null,
   bindings: FileBindings,
@@ -670,7 +670,7 @@ function handleJava(
  * type, so it binds nothing. A generic binds to its erasure (`List<Order>` → `List`),
  * a qualified type to its final segment (`java.util.List` → `List`), and an array
  * to its element type (`Foo[]` → `Foo`). */
-function javaTypeName(node: Parser.SyntaxNode | null | undefined): string | null {
+function javaTypeName(node: SyntaxNode | null | undefined): string | null {
   if (!node) return null;
   if (node.type === "type_identifier") return node.text === "var" ? null : node.text;
   if (node.type === "generic_type") {
@@ -693,12 +693,12 @@ function javaTypeName(node: Parser.SyntaxNode | null | undefined): string | null
  * fallback for a `var`-typed or untyped local/field/resource whose initializer
  * is a construction — the one shape a single-file pass can infer with no
  * return-type analysis. */
-function javaNewTypeName(value: Parser.SyntaxNode | null | undefined): string | null {
+function javaNewTypeName(value: SyntaxNode | null | undefined): string | null {
   if (value?.type !== "object_creation_expression") return null;
   return javaTypeName(value.childForFieldName("type"));
 }
 
-function handleGo(node: Parser.SyntaxNode, scope: string[], bindings: FileBindings): void {
+function handleGo(node: SyntaxNode, scope: string[], bindings: FileBindings): void {
   const scopePath = scope.join(".");
   if (node.type === "var_spec") {
     const name = node.childForFieldName("name");
@@ -709,7 +709,7 @@ function handleGo(node: Parser.SyntaxNode, scope: string[], bindings: FileBindin
   if (node.type === "field_declaration") {
     const type = goTypeName(node.childForFieldName("type"));
     if (!type || node.parent?.parent?.parent?.type !== "type_spec") return;
-    for (const name of node.childrenForFieldName("name")) bindings.set(scopePath, `self.${name.text}`, type);
+    for (const name of node.namedChildren.filter((c) => c.type === "field_identifier")) bindings.set(scopePath, `self.${name.text}`, type);
     return;
   }
   if (node.type !== "short_var_declaration") return;
@@ -738,7 +738,7 @@ function handleGo(node: Parser.SyntaxNode, scope: string[], bindings: FileBindin
   }
 }
 
-function goTypeName(type: Parser.SyntaxNode | null): string | null {
+function goTypeName(type: SyntaxNode | null): string | null {
   const base = type?.type === "pointer_type" ? type.namedChildren.at(-1) : type;
   return base?.type === "type_identifier" ? base.text : null;
 }

@@ -135,9 +135,9 @@ test("an agent's init looks back without a model and relays: a claude stand-in o
     const out = said.join("\n");
     assert.match(out, /names are plain: to name them with Claude, run trail init --look-back in your own terminal/);
     assert.ok(said.includes(RELAY_LINE));
-    assert.match(out, /^1\. release-npm \(skill\) · Claude worked out how to publish shop to npm from scratch on 3 different days · just for you, in this repo$/m);
-    assert.match(out, /^2\. no-timeout \(guardrail\) · Hit "timeout: command not found" on 2 days · just for you, in every repo$/m);
-    assert.match(out, /^3\. "always run the lint script before pushing" \(preference, your own words\) · You said this on 2 days · just for you, in this repo$/m, "the shortest of the person's lines");
+    assert.match(out, /^1\. release-npm \(skill, this repo only\)\n   Claude worked out how to publish shop to npm from scratch on 3 different days\.$/m);
+    assert.match(out, /^2\. no-timeout \(always-follow learning, every repo\)\n   Claude won't use the timeout command, which this Mac doesn't have\.\n   Claude's commands failed with "timeout: command not found" on 2 days\.$/m);
+    assert.match(out, /^3\. "always run the lint script before pushing" \(learning in your own words, this repo only\)\n   You said this on 2 days\.$/m, "the shortest of the person's lines");
     const rec = readInitRecord(repoPlace(w.repo, env).key, env);
     assert.deepEqual(rec.pending.map((p) => [p.n, p.kind]), [[1, "skill"], [2, "guardrail"], [3, "preference"]]);
     // For init --pair's page: the skill found, by name and day count, never its steps; nothing kept.
@@ -156,7 +156,7 @@ test("an agent's --yes keeps nothing and says so (R25); the person's script's --
     const a = beginLookBack(w.repo, { env: { ...env, CLAUDECODE: "1" }, deps: deps(false) });
     const ra = await finishLookBack(w.repo, a.reads, { yes: true, say: (l) => said.push(l) });
     assert.equal(ra.kept, 0);
-    assert.ok(said.includes("found 1 skill, 1 guardrail and 1 preference. Kept nothing: an agent ran this. The person picks with trail keep <numbers> after seeing the list, or trail init --look-back in their own terminal"));
+    assert.ok(said.includes("found 1 skill, 1 always-follow learning and 1 learning. Kept nothing: an agent ran this. The person picks with trail keep <numbers> after seeing the list, or trail init --look-back in their own terminal"));
     assert.ok(!existsSync(join(w.trail, "learnings")));
 
     const script: string[] = [];
@@ -164,7 +164,7 @@ test("an agent's --yes keeps nothing and says so (R25); the person's script's --
     const rs = await finishLookBack(w.repo, s.reads, { yes: true, say: (l) => script.push(l) });
     assert.equal(rs.kept, 1);
     assert.equal(claude.calls(), 0, "no TTY: no naming call");
-    assert.ok(script.includes("found 1 skill, 1 guardrail and 1 preference. Kept only the preferences (your own words). To pick the rest: trail init --look-back"));
+    assert.ok(script.includes("found 1 skill, 1 always-follow learning and 1 learning. Kept only the learnings in your own words. To pick the rest: trail init --look-back"));
     assert.ok(!script.includes(RELAY_LINE), "no agent line for the person's own script (B9)");
     assert.equal(script[script.length - 1], "Pick in a terminal: trail init");
     const files = readdirSync(join(w.trail, "repos"), { recursive: true }).map(String).filter((f) => f.endsWith(".md"));

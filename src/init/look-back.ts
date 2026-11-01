@@ -175,7 +175,11 @@ export function withoutSecrets<T extends { title: string; body: string; quotes: 
 export function scrub(text: string): string {
   return text
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted]")
+    // A key with no end marker (cut off, or pasted in part): everything after its start.
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*/g, "[redacted]")
     .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, "[redacted]")
+    .replace(/\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}/g, "[redacted]")
+    .replace(/\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY)[A-Z0-9_]*)(\s*[:=]\s*)\S+/g, "$1$2[redacted]")
     .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}/g, "[redacted]")
     .replace(/\bxox[abposr]-[A-Za-z0-9-]{10,}/g, "[redacted]")
     .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted]")

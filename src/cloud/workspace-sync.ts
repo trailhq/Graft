@@ -38,7 +38,8 @@ import { matter } from "../util/front-matter.js";
 import { appendPrivateFile, ensurePrivateDir, PRIVATE_FILE_MODE, writePrivateFile } from "../util/private-file.js";
 import { cacheDir, readJson, writeJsonAtomic } from "../util/state.js";
 import { headLearnings } from "./head-learnings.js";
-import { isError, postActivity, readCloud, uploadLearnings, type ActivityEvent, type ApiError, type Cloud, type SkillFileUpload, type UploadedLearning } from "./workspace.js";
+import { writeTeamFile } from "./team-file.js";
+import { cloudForRepo, cloudIn, isError, postActivity, readClouds, sameWorkspace, uploadLearnings, type ActivityEvent, type ApiError, type Cloud, type SkillFileUpload, type UploadedLearning } from "./workspace.js";
 
 /** A failed sync is retried after this long, not on every command. */
 const RETRY_MS = 5 * 60 * 1000;
@@ -328,13 +329,16 @@ function statePath(repo: string): string {
 }
 
 /**
- * Whether the repo at `checkout` is one of the workspace's, so its learnings
- * and uses go up. Never on a machine connected by `trail init --connect`: that
- * one sends a repo summary only (titles and counts, no learning bodies, no
- * searches), whatever repos the workspace lists.
+ * Whether the repo at `checkout` is one of the workspace's (by default, of the
+ * workspace this machine sends it to), so its learnings and uses go up. Never
+ * on a connection made by `trail init --connect`: that one sends a repo
+ * summary only (titles and counts, no learning bodies, no searches), whatever
+ * repos the workspace lists.
  */
-export function inWorkspace(checkout: string, cloud: Cloud | null = readCloud()): boolean {
-  return !!cloud && cloud.via !== "connect" && cloud.repos.includes(repoPlace(checkout).key);
+export function inWorkspace(checkout: string, cloud?: Cloud | null): boolean {
+  const key = repoPlace(checkout).key;
+  const c = cloud === undefined ? cloudForRepo(key) : cloud;
+  return !!c && c.via !== "connect" && c.repos.includes(key);
 }
 
 /**
@@ -375,6 +379,8 @@ export async function syncRepo(
   else if (learnings) {
     writeJsonAtomic(statePath(place.checkout), { fingerprint: fingerprint(learnings), at: Date.now(), learnings: res.learnings, paths, branch }, true);
     rememberSent(place.key, learnings);
+    // Teammates who pull it are offered the sign-in to this workspace.
+    writeTeamFile(place.checkout, cloud);
   }
   return res;
 }
@@ -446,12 +452,17 @@ function onlySent(e: ActivityEvent, sent: Sent): ActivityEvent | null {
   return { ...e, shown_paths: names, shown_authors: e.kind === "check" ? [...new Set(authors)] : authors };
 }
 
-/** Sync every repo of the workspace that's on this machine. Returns what went up. */
+/**
+ * Sync every repo of the workspace that's on this machine and goes to it (a
+ * repo a newer link sends elsewhere is left to that one). Returns what went up.
+ */
 export async function syncWorkspaceRepos(cloud: Cloud, fetchImpl?: typeof fetch): Promise<{ repos: number; learnings: number }> {
   let repos = 0;
   let learnings = 0;
+  const others = readClouds().filter((c) => !sameWorkspace(c, cloud));
   for (const r of knownRepos()) {
     if (!cloud.repos.includes(r.key) || !existsSync(r.path)) continue;
+    if (others.some((c) => (c.linkedAt || 0) > (cloud.linkedAt || 0) && c.repos.includes(r.key))) continue;
     const res = await syncRepo(r.path, cloud, { fetchImpl });
     if (isError(res)) continue;
     repos++;
@@ -513,12 +524,13 @@ export function activityEvent(raw: unknown): ActivityEvent | null {
 
 /**
  * Remember one use of the learnings, to send with the next sync: only while
- * this machine is connected, and only for a repo in the workspace. Not
- * connected, or another repo, and nothing is written. Never throws.
+ * this machine is connected, and only for a repo in a workspace (by default,
+ * the one it's sent to). Not connected, or another repo, and nothing is
+ * written. Never throws.
  */
-export function recordActivity(use: ActivityEvent, cloud: Cloud | null = readCloud()): void {
+export function recordActivity(use: ActivityEvent, cloud?: Cloud | null): void {
   const e = activityEvent(use);
-  if (!e || !records(cloud, e.repo)) return;
+  if (!e || !records(cloud === undefined ? cloudForRepo(e.repo) : cloud, e.repo)) return;
   try {
     const p = outboxPath();
     appendPrivateFile(p, `${JSON.stringify(e)}\n`);
@@ -554,14 +566,15 @@ function outboxHasEvents(): boolean {
 }
 
 /**
- * Send the outbox. It's moved aside first, so events recorded while the
- * request is out land in a fresh file; on failure they're put back. A use
- * from before this connection, or for a repo the workspace doesn't have
- * (left by an older trail), is dropped, never sent; so is the name of any
- * learning the workspace didn't get from this machine's last upload of that
- * repo, put back or sent.
+ * Send the outbox, each use to the workspace its repo goes to: `clouds` (the
+ * ones just changed, say), and every other connection on this machine. It's
+ * moved aside first, so events recorded while the request is out land in a
+ * fresh file; on failure they're put back. A use from before its workspace's
+ * connection, or for a repo no workspace has (left by an older trail), is
+ * dropped, never sent; so is the name of any learning the workspace didn't get
+ * from this machine's last upload of that repo, put back or sent.
  */
-export async function flushActivity(cloud: Cloud, fetchImpl?: typeof fetch): Promise<number> {
+export async function flushActivity(clouds: Cloud | Cloud[], fetchImpl?: typeof fetch): Promise<number> {
   const p = outboxPath();
   if (!outboxHasEvents()) return 0;
   const sending = `${p}.${process.pid}.sending`;
@@ -570,28 +583,34 @@ export async function flushActivity(cloud: Cloud, fetchImpl?: typeof fetch): Pro
   } catch {
     return 0;
   }
+  const given = Array.isArray(clouds) ? clouds : [clouds];
+  // What the caller holds is newer than the file for its workspace; newest link first, as cloudForRepo picks.
+  const all = [...given, ...readClouds().filter((c) => !given.some((g) => sameWorkspace(g, c)))].sort((a, b) => (b.linkedAt || 0) - (a.linkedAt || 0));
   const has = readSent();
-  const events: ActivityEvent[] = [];
+  const byCloud = new Map<Cloud, ActivityEvent[]>();
   for (const line of readFileSync(sending, "utf8").split("\n")) {
     try {
       if (!line.trim()) continue;
       const e = activityEvent(JSON.parse(line));
-      const out = e && sendable(e, cloud) ? onlySent(e, has) : null;
-      if (out) events.push(out);
+      const to = e ? cloudIn(all, e.repo) : null;
+      const out = e && to && sendable(e, to) ? onlySent(e, has) : null;
+      if (out && to) byCloud.set(to, [...(byCloud.get(to) ?? []), out]);
     } catch {
       /* a torn line */
     }
   }
   let sent = 0;
-  for (let i = 0; i < events.length; i += 500) {
-    const res = await postActivity(cloud, events.slice(i, i + 500), fetchImpl);
-    if (isError(res)) {
-      // Put back what didn't go, ahead of anything recorded since.
-      const rest = events.slice(i).map((e) => JSON.stringify(e)).join("\n");
-      appendPrivateFile(p, `${rest}\n`);
-      break;
+  for (const [to, events] of byCloud) {
+    for (let i = 0; i < events.length; i += 500) {
+      const res = await postActivity(to, events.slice(i, i + 500), fetchImpl);
+      if (isError(res)) {
+        // Put back what didn't go, ahead of anything recorded since.
+        const rest = events.slice(i).map((e) => JSON.stringify(e)).join("\n");
+        appendPrivateFile(p, `${rest}\n`);
+        break;
+      }
+      sent += Math.min(500, events.length - i);
     }
-    sent += Math.min(500, events.length - i);
   }
   // Sent, or put back above: either way this copy is done with.
   rmSync(sending, { force: true });
@@ -612,19 +631,20 @@ export function syncIsDue(checkout: string, now = Date.now()): boolean {
 
 /**
  * Sync in a detached child when this machine is connected and either the
- * repo (one of the workspace's) has learnings the workspace hasn't seen, or
+ * repo (one of a workspace's) has learnings its workspace hasn't seen, or
  * there are uses waiting to go. Never waits, never throws.
  */
 export function maybeSyncInBackground(dir: string, now = Date.now()): boolean {
   try {
-    const cloud = readCloud();
-    if (!cloud) {
+    const clouds = readClouds();
+    if (!clouds.length) {
       // Whatever an older trail queued here can never go: connecting drops it.
       dropActivity();
       return false;
     }
-    const checkout = repoPlace(dir).checkout;
-    const due = (inWorkspace(checkout, cloud) && syncIsDue(checkout, now)) || outboxHasEvents();
+    const place = repoPlace(dir);
+    const checkout = place.checkout;
+    const due = (inWorkspace(checkout, cloudIn(clouds, place.key)) && syncIsDue(checkout, now)) || outboxHasEvents();
     if (!due) return false;
     // Marked first, so commands run while the child works don't start another.
     const prior = readJson<SyncState>(statePath(checkout));
@@ -639,11 +659,12 @@ export function maybeSyncInBackground(dir: string, now = Date.now()): boolean {
 
 /** `_trail-sync`: what the background child does. */
 export async function runSyncChild(dir: string): Promise<void> {
-  const cloud = readCloud();
-  if (!cloud) return;
-  const checkout = repoPlace(dir).checkout;
-  if (inWorkspace(checkout, cloud)) await syncRepo(checkout, cloud);
-  await flushActivity(cloud);
+  const clouds = readClouds();
+  if (!clouds.length) return;
+  const place = repoPlace(dir);
+  const cloud = cloudIn(clouds, place.key);
+  if (cloud && inWorkspace(place.checkout, cloud)) await syncRepo(place.checkout, cloud);
+  await flushActivity(clouds);
 }
 
 /** The name a learning's file goes by, from a path or a `ref:path`. */

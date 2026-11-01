@@ -14,6 +14,13 @@ import type { HookOut } from '../skills/types.js';
  * the installed hook entries carry. */
 export const CHILD_TIMEOUT_MS = 8000;
 
+/** The env a hook's graft child runs with. In a repo on trail with no map yet, the
+ * child starts its first build and answers at once: the wait it would otherwise do
+ * (graph/refresh.ts) outlasts any hook's budget. */
+function hookChildEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, GRAFT_FIRST_BUILD_WAIT_MS: '0' };
+}
+
 /**
  * Append `--dir <contextDir>` for the hooks' own `graft ask`/`graft check`
  * children — the one place the hooks spawn the CLI itself rather
@@ -35,7 +42,7 @@ export function graftJson(dir: string, args: string[], timeout: number = CHILD_T
     // out to the real CLI (which isn't built relative to the TS source under test).
     const cliPath = process.env.GRAFT_TEST_CLI ?? graftCliPath();
     const out = execFileSync(process.execPath, [cliPath, ...args],
-      { cwd: dir, encoding: 'utf8', timeout, input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'], windowsHide: true });
+      { cwd: dir, encoding: 'utf8', timeout, input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'], windowsHide: true, env: hookChildEnv() });
     return JSON.parse(out);
   } catch (e: any) {
     // `graft check` exits non-zero when the graph is stale (by design) but still
@@ -68,7 +75,7 @@ export function graftJsonWithin(dir: string, args: string[], timeout: number, in
     };
     try {
       const cliPath = process.env.GRAFT_TEST_CLI ?? graftCliPath();
-      const child = spawn(process.execPath, [cliPath, ...args], { cwd: dir, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      const child = spawn(process.execPath, [cliPath, ...args], { cwd: dir, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: hookChildEnv() });
       let out = '';
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk: string) => { out += chunk; });

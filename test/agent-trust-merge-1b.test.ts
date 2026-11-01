@@ -54,7 +54,7 @@ test('merge pass: the quotes the agent is asked to say are one line with no doub
     assert.ok(!/["\r\n]/.test(q), q);
     assert.doesNotMatch(q, /\[(?:trail|graft)\]/i, q);
   }
-  assert.match(kept!, /your preference for this repo \(preference, undo: trail forget l-0a0b0c0d\)/);
+  assert.match(kept!, /your learning for this repo \(learning, undo: trail forget l-0a0b0c0d\)/);
   assert.ok(!/[\r\n]/.test(forgetLine([{ at: NOW.toISOString(), what: 'skill', name: FORGED, back: FORGED }])));
 });
 

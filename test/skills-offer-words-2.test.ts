@@ -35,7 +35,7 @@ function offer(moment: "update" | "drift" | "retire", lines: [string, string], e
 
 test("lesson extend: line 2 is the design's copy word for word, the date and step filled (Nov 12 story)", () => {
   const [a, b] = updateLines(lessonFold);
-  assert.equal(b, "Fold your Oct 30 lesson into release-npm as step 5? 1 line changes. (yes / show me / no)");
+  assert.equal(b, "Fold your Oct 30 learning into release-npm as step 5? 1 line changes. (yes / show me / no)");
   assert.equal(a, "Published 0.22.4: npm shows it. This time release-npm also needed 'git push origin v0.22.4' after step 4.");
 });
 
@@ -53,7 +53,7 @@ test("two-uses extend, update and split lines, and the hand-edited line 2", () =
     "Keep steps 1 to 3 as their own skill, build-cli, beside release-npm? (yes / show me / no)",
   ]);
   assert.equal(updateLines({ ...lessonFold, handEdited: true })[1],
-    "Fold your Oct 30 lesson into release-npm as step 5? You changed release-npm by hand, so Trail writes it beside your file for you to compare. (yes / show me / no)");
+    "Fold your Oct 30 learning into release-npm as step 5? You changed release-npm by hand, so Trail writes it beside your file for you to compare. (yes / show me / no)");
 });
 
 test("drift: J15's line 2 is the design's copy word for word; line 1 names what it skipped and what it ran, at most 2 each (P16, R24)", () => {

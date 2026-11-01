@@ -15,7 +15,8 @@ import { everyRepoLearnings } from '../notes/every-repo.js';
 import { HOOK_RECORD_WAIT_MS, readInitRecord, updateInitRecord, type KeptName } from '../init/init-record.js';
 import { FROM_TRAIL } from '../skills/directive-words.js';
 
-const KIND_WORDS: Record<string, string> = { skill: 'skill', guardrail: 'guardrail', preference: 'preference', review: 'learning' };
+/** What each kept kind reads as: a learning, one marked always follow, or a skill (notes/units.ts). */
+const KIND_WORDS: Record<string, string> = { skill: 'skill', guardrail: 'always-follow learning', preference: 'learning', review: 'learning' };
 /**
  * A skill's or guardrail's name, or an id: what `trail forget` takes. The record sits in the Trail home, which an
  * agent can write, so anything else (words, a second command) is never named as an undo (b7 review).
@@ -29,7 +30,7 @@ function itemWords(k: KeptName, env: NodeJS.ProcessEnv): string {
   if (!name && k.kind === 'preference') {
     try { name = flatLine(everyRepoLearnings(env).find((n) => n.id === k.id)?.title ?? '', 60); } catch { /* no title */ }
     // D117 (5): not among the every-repo learnings, so kept for this repo (its words stay in that repo's folder).
-    name = name ? `"${name}"` : 'your preference for this repo';
+    name = name ? `"${name}"` : 'your learning for this repo';
   }
   const forget = FORGET_ARG.test(k.forget) ? k.forget : FORGET_ARG.test(k.id) ? k.id : '';
   return `${name || (FORGET_ARG.test(k.id) ? k.id : 'an item')} (${KIND_WORDS[k.kind] ?? 'item'}${forget ? `, undo: trail forget ${forget}` : ''})`;

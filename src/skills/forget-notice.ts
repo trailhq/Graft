@@ -104,7 +104,7 @@ export function takeForgets(env: NodeJS.ProcessEnv, now: Date): Dropped[] {
   return out;
 }
 
-const WHAT: Record<DroppedKind, string> = { skill: 'the skill', lesson: 'the lesson', learning: 'the learning', guardrail: 'the guardrail' };
+const WHAT: Record<DroppedKind, string> = { skill: 'the skill', lesson: 'the learning', learning: 'the learning', guardrail: 'the always-follow learning' };
 
 /** One line for the person: `trail: an agent ran trail forget: the skill x (bring it back: ...); ...`. */
 export function forgetLine(ds: Dropped[]): string {

@@ -33,7 +33,7 @@ test("the copy, by value", () => {
 test("the lines as they come out, for each kind and owner", () => {
   const kinds = [L("use pnpm, not npm"), L("never run npx prisma db push", "decision", "repo"), L("don't use npx", "guardrail", "team"), L("always run make lint before git push", null, "repo"),
     L("don't edit _schema.py by hand, run scripts/gen_schema.py")];
-  assert.deepEqual(kinds.map(whose), ["your preference", "this repo's decision", "your team's guardrail", "this repo's learning", "your preference"]);
+  assert.deepEqual(kinds.map(whose), ["your learning", "this repo's learning", "your team's always-follow learning", "this repo's learning", "your learning"]);
   const steps = ["npm ci", "npx prisma db push", "python scripts/gen_schema.py", "git push origin main", "npm test"].map((cmd, k) => ({ n: k + 1, cmd, gated: null }));
   for (const l of kinds) {
     const marks = recallMarks(steps, [l]);
@@ -46,14 +46,14 @@ test("the lines as they come out, for each kind and owner", () => {
     clean(f.line, l.quote);
     clean(withFollowLine(["Tests pass.", "Keep the 3 that worked as a skill, just for you in this repo? (yes / show me / no)"], f.line || undefined)[0], l.quote);
   }
-  const [a, b] = updateLines({ op: "update", why: "preference", follows: "your preference", steps: [1, 2, 3], check: "Tests pass (12 passed).", name: "run-tests", job: "tests", at: 1,
+  const [a, b] = updateLines({ op: "update", why: "preference", follows: "your learning", steps: [1, 2, 3], check: "Tests pass (12 passed).", name: "run-tests", job: "tests", at: 1,
     cmds: ["pnpm install --frozen-lockfile", "pnpm run build", "pnpm test"], changes: 3, handEdited: false });
-  assert.equal(a, "Tests pass (12 passed). This time steps 1, 2 and 3 of run-tests ran as 'pnpm install --frozen-lockfile', 'pnpm run build' and 1 more, the way your preference says.");
+  assert.equal(a, "Tests pass (12 passed). This time steps 1, 2 and 3 of run-tests ran as 'pnpm install --frozen-lockfile', 'pnpm run build' and 1 more, the way your learning says.");
   assert.equal(b, "Change steps 1, 2 and 3 of run-tests to match? 3 line changes. (yes / show me / no)");
   clean(a, "update line 1");
   clean(b, "update line 2");
-  assert.equal(updateLines({ op: "update", why: "preference", follows: "this repo's decision", check: "Tests pass.", name: "run-tests", job: "tests", at: 2, cmds: ["pnpm test"], changes: 1, handEdited: false })[0],
-    "Tests pass. This time step 2 of run-tests ran as 'pnpm test', the way this repo's decision says.");
+  assert.equal(updateLines({ op: "update", why: "preference", follows: "this repo's learning", check: "Tests pass.", name: "run-tests", job: "tests", at: 2, cmds: ["pnpm test"], changes: 1, handEdited: false })[0],
+    "Tests pass. This time step 2 of run-tests ran as 'pnpm test', the way this repo's learning says.");
   // The update offer's reason, which the agent reads, opens with who it is from.
   const offer = {
     offerId: "o-1a2b3c", moment: "update", runId: "r-1022-b6c1", name: "run-tests", key: "s-21ce56|update|v1", lines: [a, b], channel: "stop",

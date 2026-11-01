@@ -39,6 +39,17 @@ export function setBrand(b: Brand, env: NodeJS.ProcessEnv = process.env): void {
   env[BRAND_ENV] = b;
 }
 
+/**
+ * `init --pair CODE` is Trail's setup prompt: only Trail's page hands out a pair
+ * code, so the person asked for Trail, whatever name ran it. An agent whose
+ * install of @trailhq/trail-code failed swaps in the `graft` already on the
+ * machine, and an old shim loads dist/cli.js with no name; under graft either
+ * would skip the look-back and `.trail/` while the page waits for them.
+ */
+export function asksForTrail(argv: readonly string[]): boolean {
+  return argv.includes("init") && argv.some((a) => a === "--pair" || a.startsWith("--pair="));
+}
+
 /** `[trail]` or `[graft]`: the prefix agents and the statusline look for. */
 export function tag(env: NodeJS.ProcessEnv = process.env): string {
   return `[${brand(env)}]`;
@@ -138,11 +149,19 @@ export function trailOnPath(env: NodeJS.ProcessEnv = process.env): boolean {
   return commandOnPath("trail", env);
 }
 
+/**
+ * A package's own bin folder, which npm puts on PATH only for the command it
+ * runs: npx's temporary copy (`~/.npm/_npx/<hash>/node_modules/.bin`) or a
+ * project's dependencies. Agents start with the person's own PATH, so a
+ * command found only there isn't installed for them.
+ */
+const PACKAGE_BIN = /[\\/]node_modules[\\/]\.bin[\\/]?$/;
+
 /** Whether an executable called `name` is on PATH: a few stats, no process spawned. */
 export function commandOnPath(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
   const names = process.platform === "win32" ? [`${name}.cmd`, `${name}.exe`, name] : [name];
   for (const dir of (env.PATH ?? "").split(delimiter)) {
-    if (!dir) continue;
+    if (!dir || PACKAGE_BIN.test(dir)) continue;
     for (const n of names) {
       try {
         if (statSync(join(dir, n)).isFile()) return true;

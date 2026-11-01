@@ -61,7 +61,7 @@ test("the schema example: kept together, the preference goes into run-tests as a
     const all = items(home, place.repoKey);
     // The screen says so before the keep, on the preference's own line.
     const screen = screenLines(all, { cursor: 0, open: null }, factsOf());
-    assert.ok(screen.some((l) => l.endsWith("· kept with skill 1, it goes into that skill as a lesson, since a step of it already does this")), screen.join("\n"));
+    assert.ok(screen.includes("         Kept with skill 1, it goes into that skill as a learning, since a step of it already does this."), screen.join("\n"));
 
     const r = keepItems(all, all, "tty", env, NOW, place);
     assert.deepEqual(r.kept.map((i) => i.n), [1, 2]);
@@ -70,7 +70,7 @@ test("the schema example: kept together, the preference goes into run-tests as a
     const lessons = readLessons(join(env.TRAIL_HOME!, "skills", "run-tests"));
     assert.deepEqual(lessons.map((l) => [l.text, l.at]), [[PREF, "2026-07-03"]]);
     const after = afterKeepLines({ ...r, how: "enter" }, factsOf());
-    assert.ok(after.includes(`· "${PREF.replace(/"/g, "'")}" went into run-tests as a lesson, since a step of it already does that`), after.join("\n"));
+    assert.ok(after.includes(`· "${PREF.replace(/"/g, "'")}" went into run-tests as a learning, since a step of it already does that`), after.join("\n"));
 
     // What the agent hears when the skill comes back: the lesson, once, and no learning says it again.
     const c = cand(runTests(), { lastWorked: "2026-10-02" });

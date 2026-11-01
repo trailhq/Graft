@@ -66,7 +66,7 @@ function assertWired(repo: string, home: string): void {
   assert.deepEqual(ours(user), {
     PostToolUse: ["Write|Edit|MultiEdit:post-edit", "Bash|mcp__graft__|mcp__trail__|Read|Grep|Glob|Skill:tool-savings"],
     UserPromptSubmit: [":prompt"],
-    PreToolUse: ["Bash:pre-bash"],
+    PreToolUse: ["Write|Edit|MultiEdit:pre-edit", "Bash:pre-bash"],
     PostToolUseFailure: ["Bash:post-bash-fail"],
     SessionStart: [":session-start"],
     Stop: [":stop"],

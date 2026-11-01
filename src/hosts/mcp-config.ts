@@ -143,7 +143,7 @@ export function stripTomlSection(text: string, name: Brand = 'graft'): { rest: s
  * and re-append instead, so this converges like every other writer — foreign
  * tables are untouched either way.
  */
-function upsertCodexToml(id: string, path: string, name: Brand = 'graft'): McpWrite {
+export function upsertCodexToml(id: string, path: string, name: Brand = 'graft'): McpWrite {
   const existed = existsSync(path);
   const text = existed ? readFileSync(path, 'utf8') : '';
   const { command, args } = serverEntry({ brand: name });
@@ -270,11 +270,11 @@ function trailServerIn(t: McpTarget): boolean {
 export function registerMcpConfigs(
   repo: string,
   ids: string[],
-  opts: { home?: string; global?: boolean; name?: Brand } = {},
+  opts: { home?: string; global?: boolean; name?: Brand; laptop?: string[] } = {},
 ): McpWrite[] {
   const name = opts.name ?? 'graft';
   return mcpTargets(repo, ids, opts)
-    .filter((t) => opts.global !== false || t.scope !== 'global')
+    .filter((t) => t.scope !== 'global' || (opts.global !== false && (opts.laptop === undefined || opts.laptop.includes(t.hostId))))
     .map((t) => {
       if (name === 'graft' && t.scope === 'global' && trailServerIn(t)) return { id: t.id, path: t.path, action: 'unchanged' as const };
       return t.format === 'toml'

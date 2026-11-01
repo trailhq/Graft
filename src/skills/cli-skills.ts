@@ -328,8 +328,8 @@ export function registerSkillCommands(program: Command, deps: SkillCliDeps = {})
       onlyRun(cmd);
       guarded(x, () => add(x, name, opts.run))();
     });
-  skills.command('lesson').description('Keep the lesson Trail offered, after the person typed yes to it (what was typed decides; no flag does)')
-    .argument('[skill]', 'the skill the lesson rides with (none for a lesson about an error)')
+  skills.command('lesson').description('Keep the learning Trail offered, after the person typed yes to it (what was typed decides; no flag does)')
+    .argument('[skill]', 'the skill the learning rides with (none for one about an error)')
     .requiredOption('--offer <offer-id>', 'the offer the person said yes to', (v: string, prev?: string) => {
       if (prev !== undefined) throw new InvalidArgumentError('give --offer once.');
       return v;
@@ -340,7 +340,7 @@ export function registerSkillCommands(program: Command, deps: SkillCliDeps = {})
     });
   skills.command('keep').description("Keep a skill Trail held because nobody said yes. Only you, in your own terminal").argument('<name...>', 'the held skill')
     .action((names: string[]) => guarded(x, () => keep(x, names))());
-  skills.command('forget').description('Forget a skill (trail skills restore brings it back), a lesson or a learning by its id, or a guardrail').argument('<name>', 'the skill, lesson id, learning id or guardrail')
+  skills.command('forget').description('Forget a skill (trail skills restore brings it back), or a learning by its id or name').argument('<name>', 'the skill, or the learning id or name')
     .action((name: string) => guarded(x, () => forget(x, name))());
   skills.command('restore').description('Bring back the skill you forgot last, or with --version <n> an older version of a skill (only you, in your own terminal)')
     .argument('<name>', 'the skill')
@@ -370,6 +370,6 @@ export function registerSkillCommands(program: Command, deps: SkillCliDeps = {})
   skills.command('off').description('Turn skills off, or one skill').argument('[name]', 'one skill')
     .action((name: string | undefined) => guarded(x, () => onOff(x, 'off', name))());
 
-  program.command('forget', { hidden: true }).description('Forget one of your skills (trail skills restore brings it back), a lesson or a learning by its id, or a guardrail').argument('<name>', 'the skill, lesson id, learning id or guardrail')
+  program.command('forget', { hidden: true }).description('Forget one of your skills (trail skills restore brings it back), or a learning by its id or name').argument('<name>', 'the skill, or the learning id or name')
     .action((name: string) => guarded(x, () => forget(x, name))());
 }

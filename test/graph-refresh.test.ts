@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -479,4 +479,128 @@ test("a process killed while holding the lock releases it", async (t) => {
   assert.ok(!existsSync(lock), "the lock must not outlive the process that took it");
   assert.equal(signal, "SIGTERM", "and the exit still reports the signal, for whoever is waiting on us");
   assert.equal(code, null);
+});
+
+// ── a repo on trail that this machine never built ─────────────────────────
+
+/** A repo on trail: it has `.trail/learnings/`, so its map lives in `.trail/cache/`. */
+function trailRepo(): string {
+  const d = repo();
+  mkdirSync(join(d, ".trail", "learnings"), { recursive: true });
+  return d;
+}
+const trailOut = (d: string): string => join(d, ".trail", "cache");
+
+/**
+ * Stands in for `claude/sync-run.js`, which runs the first build detached. It logs
+ * its argv, then holds the lock a while (`hold`), puts back a map the test built
+ * and moved aside (`copy`), or gives up (`fail`), and releases the lock as the
+ * real one does.
+ */
+function firstBuildStub(d: string, mode: "hold" | "copy" | "fail", from = ""): { log: string; restore: () => void } {
+  const stub = join(d, "first-build-stub.mjs");
+  const log = join(d, "first-build-runs.log");
+  writeFileSync(
+    stub,
+    `import { appendFileSync, cpSync, rmSync } from "node:fs";
+import { join } from "node:path";
+const [dir, timeout] = process.argv.slice(2);
+appendFileSync(${JSON.stringify(log)}, JSON.stringify({ dir, timeout }) + "\\n");
+const out = join(dir, ".trail", "cache");
+const done = () => rmSync(join(out, ".cache", ".sync.lock"), { force: true });
+if (${JSON.stringify(mode)} === "hold") setTimeout(done, 3000);
+else {
+  if (${JSON.stringify(mode)} === "copy") cpSync(${JSON.stringify(from)}, out, { recursive: true });
+  done();
+}
+`,
+  );
+  process.env.GRAFT_TEST_SYNC_RUN = stub;
+  return { log, restore: () => { delete process.env.GRAFT_TEST_SYNC_RUN; } };
+}
+
+/** The builds the stub was started for, once it has had a moment to log them. */
+async function runsIn(log: string): Promise<Array<{ dir: string; timeout: string }>> {
+  for (let i = 0; i < 40 && !existsSync(log); i++) await new Promise((r) => setTimeout(r, 50));
+  return existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
+}
+
+test("a repo on trail with no map: the first query starts one build, and a hook's query doesn't wait for it", async () => {
+  const d = trailRepo();
+  const { log, restore } = firstBuildStub(d, "hold");
+  try {
+    const started = Date.now();
+    const r = await ensureFreshGraph(d, { firstBuildWaitMs: 0 });
+    assert.ok(Date.now() - started < 1500, "a wait of 0 answers at once");
+    assert.match(r.note ?? "", /building one in the background/);
+
+    // The hooks set the wait through the env. A query arriving mid-build joins it.
+    process.env.GRAFT_FIRST_BUILD_WAIT_MS = "0";
+    try {
+      const again = await ensureFreshGraph(d);
+      assert.match(again.note ?? "", /building one in the background/);
+    } finally {
+      delete process.env.GRAFT_FIRST_BUILD_WAIT_MS;
+    }
+    const runs = await runsIn(log);
+    assert.equal(runs.length, 1, "one build, however many queries arrive meanwhile");
+    assert.equal(runs[0]!.dir, d);
+    assert.ok(Number(runs[0]!.timeout) > 120000, "with a longer limit than the end-of-turn rebuild's");
+  } finally {
+    restore();
+  }
+});
+
+test("the first query waits for that build, then answers from the new map", async () => {
+  const d = trailRepo();
+  await buildGraph(d);
+  assert.ok(existsSync(wiringPath(trailOut(d))), "a repo on trail builds into .trail/cache");
+  const built = join(mkdtempSync(join(tmpdir(), "graft-built-")), "cache");
+  renameSync(trailOut(d), built);
+  const { log, restore } = firstBuildStub(d, "copy", built);
+  try {
+    const r = await ensureFreshGraph(d, { firstBuildWaitMs: 10_000 });
+    assert.equal((await runsIn(log)).length, 1);
+    assert.match(refreshNote(r) ?? "", /built this repo's code map for the first time/);
+    const graph = readGraph(wiringPath(trailOut(d))) as GraphV1;
+    assert.ok(graph.nodes.some((n) => n.id === "src/math.ts#add"), "the query answers from the map just built");
+  } finally {
+    restore();
+  }
+});
+
+test("a first build that ends without a map says so, rather than waiting on", async () => {
+  const d = trailRepo();
+  const { restore } = firstBuildStub(d, "fail");
+  try {
+    const started = Date.now();
+    const r = await ensureFreshGraph(d, { firstBuildWaitMs: 10_000 });
+    assert.match(r.note ?? "", /couldn't build this repo's code map/);
+    assert.ok(Date.now() - started < 5000, "the wait ends when the build does");
+  } finally {
+    restore();
+  }
+});
+
+test("outside a repo on trail, under --dir, or in the home folder, no map is built behind the user's back", async () => {
+  const plain = repo();
+  const { log, restore } = firstBuildStub(plain, "fail");
+  const home = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  try {
+    assert.equal((await ensureFreshGraph(plain, { firstBuildWaitMs: 0 })).note, undefined);
+
+    const d = trailRepo();
+    assert.equal((await ensureFreshGraph(d, { contextDir: join(d, "elsewhere"), firstBuildWaitMs: 0 })).note, undefined);
+
+    process.env.HOME = d;
+    process.env.USERPROFILE = d;
+    assert.equal((await ensureFreshGraph(d, { firstBuildWaitMs: 0 })).note, undefined);
+  } finally {
+    for (const [k, v] of Object.entries(home)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    restore();
+  }
+  assert.deepEqual(await runsIn(log), []);
 });

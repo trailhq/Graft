@@ -41,7 +41,7 @@ test("moment 4: the yes keeps the lesson on the skill, with its saved line and a
   const r = await keep(b, 230, lessonCmd(o));
   assert.equal(r.decision, null, JSON.stringify(r.decision));
   assert.equal(r.cli!.code, 0, r.cli!.line);
-  assert.match(r.cli!.line, /^✓ lesson added to release-npm, just for you · it rides at the end of the skill's steps · undo: trail forget ls-[0-9a-f]{6}$/);
+  assert.match(r.cli!.line, /^✓ learning added to release-npm, just for you · it rides at the end of the skill's steps · undo: trail forget ls-[0-9a-f]{6}$/);
   assert.deepEqual(lessons(b), ["release-npm:push the tag too: git push origin --tags"]);
   const line = readLedger("s-7f3a2c", b.env).find((l) => l.event === "lesson") as { lessonId: string; src: string } | undefined;
   assert.equal(line?.src, "correction");
@@ -58,7 +58,7 @@ test("moment 3: the yes keeps the wall lesson in every repo, and it starts with 
   assert.equal(r.cli!.code, 0, r.cli!.line);
   const id = /trail forget (l-[0-9a-f]{8})$/.exec(r.cli!.line)?.[1];
   assert.ok(id, r.cli!.line);
-  assert.equal(r.cli!.line, `✓ lesson kept, just for you in every repo · Trail shows it when "rootless Docker not found" comes back · undo: trail forget ${id}`);
+  assert.equal(r.cli!.line, `✓ learning kept, just for you in every repo · Trail shows it when "rootless Docker not found" comes back · undo: trail forget ${id}`);
   const worked = readWalls(b.env).classes["docker-rootless"]!.lessons[id!]!.worked;
   assert.equal(worked.length, 2);
   assert.deepEqual(worked.map((w) => w.d), ["2026-10-24", "2026-10-27"]);
@@ -200,7 +200,7 @@ for (const [name, attempt, allowed] of rows) {
     const got = outcome(r);
     const legit = (b as unknown as { _legit?: number })._legit ?? 0;
     assert.ok(allowed.includes(got), `${name}: ${got} ${JSON.stringify(r.decision ?? r.cli)}`);
-    if (got === "held") assert.match(r.cli!.line, /^trail · lesson not kept: /);
+    if (got === "held") assert.match(r.cli!.line, /^trail · learning not kept: /);
     assert.equal(lessons(b).length, legit, "no lesson written by the attempt");
   });
 }
@@ -211,7 +211,7 @@ test("saveOrLessonGate sends a lesson command to the lesson gate and an add to 1
   sayLines(b, 60, o);
   const input = (command: string) => ({ ...b.payload, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command }, tool_use_id: "toolu_x1", cwd: "/home/dev/shop" });
   const d = await saveOrLessonGate(input(lessonCmd(o)), "/home/dev/shop", { ...b.env, TRAIL_TEST_NOW: T(80).toISOString() });
-  assert.match(d?.reason ?? "", /^trail · lesson not kept: the person didn't say yes/);
+  assert.match(d?.reason ?? "", /^trail · learning not kept: the person didn't say yes/);
   const a = await saveOrLessonGate(input("trail skills add x --run r-1"), "/home/dev/shop", b.env);
   assert.match(a?.reason ?? "", /^trail · not saved: /);
   assert.deepEqual(parseSkillsLesson("npx -y @trailhq/trail-code skills lesson release-npm --offer=o-1a2b3c"), { skill: "release-npm", offerId: "o-1a2b3c", flags: [] });

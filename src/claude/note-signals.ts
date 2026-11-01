@@ -11,6 +11,8 @@
  * - `undone`: an edit was undone (`git restore`, `git revert`, …);
  * - `chose`: the person picked one of the options the agent offered, and the
  *   agent went on to change code;
+ * - `overrode`: `trail check` found the change goes against a learning, and
+ *   the work shipped anyway with the files it named left as they were;
  * - `shipped`: `git commit`, `git push` or `gh pr create` after code edits;
  * - `explored`: one turn took NOTE_WORTHY_READING tokens of reading to answer,
  *   with no edit needed: where a feature lives, why a bug happens.
@@ -26,7 +28,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { trailOwnPath } from '../notes/git-facts.js';
 import { NOTE_CALL } from '../notes/session-cost.js';
 
-export type NoteSignalKind = 'fixed' | 'corrected' | 'undone' | 'chose' | 'shipped' | 'explored';
+export type NoteSignalKind = 'fixed' | 'corrected' | 'undone' | 'chose' | 'overrode' | 'shipped' | 'explored';
 
 export interface NoteSignal {
   kind: NoteSignalKind;
@@ -78,11 +80,14 @@ const LEADING_CD = /^\s*cd\s+(["']?)([^"'&;|]+?)\1\s*(?:&&|;)/;
 
 /**
  * A test, build or type check, as typed: `npm test`, `go test`, `pytest`,
- * `npx tsc`, `make`. The match is the command's name for itself, so two runs
- * of `go test` with different flags are the same check.
+ * `npx tsc`, `make`; or a deploy or CI step that can fail the same way:
+ * `docker build`, `kubectl apply`, `terraform plan`, `helm upgrade`. A folder
+ * flag before the verb counts too (`go -C backend test`, `npm --prefix web test`).
+ * The match is the command's name for itself, so two runs of `go test` with
+ * different flags are the same check.
  */
 const CHECK =
-  /(?:^|[;&|(]\s*|\s)((?:npx\s+|bunx\s+|pnpm\s+exec\s+)?(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|build|lint|typecheck|check)(?::[\w-]+)?|go\s+(?:test|build|vet)|cargo\s+(?:test|build|check|clippy)|python3?\s+-m\s+(?:pytest|unittest)|pytest|tsc|jest|vitest|mocha|rspec|node\s+--test|deno\s+test|swift\s+(?:test|build)|dotnet\s+(?:test|build)|mix\s+test|mvn\s+[\w:-]*(?:test|verify|package)|\.?\/?gradlew?\s+[\w:-]*(?:test|build)|make(?:\s+(?!-)[\w-]+)?|eslint|ruff|golangci-lint))(?=$|[\s;&|)])/;
+  /(?:^|[;&|(]\s*|\s)((?:npx\s+|bunx\s+|pnpm\s+exec\s+)?(?:(?:npm|pnpm|yarn|bun)\s+(?:(?:--prefix|--cwd|--dir|-C)[=\s]\S+\s+)?(?:run\s+)?(?:test|build|lint|typecheck|check)(?::[\w-]+)?|go\s+(?:-C[=\s]\S+\s+)?(?:test|build|vet)|cargo\s+(?:test|build|check|clippy)|python3?\s+-m\s+(?:pytest|unittest)|pytest|tsc|jest|vitest|mocha|rspec|node\s+--test|deno\s+test|swift\s+(?:test|build)|dotnet\s+(?:test|build)|mix\s+test|mvn\s+[\w:-]*(?:test|verify|package)|\.?\/?gradlew?\s+[\w:-]*(?:test|build)|make(?:\s+(?!-)[\w-]+)?|eslint|ruff|golangci-lint|docker\s+(?:build|compose\s+(?:up|build))|kubectl\s+(?:apply|rollout\s+status)|terraform\s+(?:plan|apply|validate)|helm\s+(?:install|upgrade|lint|template)))(?=$|[\s;&|)])/;
 
 /** Output that says a check failed even when a pipe (`| tail`) hid its exit code. */
 const FAILED_OUTPUT =
@@ -91,6 +96,11 @@ const ZERO_FAILED = /\b0 (?:failed|failing)\b|^# fail 0\b/m;
 
 const UNDO = /\bgit\s+(?:restore|revert|reset\s+--hard|checkout\s+(?:\S+\s+)?--\s)/;
 const SHIP = /\b(git\s+commit|git\s+push|gh\s+pr\s+create)\b/;
+/** `trail check` saying the change goes against a learning: its own exit 1, or the reason pre-bash-check.ts stops a commit with. */
+const TRAIL_CHECK = /(?:^|[\s;&|])(?:trail|graft)\s+check\b/;
+const CHECK_STOP = /^trail check found \d+ conflicts?\b/m;
+/** The files a conflict names: `- path:line: …` in the stop's reason, `✗ path:line` in the check's own output. */
+const CONFLICT_FILE = /^(?:- |✗ )([^\s:]+)(?::\d+)?:?/gm;
 /** Commands that set tools up rather than work on the repo. */
 const SETUP = /(?:^|[\s;&|])(?:trail|graft|npx\s+(?:-y\s+)?@(?:trailhq|nanonets)\/[\w-]+)\s|(?:npm|pnpm|yarn|bun)\s+(?:i|install|add|uninstall)\b|\bbrew\s+install\b|\bpip3?\s+install\b/;
 
@@ -306,6 +316,25 @@ export function noteSignals(jsonl: string, repo: string): NoteSignal[] {
   const choice = picked();
   if (choice) out.push(choice);
 
+  // overrode: trail check named a conflict with a learning, and the work shipped anyway, those files left as they were.
+  const conflict = [...work].reverse().find((t) => {
+    const c = bash(t);
+    const r = results.get(t.id);
+    return !!c && !!r && (CHECK_STOP.test(r.text) || (TRAIL_CHECK.test(c) && r.error));
+  });
+  if (conflict) {
+    const named = [...(results.get(conflict.id)?.text ?? '').matchAll(CONFLICT_FILE)].map((m) => m[1]!);
+    const after = work.filter((t) => t.at > conflict.at);
+    const touched = after.some((t) => named.includes(codeEdit(t) ?? '\0'));
+    const shipped = after.find((t) => {
+      const c = bash(t);
+      return !!c && SHIP.test(c) && results.get(t.id)?.error !== true;
+    });
+    if (shipped && !touched) {
+      out.push({ kind: 'overrode', key: `overrode:${shipped.uuid}`, what: `trail check found this change goes against a learning, and it shipped anyway.` });
+    }
+  }
+
   // shipped: the work went into a commit, a push or a PR with no learning beside it.
   if (work.some((t) => codeEdit(t) !== null)) {
     for (const t of [...work].reverse()) {
@@ -336,23 +365,25 @@ export function noteSignals(jsonl: string, repo: string): NoteSignal[] {
   return out;
 }
 
-const SAVE = '`trail note --title "<the fact, not the task>"`';
-const CLOSE = 'Sections: ## Decided, ## Tried and ruled out, ## Watch out. A summary, never a transcript, nothing secret. Then finish as trail\'s output asks.';
+const SAVE = '`trail note --title "<the decision in plain words a teammate understands, no file names>"`';
+const CLOSE = 'Put files, commands and values in the body under "In the code:". Sections: ## Decided, ## Tried and ruled out, ## Watch out. A summary, never a transcript, nothing secret. Then finish as trail\'s output asks.';
 
 /** What the agent is told: the sign first, since Claude Code folds long hook output to its first lines. */
 export function noteAsk(s: NoteSignal): string {
   const skip = 'Nothing worth keeping? Say so and stop.';
   const first =
     s.kind === 'fixed'
-      ? `${s.what} If the cause isn't obvious from the diff, save it: ${SAVE}, naming the file and the why. ${skip}`
+      ? `${s.what} If the cause isn't obvious from the diff, save it: ${SAVE}, with the why. ${skip}`
       : s.kind === 'corrected'
-        ? `${s.what} Save the rule so nobody has to say it again: ${SAVE}, naming the file it's about; add --personal if it's about how this person likes to work. ${skip}`
+        ? `${s.what} Save it as a learning so nobody has to say it again: ${SAVE}; add --personal if it's about how this person likes to work. ${skip}`
         : s.kind === 'undone'
-          ? `${s.what} If you dropped an approach, save why under ## Tried and ruled out: ${SAVE}, naming the file. ${skip}`
-          : s.kind === 'chose'
-            ? `${s.what} If the choice matters to the next person, save it under ## Decided, with the options you dropped and why under ## Tried and ruled out: ${SAVE}. ${skip}`
-            : s.kind === 'explored'
-              ? `${s.what} If it found where something lives or why it works the way it does, and the code won't say so plainly, save it: ${SAVE}, naming the files. ${skip}`
-              : `${s.what} If the session found what the diff won't tell the next person (a cause, a dropped approach, a rule), save it now so it ships with the change: ${SAVE}. ${skip}`;
+          ? `${s.what} If you dropped an approach, save why under ## Tried and ruled out: ${SAVE}. ${skip}`
+          : s.kind === 'overrode'
+            ? `${s.what} If the learning no longer holds, save what changed and why, so the next person isn't told the old way: ${SAVE} with \`--replaces <the old learning's file>\`. If the learning still holds and this is an exception, say so and stop.`
+            : s.kind === 'chose'
+              ? `${s.what} If the choice matters to the next person, save it under ## Decided, with the options you dropped and why under ## Tried and ruled out: ${SAVE}. ${skip}`
+              : s.kind === 'explored'
+                ? `${s.what} If it found where something lives or why it works the way it does, and the code won't say so plainly, save it: ${SAVE}. ${skip}`
+                : `${s.what} If the session found what the diff won't tell the next person (a cause, a dropped approach, how something is done here), save it now so it ships with the change: ${SAVE}. ${skip}`;
   return `[trail] ${first}\n${CLOSE}`;
 }

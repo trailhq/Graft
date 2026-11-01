@@ -48,15 +48,15 @@ export function yesCommand(o: PendingOffer): string {
 
 /** What Trail offered, for the answers. */
 function offered(o: PendingOffer): string {
-  if (o.moment === 'correction') return `Trail offered to add a lesson to the skill ${one(o.name)}, from what they said when they corrected it`;
-  if (isLessonOffer(o)) return `Trail offered to keep what got past ${wallWords(o)} as a lesson`;
+  if (o.moment === 'correction') return `Trail offered to add a learning to the skill ${one(o.name)}, from what they said when they corrected it`;
+  if (isLessonOffer(o)) return `Trail offered to keep what got past ${wallWords(o)} as a learning`;
   return `Trail offered to keep the steps that got past ${wallWords(o)} as a skill`;
 }
 
 /** Trail's own reason for the offer (D101). */
 function reason(o: PendingOffer): string {
   if (o.moment === 'correction') {
-    return `The person corrected ${one(o.name)}, a skill Trail brought in for this job; Trail offers once to add what they said to it as a lesson.`;
+    return `The person corrected ${one(o.name)}, a skill Trail brought in for this job; Trail offers once to add what they said to it as a learning.`;
   }
   const program = one(o.repair?.program ?? '', 40) || 'a command';
   const n = Math.floor(Number(o.repair?.nth));

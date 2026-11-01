@@ -407,6 +407,7 @@ test("the trail skill's description names when to use its commands, and the body
   assert.match(data.description, /save a learning with trail note and commit it with the change/);
   assert.match(data.description, /\.trail\/learnings\//, "where the learnings are, for a Claude without trail");
   assert.match(data.description, /npm install -g @trailhq\/trail/, "and how to get the command");
+  assert.match(data.description, /If npm says EACCES, never use sudo/, "and never with sudo");
   assert.doesNotMatch(data.description, /graft/, "nothing about the old name or the graft\/ folder");
   const moments = content.indexOf("## When to reach for trail");
   assert.ok(moments >= 0 && moments < content.indexOf("## The tools"), "the moments come before the tool docs");
@@ -427,7 +428,7 @@ test("the session-start directive mentions learnings only in a repo that keeps t
   assert.match(some, /📝 Started from Priya's learning, adding what it saved \(· saved ~90k tokens and ~12 min\) only when (trail|graft) prints that with it/, "the closing line, by example");
   assert.doesNotMatch(some, /3x faster/, "no value claim by example");
   assert.match(some, /Save a learning when the session finds what the code can't tell the next person/);
-  assert.match(some, /never for setting up trail, status, or what the diff shows/);
+  assert.match(some, /Never for setting up trail, status, or what the diff shows/);
   assert.match(some, /commit it with the change/);
   const none = formatOrientation("# map", 100, undefined, 0, true);
   assert.doesNotMatch(none, /This repo has/);

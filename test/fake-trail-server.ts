@@ -5,11 +5,12 @@
  * `TRAIL_TEST_SERVER=http://127.0.0.1:8787 trail init --connect TRL-GOOD-C0DE`).
  *
  * Shapes follow the onboarding contract (A1: connect, stages, summary; A2:
- * the workspace connector's brain tools over MCP streamable HTTP, stateless
- * and JSON). Everything it's sent is kept in `log`, in order.
+ * the workspace's MCP server at /mcp, stateless and JSON, from
+ * fake-workspace-mcp.ts). Everything it's sent is kept in `log`, in order.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { answerWorkspace } from "./fake-workspace-mcp.js";
 
 export const GOOD_CODE = "TRL-GOOD-C0DE";
 export const TOKEN = "trl_test_token";
@@ -26,15 +27,6 @@ export interface FakeTrail {
   log: Logged[];
   close(): Promise<void>;
 }
-
-const BRAIN_TOOLS = [
-  { name: "list_brains", description: "Remote: the workspace's brains.", inputSchema: { type: "object", properties: {} } },
-  { name: "get_context", description: "Remote: rules that apply to a task.", inputSchema: { type: "object", properties: { query: { type: "string" }, brain: { type: "string" } }, required: ["query"] } },
-  { name: "search_rules", description: "Remote: search rules.", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
-  { name: "get_rules", description: "Remote: every rule in a brain.", inputSchema: { type: "object", properties: { brain: { type: "string" } }, required: ["brain"] } },
-  // The connector serves agent tools too; only the brain tools may come through.
-  { name: "list_agents", description: "Remote: agents.", inputSchema: { type: "object", properties: {} } },
-];
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
@@ -89,20 +81,12 @@ export async function startFakeTrail(port = 0): Promise<FakeTrail> {
       if (!authed) return send(res, 401, { error: "invalid token", error_code: "token_invalid" });
       return send(res, 200, { ok: true, repo: body?.repo, summary_at: new Date().toISOString() });
     }
-    if (path === "/api/v1/mcp" || path === "/mcp") {
+    if (path === "/mcp") {
+      // The workspace's MCP server, stateless and JSON, as trail-cloud runs it.
       if (!authed) return send(res, 401, { error: "invalid_token" });
       if (body?.id === undefined) return send(res, 202, undefined);
-      const reply = (result: unknown) => send(res, 200, { jsonrpc: "2.0", id: body.id, result });
-      if (body.method === "initialize") return reply({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "trail-workspace", version: "0" } });
-      if (body.method === "tools/list") return reply({ tools: BRAIN_TOOLS });
-      if (body.method === "tools/call") {
-        const { name, arguments: args } = body.params ?? {};
-        if (name === "get_context")
-          return reply({ content: [{ type: "text", text: `Brand brain · rule r1: Write "Trail", never "TRAIL". (asked: ${args?.query})` }], structuredContent: { rules: [{ rule_id: "r1", brain: { name: "Brand" } }] } });
-        if (name === "list_brains") return reply({ content: [{ type: "text", text: "Brand (12 rules)" }] });
-        return send(res, 200, { jsonrpc: "2.0", id: body.id, error: { code: -32602, message: `unknown tool ${name}` } });
-      }
-      return send(res, 200, { jsonrpc: "2.0", id: body.id, error: { code: -32601, message: "method not found" } });
+      const a = answerWorkspace(body);
+      return send(res, 200, a.error ? { jsonrpc: "2.0", id: body.id, error: a.error } : { jsonrpc: "2.0", id: body.id, result: a.result });
     }
     return send(res, 404, { error: "no route" });
   });

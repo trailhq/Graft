@@ -31,7 +31,7 @@ export const UPDATE_COPY = {
   line2Preference: 'Change {steps} of {name} to match? {size} (yes / show me / no)',
   line1Extend: '{check} This time {name} also needed {cmds} {where}.',
   line1Split: '{check} This time {name} ran only steps {from} to {to}, as it did last time.',
-  line2Lesson: 'Fold your {date} lesson into {name} as {steps}? {size} (yes / show me / no)',
+  line2Lesson: 'Fold your {date} learning into {name} as {steps}? {size} (yes / show me / no)',
   line2TwoUses: 'Add {it} to {name} as {steps}? {They} ran in your last 2 {jobs}. {size} (yes / show me / no)',
   line2Update: 'Change step {step} of {name} to the command that worked? {size} (yes / show me / no)',
   line2Split: 'Keep steps {from} to {to} as their own skill, {new}, beside {name}? (yes / show me / no)',

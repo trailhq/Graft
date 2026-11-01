@@ -43,7 +43,7 @@ test("D88/D101: a lesson edited by hand to skip the ask never reaches the block,
     lesson({ id: "ls-000003", text: "build first: npm run build" }),
   ]));
   assert.ok(!/ask first, just|skip the confirmation/.test(block), block);
-  assert.ok(block.endsWith("  Lesson (the person, Nov 3): build first: npm run build"), block);
+  assert.ok(block.endsWith("  New learning (the person, Nov 3): build first: npm run build"), block);
 });
 
 /* ---------------------------------------------------------- meaning flips */
@@ -66,7 +66,7 @@ test("4.14 step 3 at read time too: a lesson that runs a gated command is left o
     lesson({ id: "ls-000003", at: "2026-11-03", text: "never npm publish from a laptop", kind: "guardrail" }),
   ]));
   assert.ok(!/kubectl apply|publish --access/.test(block), block);
-  assert.ok(block.includes("  Lesson (the person, Nov 3): never npm publish from a laptop"), block);
+  assert.ok(block.includes("  Always follow (the person, Nov 3): never npm publish from a laptop"), block);
   assert.equal(correctionPhrase("you forgot to npm publish"), null, "the phrase would be a gated command the block never gates");
   assert.equal(correctionPhrase("don't forget to run git push --force origin main"), null, "a never-save command");
   assert.equal(lessonRefused("push the tag too: git push origin v1.4.2"), null);
@@ -117,7 +117,7 @@ test("readLessons: past 50 files the newest are read, and -10 sorts after -2 wit
   put("2026-11-03-2.md", "2026-11-03", "newest day two");
   put("2026-11-03-10.md", "2026-11-03", "newest day ten");
   const lines = lessonLines(readLessons(skill));
-  assert.deepEqual(lines, ["Lesson (the person, Nov 3): newest day one", "Lesson (the person, Nov 3): newest day two", "Lesson (the person, Nov 3): newest day ten"]);
+  assert.deepEqual(lines, ["New learning (the person, Nov 3): newest day one", "New learning (the person, Nov 3): newest day two", "New learning (the person, Nov 3): newest day ten"]);
 });
 
 test("a hand-set kind: guardrail does not make any text untrimmable: the kind comes from the text (spec 13)", () => {

@@ -69,7 +69,7 @@ test('the schema example: the preference and the skill step that runs gen_schema
     const ctx = ctxOf(one(await promptHook(s, at(22, 5), 'run the test suite, I touched the _schema file')));
     assert.match(ctx, new RegExp(`\\[trail\\] Skill ${name} fits`), ctx);
     assert.equal(count(ctx, pref), 1, `one mention, not two:\n${ctx}`);
-    assert.match(ctx, /\n {2}Step 1 follows your preference: "don't edit _schema\.py by hand, run scripts\/gen_schema\.py"\.\n/);
+    assert.match(ctx, /\n {2}Step 1 follows your learning: "don't edit _schema\.py by hand, run scripts\/gen_schema\.py"\.\n/);
     assert.doesNotMatch(ctx, /learnings earlier sessions left on this/, 'no learnings lines repeat it');
 
     // Without the skill the same prompt still brings the preference as a learning: the dedupe is the block's, not a loss.
@@ -103,7 +103,7 @@ test('the schema example with a learning on file open: whichever comes first, th
     const ctx = ctxOf(one(await promptHook(s, at(22, 5), 'run the test suite, I touched the _schema file')));
     assert.match(ctx, new RegExp(`\\[trail\\] Skill ${name} fits`), ctx);
     assert.equal(count(ctx, pref), 1, ctx);
-    assert.match(ctx, /Step 1 follows your preference/);
+    assert.match(ctx, /Step 1 follows your learning/);
     assert.doesNotMatch(await opens(s, at(22, 20), 'src/_schema.py'), /_schema\.py by hand/, 'the block already said it');
 
     // The file is opened first: the block keeps its steps and drops the follows line.
@@ -132,7 +132,7 @@ test('pnpm vs npm: the offer names it in one line, the yes keeps the steps the p
     const blocked = await finish(t, 30, 'All 12 tests pass.');
     assert.equal(blocked?.decision, 'block', JSON.stringify(blocked));
     const offer = stateOf(t).pendingOffer!;
-    assert.match(offer.lines[0]!, / Steps 1, 2 and 3 follow your preference "use pnpm, not npm" rather than this run's commands\.$/, offer.lines[0]);
+    assert.match(offer.lines[0]!, / Steps 1, 2 and 3 follow your learning "use pnpm, not npm" rather than this run's commands\.$/, offer.lines[0]);
     assert.match(offer.lines[1]!, /^Keep the 3 that worked as a skill/);
     assert.ok(offer.lines[0]!.length <= 400);
     assert.ok(blocked!.reason.includes(offer.lines[0]!), 'the agent says the line as Trail wrote it');
@@ -149,7 +149,7 @@ test('pnpm vs npm: the offer names it in one line, the yes keeps the steps the p
     assert.match(file, /pnpm run build/);
     assert.match(file, /pnpm test/);
     assert.doesNotMatch(file, /(?:^|[\s`(])npm (?:ci|test|run)\b/m, file);
-    assert.match(lastCli()!.lines[1]!, /Steps 1, 2 and 3 follow your preference "use pnpm, not npm" rather than this run's commands\./);
+    assert.match(lastCli()!.lines[1]!, /Steps 1, 2 and 3 follow your learning "use pnpm, not npm" rather than this run's commands\./);
   } finally {
     done(b);
   }
@@ -168,9 +168,9 @@ test('pnpm vs npm at recall: the preference wins in the block, and the update of
     const s = session(b);
     const ctx = ctxOf(one(await promptHook(s, at(22, 0), 'run the test suite')));
     assert.match(ctx, new RegExp(`^\\[trail\\] Skill ${name} fits`), ctx);
-    assert.match(ctx, /\n {2}1 pnpm install --frozen-lockfile \(your preference's way; the skill has npm ci\)\n/, ctx);
-    assert.match(ctx, /\n {2}3 pnpm test \(your preference's way; the skill has npm test\)\n/);
-    assert.match(ctx, /\n {2}Your preference wins over the skill: "use pnpm, not npm"\. Steps 1, 2 and 3 are written its way; run them as shown\.\n/);
+    assert.match(ctx, /\n {2}1 pnpm install --frozen-lockfile \(your learning's way; the skill has npm ci\)\n/, ctx);
+    assert.match(ctx, /\n {2}3 pnpm test \(your learning's way; the skill has npm test\)\n/);
+    assert.match(ctx, /\n {2}Your learning wins over the skill: "use pnpm, not npm"\. Steps 1, 2 and 3 are written its way; run them as shown\.\n/);
     const inj = stateOf(s).injected.at(-1)!;
     assert.deepEqual(inj.steps, ['pnpm install --frozen-lockfile', 'pnpm run build', 'pnpm test'], 'credit reads the steps as the block showed them');
     assert.equal(inj.check, 'pnpm test');
@@ -185,7 +185,7 @@ test('pnpm vs npm at recall: the preference wins in the block, and the update of
     assert.equal(offer.moment, 'update');
     assert.equal(offer.fold?.op, 'update');
     assert.deepEqual(offer.lines, [
-      `Tests pass (12 passed). This time steps 1, 2 and 3 of ${name} ran as 'pnpm install --frozen-lockfile', 'pnpm run build' and 1 more, the way your preference says.`,
+      `Tests pass (12 passed). This time steps 1, 2 and 3 of ${name} ran as 'pnpm install --frozen-lockfile', 'pnpm run build' and 1 more, the way your learning says.`,
       `Change steps 1, 2 and 3 of ${name} to match? 3 line changes. (yes / show me / no)`,
     ]);
     assert.match(offer.fold!.proposalSha, /^[0-9a-f]{16}$/, 'pinned to the text a yes would write, as every update offer is');

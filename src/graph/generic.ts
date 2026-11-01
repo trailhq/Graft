@@ -24,6 +24,7 @@ import { createRequire } from "node:module";
 import { contentHash } from "../util/id.js";
 import type { Kind, NodeV1 } from "./types.js";
 import type { ExtractResult, Language, RawEdge } from "./extract.js";
+import { webTreeSitter } from "./wasm-runtime.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -65,10 +66,10 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
 ];
 
 /**
- * WASM stand-ins for the depth tier, used only for a language whose native grammar
- * did not load (native.ts): npm 12 skips the install script that builds
- * `tree-sitter-kotlin`, for one. They claim no extension, so `genericLangOf` never
- * returns them; the build picks one by asking {@link fallbackLangOf}. Output is the
+ * Stand-ins for the depth tier, used only for a language whose own grammar did not
+ * load (depth-parser.ts), as after a broken install. They claim no extension, so
+ * `genericLangOf` never returns them; the build picks one by asking
+ * {@link fallbackLangOf}. Output is the
  * breadth tier's: symbols and bare-name calls, no receiver types or bindings.
  * Kotlin, Swift and PHP use their vendored queries/<name>.scm; the rest use the
  * bundle's own tags.scm (typescript's builds on javascript's, as upstream does).
@@ -122,7 +123,6 @@ const KIND: Record<string, Kind> = {
 export interface Loaded { language: unknown; query: unknown | null }
 const loaded = new Map<string, Loaded>();
 let tsMod: typeof import("web-tree-sitter") | null = null;
-let initPromise: Promise<void> | null = null;
 
 function requireWasm(wasm: string): Buffer | null {
   // Resolve the grammar wasm from the tree-sitter-wasm bundle (its package.json
@@ -167,11 +167,7 @@ export async function warmGenericGrammars(langNames: Iterable<string>): Promise<
   const want = new Set(langNames);
   const need = [...want].filter((n) => !loaded.has(n) && rowNamed(n) !== undefined);
   if (need.length === 0) return;
-  if (!tsMod) {
-    tsMod = await import("web-tree-sitter");
-    initPromise = initPromise ?? tsMod.Parser.init();
-  }
-  await initPromise;
+  tsMod = await webTreeSitter();
   const { Language, Query } = tsMod;
   for (const name of need) {
     const row = rowNamed(name)!;
@@ -214,13 +210,9 @@ export function swapGrammarForTest(name: string, entry: Loaded | null): Loaded |
  *
  * Shared with the container tier (container.ts), which needs a grammar to find
  * where an embedded language starts but none of the tags.scm machinery above.
- * Kept here so web-tree-sitter is initialised exactly once per process. */
+ * The runtime itself is shared with every WASM tier (wasm-runtime.ts). */
 export async function loadWasmLanguage(wasm: string): Promise<unknown | null> {
-  if (!tsMod) {
-    tsMod = await import("web-tree-sitter");
-    initPromise = initPromise ?? tsMod.Parser.init();
-  }
-  await initPromise;
+  tsMod = await webTreeSitter();
   const bytes = requireWasm(wasm);
   if (!bytes) return null;
   try {

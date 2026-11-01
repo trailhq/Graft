@@ -298,9 +298,8 @@ test("reviews: the real review worker loads the whole graph stack in a forked pr
   // Everything above forks a probe, which proves the protocol and proves nothing
   // about the module a deployed App actually forks. Two things can only break here:
   // the entry path (`dist/app/review-worker.js`, or the source next door when the
-  // App runs from a checkout), and loading the review stack in a child — nine
-  // tree-sitter native addons imported at `graph/extract.ts`'s module scope, which
-  // also constructs a `Parser` there, plus the WASM grammars behind it. Getting this
+  // App runs from a checkout), and loading the review stack in a child — the
+  // graph modules and the two web-tree-sitter runtimes behind them. Getting this
   // far is the assertion; no review runs, because a review wants a clone.
   const entry = reviewWorkerEntry();
   assert.ok(existsSync(entry), `${entry} must exist — it is what a deployed App forks`);

@@ -96,7 +96,7 @@ test("D117 (2): the line is one line, from Trail, names what went and the way ba
   ]);
   assert.ok(!/[\r\n]/.test(line), line);
   assert.match(line, /^trail: an agent ran trail forget: /);
-  assert.match(line, /the guardrail no-timeout \(bring it back: change status: retired to status: active in ~\/\.trail\/learnings\/no-timeout\.md\)/);
+  assert.match(line, /the always-follow learning no-timeout \(bring it back: change status: retired to status: active in ~\/\.trail\/learnings\/no-timeout\.md\)/);
   assert.doesNotMatch(line, /\[trail\]/);
   assert.doesNotMatch(line, /—|\bnotes?\b|\brules?\b|\bmemory\b/i);
 });

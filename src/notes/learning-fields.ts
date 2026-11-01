@@ -22,7 +22,7 @@ export type LearningKind = "preference" | "guardrail" | "decision" | "lesson";
 export type Scope = "personal" | "repo" | "team";
 export type LearningStatus = "active" | "held" | "replaced" | "retired";
 /** Where a learning's words came from: set by whatever saved it, never by a flag the agent passes. */
-export type LearningSource = "person" | "init-typed" | "init-review" | "error-class" | "agent" | "correction" | "repair";
+export type LearningSource = "person" | "init-typed" | "init-review" | "init-sessions" | "error-class" | "agent" | "correction" | "repair";
 /** A built-in enforcement template (spec 12), and how it is enforced. No other value in 1b. */
 export type LearningCheck = "no-timeout";
 export type LearningEnforce = "sure-fail";
@@ -30,7 +30,7 @@ export type LearningEnforce = "sure-fail";
 export const KINDS: readonly LearningKind[] = ["preference", "guardrail", "decision", "lesson"];
 export const SCOPES: readonly Scope[] = ["personal", "repo", "team"];
 export const STATUSES: readonly LearningStatus[] = ["active", "held", "replaced", "retired"];
-export const SOURCES: readonly LearningSource[] = ["person", "init-typed", "init-review", "error-class", "agent", "correction", "repair"];
+export const SOURCES: readonly LearningSource[] = ["person", "init-typed", "init-review", "init-sessions", "error-class", "agent", "correction", "repair"];
 export const CHECKS: readonly LearningCheck[] = ["no-timeout"];
 export const ENFORCES: readonly LearningEnforce[] = ["sure-fail"];
 /**

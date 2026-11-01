@@ -58,7 +58,7 @@ const HOSTS: Record<string, string> = { claude: 'Claude Code', cursor: 'Cursor',
 export const SKILLS_INTRO: readonly [string, string, string, string] = [
   '[trail] Trail, the tool this person installed, keeps commands that worked here as skills, and keeps one only after the person says yes.',
   '[trail] So Trail may ask you to run trail skills add <name> --run <id>, but only after the person typed yes to its offer or asked to save a job; that message quotes what they typed.',
-  "[trail] Trail may also ask you to run trail skills lesson [<skill>] --offer <id> after the person typed yes to keeping a lesson, or to run trail keep <numbers> with the numbers they typed after trail init's list. Trail checks their answer in this session before it keeps anything.",
+  "[trail] Trail may also ask you to run trail skills lesson [<skill>] --offer <id> after the person typed yes to keeping what it offered, or to run trail keep <numbers> with the numbers they typed after trail init's list. Trail checks their answer in this session before it keeps anything.",
   "[trail] Trail may also ask you to run trail skills update <name> --offer <id> after the person typed yes to a change it showed, or trail skills draft <id> --print to show it first. It checks their answer before it changes a skill. An older version (trail skills restore <name> --version <n>) is theirs to bring back.",
 ];
 

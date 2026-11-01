@@ -88,7 +88,11 @@ function hookBlocks(command: (arg: string) => string): Record<string, Json[]> {
     // command that fails open too (see failOpen). Claude Code reads `timeout`
     // in seconds, so 5 caps the wait a wedged hook could add to one command,
     // after which the command runs anyway.
-    PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: hookCmd_('pre-bash'), timeout: 5 }] }],
+    PreToolUse: [
+      // The learnings on a file, before the agent changes it: while they can still change the edit.
+      { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: hookCmd_('pre-edit'), timeout: 5 }] },
+      { matcher: 'Bash', hooks: [{ type: 'command', command: hookCmd_('pre-bash'), timeout: 5 }] },
+    ],
     // A Bash call that failed fires this, never PostToolUse (D34): learned
     // skills mark the outcome for the next catch-up. Fails open like
     // PreToolUse, since some hosts read a non-zero exit as a refusal.

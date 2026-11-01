@@ -1,11 +1,15 @@
 /**
- * Every grammar the package depends on accepts the tree-sitter it ships.
+ * Installing the package runs nothing and warns about nothing.
  *
- * One that doesn't makes every `npm install -g` print a wall of "ERESOLVE
- * overriding peer dependency" warnings. The repo's own `overrides` hide it here,
- * because npm applies overrides only to the project it is run in, never to the
- * people installing the package. tree-sitter-swift was that grammar (it asks for
- * ^0.22); it is vendored into dist/ now (scripts/vendor-grammars.mjs).
+ * An install script in the dependency tree is what made `npm install -g` compile
+ * C: the depth tier's grammars were native addons, and `tree-sitter-kotlin` has no
+ * prebuilt binary, so node-gyp ran (slowly, and not at all without a compiler).
+ * They are WASM now (src/graph/depth-parser.ts) and the addons are dev
+ * dependencies. An unmet peer is what printed a wall of "ERESOLVE overriding peer
+ * dependency" warnings: tree-sitter-swift asked for a tree-sitter the package
+ * didn't ship. The repo's own `overrides` hide that here, because npm applies
+ * overrides only to the project it is run in, never to the people installing the
+ * package, so both are read off the lockfile instead.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -14,10 +18,17 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-type Manifest = { version: string; dependencies: Record<string, string>; peerDependencies?: Record<string, string> };
-/** A package's package.json, read from disk: some packages' `exports` don't let `require` reach it. */
-const manifest = (dir: string): Manifest => JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-const pkg = manifest(root);
+type Entry = {
+  version: string;
+  dev?: boolean;
+  hasInstallScript?: boolean;
+  peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+};
+const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8")) as { packages: Record<string, Entry> };
+/** What `npm install` of the published package puts on disk: the lockfile minus dev-only entries. */
+const shipped = Object.entries(lock.packages).filter(([path, e]) => path !== "" && !e.dev);
+const nameOf = (path: string): string => path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length);
 
 /** `version` satisfies `range`, for the plain `^x.y.z` ranges grammars use, joined by `||`. */
 function satisfies(version: string, range: string): boolean {
@@ -32,14 +43,22 @@ function satisfies(version: string, range: string): boolean {
   });
 }
 
-test("every dependency's tree-sitter peer accepts the tree-sitter the package ships", () => {
-  const shipped = manifest(join(root, "node_modules", "tree-sitter")).version;
+test("no dependency of the package runs an install script, so installing it compiles nothing", () => {
+  const scripted = shipped.filter(([, e]) => e.hasInstallScript).map(([path, e]) => `${nameOf(path)}@${e.version}`);
+  assert.deepEqual(scripted, []);
+});
+
+test("every required peer of a dependency ships with the package, in a version it accepts", () => {
+  const versions = new Map(shipped.map(([path, e]) => [nameOf(path), e.version]));
   const clashes: string[] = [];
-  for (const name of Object.keys(pkg.dependencies)) {
-    const want = manifest(join(root, "node_modules", name)).peerDependencies?.["tree-sitter"];
-    if (want && !satisfies(shipped, want)) clashes.push(`${name} wants tree-sitter ${want}`);
+  for (const [path, e] of shipped) {
+    for (const [peer, range] of Object.entries(e.peerDependencies ?? {})) {
+      if (e.peerDependenciesMeta?.[peer]?.optional) continue;
+      const have = versions.get(peer);
+      if (!have || !satisfies(have, range)) clashes.push(`${nameOf(path)} wants ${peer} ${range}, ships ${have ?? "none"}`);
+    }
   }
-  assert.deepEqual(clashes, [], `tree-sitter ${shipped} ships`);
+  assert.deepEqual(clashes, []);
 });
 
 test("the range check reads carets the way npm does", () => {

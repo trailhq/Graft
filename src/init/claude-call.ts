@@ -96,25 +96,84 @@ function failureOf(out: string, err: string): { why: ClaudeFailure; said?: strin
 }
 
 /**
+ * The findings an answer still being written has closed so far: each whole
+ * object in its `findings` array, in order. A string's braces and quotes
+ * don't count; an object cut off mid-way, or an answer that doesn't start
+ * with `findings`, gives none.
+ */
+export function completedFindings(buf: string): unknown[] {
+  const head = /^\s*\{\s*"findings"\s*:\s*\[/.exec(buf);
+  if (!head) return [];
+  const out: unknown[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = head[0].length; i < buf.length; i++) {
+    const c = buf[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === "{" || c === "[") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (c === "}" || c === "]") {
+      if (depth === 0) break; // the findings array itself closed
+      depth--;
+      if (depth === 0 && start >= 0) {
+        try {
+          out.push(JSON.parse(buf.slice(start, i + 1)));
+        } catch {
+          /* not an object we can read: leave it to the final answer */
+        }
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
+/** The last `result` line of a streamed run, or the output as it came when it has none. */
+function resultLine(out: string): string {
+  const lines = out.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      if ((JSON.parse(lines[i]!) as { type?: string }).type === "result") return lines[i]!;
+    } catch {
+      /* not a JSON line */
+    }
+  }
+  return out;
+}
+
+/**
  * One headless Claude Code call with the person's own login: no tools, no MCP
  * servers, no slash commands, nothing saved as a session (so this run never
  * shows up as a past session), from a scratch folder so no repo's CLAUDE.md or
  * hooks load. `TRAIL_NO_HOOKS` keeps trail's own user-level hooks quiet too.
  * The caller brings its system prompt and schema, with `findings` at the top.
- * Never rejects: a failure comes back with its reason.
+ * With `onFinding`, the answer streams and each finding is handed over the
+ * moment it's whole; the answer at the end is the same. Never rejects: a
+ * failure comes back with its reason.
  */
 export function callClaude<T>(
   bin: string,
   prompt: string,
   model: string,
   timeoutMs: number,
-  ask: { system: string; schema: object },
+  ask: { system: string; schema: object; onFinding?: (finding: T) => void },
 ): Promise<ClaudeAnswer<T>> {
   return new Promise((done) => {
+    const streaming = ask.onFinding !== undefined;
     const args = [
       "-p",
       "--model", model,
-      "--output-format", "json",
+      "--output-format", streaming ? "stream-json" : "json",
+      ...(streaming ? ["--verbose", "--include-partial-messages"] : []),
       "--json-schema", JSON.stringify(ask.schema),
       "--system-prompt", ask.system,
       "--tools", "",
@@ -151,7 +210,40 @@ export function callClaude<T>(
         finish({ ok: false, why: "timed_out" });
       }, KILL_GRACE_MS).unref();
     }, timeoutMs);
-    child.stdout.on("data", (b: Buffer) => (out += b.toString("utf8")));
+    // Streaming: the answer's JSON as it's written, and how many of its findings were handed over.
+    let pending = "";
+    let answer = "";
+    let handed = 0;
+    const streamed = (line: string) => {
+      let m: { type?: string; event?: { type?: string; delta?: { type?: string; partial_json?: string } } };
+      try {
+        m = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (m.type !== "stream_event") return;
+      if (m.event?.type === "content_block_start") answer = "";
+      const part = m.event?.delta?.type === "input_json_delta" ? m.event.delta.partial_json : undefined;
+      if (!part) return;
+      answer += part;
+      const whole = completedFindings(answer);
+      for (; handed < whole.length; handed++) {
+        try {
+          ask.onFinding!(whole[handed] as T);
+        } catch {
+          /* the listener's trouble never ends the read */
+        }
+      }
+    };
+    child.stdout.on("data", (b: Buffer) => {
+      const text = b.toString("utf8");
+      out += text;
+      if (!streaming) return;
+      pending += text;
+      const lines = pending.split("\n");
+      pending = lines.pop()!;
+      for (const line of lines) streamed(line);
+    });
     // Only a little of stderr: enough for the CLI's own reason, never a whole log.
     child.stderr.on("data", (b: Buffer) => {
       if (err.length < 4096) err += b.toString("utf8");
@@ -159,6 +251,7 @@ export function callClaude<T>(
     child.on("error", (e: NodeJS.ErrnoException) => finish({ ok: false, why: e?.code === "ENOENT" || e?.code === "EACCES" ? "not_installed" : "failed" }));
     child.on("close", () => {
       if (timedOut) return finish({ ok: false, why: "timed_out" });
+      if (streaming) out = resultLine(out);
       try {
         const r = JSON.parse(out) as { is_error?: boolean; structured_output?: { findings?: T[] }; total_cost_usd?: number };
         if (!r.is_error && r.structured_output) {

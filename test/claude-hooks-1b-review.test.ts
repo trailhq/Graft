@@ -160,7 +160,7 @@ test('J07 with quotes in the correction: line 2 shows them single, the yes keeps
       return { out: r.line, failed: r.code !== 0 };
     });
     assert.equal(kept.decision, null);
-    assert.match(kept.out, /^✓ lesson added to /, kept.out);
+    assert.match(kept.out, /^✓ learning added to /, kept.out);
   } finally {
     done(b);
   }

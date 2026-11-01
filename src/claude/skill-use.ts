@@ -14,7 +14,7 @@ import { payloadSessionId } from "./hook-io.js";
 import { readSession, writeSession } from "./state.js";
 import { repoPlace } from "../notes/home.js";
 import { noteAuthor } from "../notes/git-facts.js";
-import { readCloud, type Cloud } from "../cloud/workspace.js";
+import { cloudIn, readClouds, type Cloud } from "../cloud/workspace.js";
 import { recordActivity, records } from "../cloud/workspace-sync.js";
 
 /** The same skill again within this long in one session is the same run (the person typed `/name`, then the agent loaded it). */
@@ -44,10 +44,11 @@ export function recordSkillUse(name: string, input: unknown, dir: string, opts: 
   // Most tool calls and prompts aren't a skill: they stop here, before any file is read.
   if (!name) return false;
   try {
-    const cloud = opts.cloud === undefined ? readCloud() : opts.cloud;
+    const clouds = opts.cloud === undefined ? readClouds() : opts.cloud ? [opts.cloud] : [];
     const now = opts.now ?? Date.now();
-    if (!cloud) return false;
+    if (!clouds.length) return false;
     const place = repoPlace(dir);
+    const cloud = cloudIn(clouds, place.key);
     if (!records(cloud, place.key)) return false;
     if (!existsSync(join(place.checkout, ".claude", "skills", name, "SKILL.md"))) return false;
     const session = payloadSessionId(input);

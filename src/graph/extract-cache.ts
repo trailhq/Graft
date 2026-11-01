@@ -49,7 +49,7 @@ export interface ExtractEntry {
    * would. */
   error?: string;
   /** The breadth-tier grammar that parsed this file standing in for its depth-tier
-   * one, whose native grammar didn't load. Absent for every other file. The entry is
+   * one, whose grammar didn't load. Absent for every other file. The entry is
    * replayed only while the same stand-in would parse it again. */
   via?: string;
 }

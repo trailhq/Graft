@@ -22,6 +22,10 @@ import { buildGraph } from "../src/graph/build.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import { extractFile, type RawEdge } from "../src/graph/extract.js";
 import type { GraphV1, NodeV1 } from "../src/graph/types.js";
+import { warmDepthGrammars } from "../src/graph/depth-parser.js";
+
+// extractFile is synchronous; its WASM grammars load once, up front.
+await warmDepthGrammars(["swift"]);
 
 function extract(source: string): { nodes: NodeV1[]; rawEdges: RawEdge[] } {
   return extractFile("app/Model.swift", source, "swift");

@@ -9,5 +9,5 @@ import { correctionLines } from "../src/skills/offer-lines.js";
 
 test('moment 4 line 2: the lesson in quotes holds no double quote of its own', () => {
   const [, two] = correctionLines("release-npm", 'you forgot to run "npm ci" first', 'run "npm ci" first: npm ci');
-  assert.equal(two, `Add a lesson to it, just for you: "run 'npm ci' first: npm ci"? (yes / no)`);
+  assert.equal(two, `Add a learning to it, just for you: "run 'npm ci' first: npm ci"? (yes / no)`);
 });

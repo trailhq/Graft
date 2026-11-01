@@ -43,7 +43,7 @@ function timeoutIn(dir: string): void {
 test("the deny reason: J16's words, the way to run it instead, and the way out, as plain information (D88)", () => {
   assert.match(SURE_FAIL_REASON, /^\[trail\] Trail, the tool this person installed, /);
   assert.match(SURE_FAIL_REASON, /this Mac has no timeout/i);
-  assert.match(SURE_FAIL_REASON, /guardrail/);
+  assert.match(SURE_FAIL_REASON, /always-follow learning/);
   assert.match(SURE_FAIL_REASON, /background|Bash tool's own timeout/);
   assert.match(SURE_FAIL_REASON, /trail forget no-timeout/);
   assert.doesNotMatch(SURE_FAIL_REASON, /\b(?:say|tell|ask|you must|must|word for word|you)\b/i);

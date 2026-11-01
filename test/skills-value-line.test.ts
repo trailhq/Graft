@@ -100,7 +100,7 @@ test("the counts equal the ledger sums for a seeded week: uses in this repo, ins
   assert.equal(c.wallFixes, 1);
   assert.equal(valueLine([SHOP], b.env, NOW),
     "Last week in this repo, on this machine: release-npm ran 3 times, 3 failed commands in all; "
-    + "deploy-beta ran 1 time with 0 failed commands; the timeout guardrail stopped 5 commands; "
+    + "deploy-beta ran 1 time with 0 failed commands; the timeout learning stopped 5 commands; "
     + "1 known error came with its fix.");
 });
 
@@ -154,10 +154,10 @@ test("the line is at most 240 characters, cut at whole parts so no number is cut
   assert.ok(line.endsWith("."), line);
   // The first skill, the guardrail and the fixes come before later skills, and each part is whole.
   assert.match(line, new RegExp(`${long(1)} ran 1 time with 12 failed commands \\(the run it came from had 11\\)`));
-  assert.match(line, /the timeout guardrail stopped 9 commands/);
+  assert.match(line, /the timeout learning stopped 9 commands/);
   assert.match(line, /3 known errors came with their fix\.$/);
   for (const part of line.replace(/^[^:]+: /, "").replace(/\.$/, "").split("; ")) {
-    assert.match(part, /^(?:\S+ ran 1 time with \d+ failed commands?(?: \(the run it came from had \d+\))?|\S+ ran \d+ times, \d+ failed commands? in all|the timeout guardrail stopped \d+ commands?|\d+ known errors? came with (?:its|their) fix)$/, part);
+    assert.match(part, /^(?:\S+ ran 1 time with \d+ failed commands?(?: \(the run it came from had \d+\))?|\S+ ran \d+ times, \d+ failed commands? in all|the timeout learning stopped \d+ commands?|\d+ known errors? came with (?:its|their) fix)$/, part);
   }
 });
 
@@ -314,6 +314,6 @@ test("J10's value leg: a week of seeded uses after a week of skills on, then a s
   assert.equal(startValue(start(), b.env, new Date(day(15))), null, "Oct 15: no week of uses counted yet");
   const r = startValue(start(), b.env, NOW);
   assert.equal(r?.channel, "context");
-  assert.ok(r?.context?.includes("release-npm ran 3 times, 0 failed commands in all; the timeout guardrail stopped 9 commands."), r?.context);
+  assert.ok(r?.context?.includes("release-npm ran 3 times, 0 failed commands in all; the timeout learning stopped 9 commands."), r?.context);
   assert.equal(startValue(start(), b.env, NOW), null, "once");
 });

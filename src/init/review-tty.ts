@@ -53,7 +53,7 @@ export function detailLines(item: InitItem, env: NodeJS.ProcessEnv): string[] {
     }
     return out.length ? out : ["Trail couldn't read these lines again just now."];
   }
-  return [];
+  return item.detail ?? [];
 }
 
 /** `quit`: Ctrl-C or q, which always leave; `esc` closes an open draft first. */
@@ -100,7 +100,7 @@ function press(st: State, key: Key, repoKey: string, env: NodeJS.ProcessEnv): Sc
       }
       return null;
     case 'w':
-      if (!item || item.kind === 'review' || item.kind === 'claude') return null;
+      if (!item || item.kind === 'review' || item.kind === 'session' || item.kind === 'claude') return null;
       if (item.kind === 'guardrail' && item.guardrail?.check === 'no-timeout') {
         st.note = INIT_COPY.wNoTimeout!;
         return null;

@@ -1,0 +1,56 @@
+{
+  "tree-sitter-typescript.wasm": {
+    "module": "tree-sitter-typescript",
+    "version": "0.23.2",
+    "sha256": "778025db5a8be0e70f8ccc3671e486dfeddd048c25d9e8a70c26de2e1bf6f97d"
+  },
+  "tree-sitter-tsx.wasm": {
+    "module": "tree-sitter-typescript",
+    "version": "0.23.2",
+    "sha256": "79e5da75ea62855a0cd67177685f0164eac87d5f630b3cbe1e0a099751ad30f8"
+  },
+  "tree-sitter-python.wasm": {
+    "module": "tree-sitter-python",
+    "version": "0.21.0",
+    "cli": "0.27.1",
+    "source": "d6103626c07b1a4f6cd7185c67c7e4d393670a8aa9f680e8cf431a0e26ae477a",
+    "patches": 0,
+    "sha256": "bbf740d0a067a72432bd564df78f56595163a894257207e873bf4f08f9b3d42c"
+  },
+  "tree-sitter-go.wasm": {
+    "module": "tree-sitter-go",
+    "version": "0.23.4",
+    "sha256": "6dfc8eacdad0a54d0cad0d888851bd19cdd14d82582f110f888bbf6f9e5e2d64"
+  },
+  "tree-sitter-r.wasm": {
+    "module": "tree-sitter-r",
+    "version": "1.3.0",
+    "sha256": "a39d2e71bd39c29bb7f144a03f41d6d9f0099fede4110c696dc0715a62c9fbe1"
+  },
+  "tree-sitter-java.wasm": {
+    "module": "tree-sitter-java",
+    "version": "0.23.5",
+    "sha256": "4fdeac4ca6ca089f06c6f7e562abcac1733cd465728cc7031ebb73c2019122c4"
+  },
+  "tree-sitter-kotlin.wasm": {
+    "module": "tree-sitter-kotlin",
+    "version": "0.3.8",
+    "cli": "0.27.1",
+    "source": "3079e88989d03ae5b2b8b3ae01e06988f32b7f96086495096ef294c6323c7df2",
+    "patches": 0,
+    "sha256": "7f522f2e3ef633735b3e2bdea165071b5ad0a99d6201e84acab49017590f812a"
+  },
+  "tree-sitter-swift.wasm": {
+    "module": "tree-sitter-swift",
+    "version": "0.7.1",
+    "cli": "0.27.1",
+    "source": "176f630773d7ab526a88220799ce31e7a358c3e5439d8cfcc43dc80f2831be5b",
+    "patches": 3,
+    "sha256": "782ec93f362cb47b7a5e99abc4ecbdff078eb17958fb238bcbb43d94675c1c31"
+  },
+  "tree-sitter-php.wasm": {
+    "module": "tree-sitter-php",
+    "version": "0.23.12",
+    "sha256": "8d8b317908c04064204afc1d3b0ff6e90be4360bb30dd421b2e5aa683da49684"
+  }
+}

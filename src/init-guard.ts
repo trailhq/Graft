@@ -18,6 +18,13 @@ export function isGitWorkTree(dir: string): boolean {
   return r.status === 0 && r.stdout.trim() === "true";
 }
 
+/**
+ * `init --pair` outside git: Trail's page shares a repo with the team, and a
+ * folder with none would be set up with nothing to share, so it is refused.
+ */
+export const NOT_GIT_PAIR_REFUSAL =
+  "✗ this folder isn't a git repo.\n  Open your agent inside the repo you want Trail to learn, then run the setup prompt again.";
+
 /** Said instead of the commit line when init ran outside git: there is nothing to commit to. */
 export const NOT_GIT_LINE =
   "· this folder isn't a git repo, so its learnings stay on this machine. Run trail init inside a repo to share them with your team";

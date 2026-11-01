@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 test(
-  "Node 24 can exercise every breadth grammar without a V8 Zone OOM",
+  "Node 24 can exercise every WASM grammar (breadth and depth) without a V8 Zone OOM",
   { skip: Number(process.versions.node.split(".")[0]) < 24 ? "V8 Turboshaft regression starts in Node 24" : false },
   () => {
     const probe = join(dirname(fileURLToPath(import.meta.url)), "generic-node24-probe.ts");

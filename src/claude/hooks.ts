@@ -27,6 +27,7 @@ import { keepsNotes, noteCounts, repoPlace, type NoteCounts } from '../notes/hom
 import { branchesStale, overlapMark, readBranchCache, refreshBranches, SESSION_REFRESH_MS } from '../notes/branches.js';
 import { learningFiles } from '../notes/repo-trail.js';
 import { inWorkspace, maybeSyncInBackground } from '../cloud/workspace-sync.js';
+import { hookNotice } from '../cloud/nudge.js';
 import { cacheDir, readJson, writeJsonAtomic } from '../util/state.js';
 import { countBucket, type AgentHost } from '../telemetry/contract.js';
 import { detectHost } from '../trace/host.js';
@@ -39,6 +40,7 @@ import { hostFacts } from '../skills/host-facts.js';
 import { trailNow } from '../skills/settings.js';
 import { recordSkillUse, skillOfToolUse } from './skill-use.js';
 import { keptContext, keptNotice } from './start-init.js';
+import { teamSignInLine } from '../cloud/team-file.js';
 
 export { lastFileScopeHint, promptAskTimeout } from './prompt-hook.js';
 
@@ -164,7 +166,7 @@ function handleToolUse(input: any, dir: string): void {
  * each once a session. A trail command is skipped: its own output already
  * carries the learnings that bear on it. Never throws.
  */
-export function learningsOnTouch(input: any, dir: string): string | null {
+export function learningsOnTouch(input: any, dir: string, before = false): string | null {
   try {
     if (brand() !== 'trail' || !keepsNotes(dir)) return null;
     const ti = input?.tool_input ?? {};
@@ -173,7 +175,7 @@ export function learningsOnTouch(input: any, dir: string): string | null {
     if (path) {
       const rel = relative(dir, isAbsolute(path) ? path : join(dir, path)).replace(/\\/g, '/');
       if (!rel || rel.startsWith('..') || underGraft(dir, path)) return null;
-      touch = { file: rel, verb: input?.tool_name === 'Read' ? 'opened' : 'changed' };
+      touch = { file: rel, verb: before ? 'editing' : input?.tool_name === 'Read' ? 'opened' : 'changed' };
     } else if (typeof ti.command === 'string' && ti.command && !commandInvokesGraft(ti.command)) {
       touch = { command: ti.command };
     } else return null;
@@ -188,6 +190,19 @@ export function learningsOnTouch(input: any, dir: string): string | null {
     // A learning that doesn't arrive costs one reminder; a broken hook costs the turn.
     return null;
   }
+}
+
+/**
+ * PreToolUse on Write and Edit: the learnings on the file, before the agent
+ * changes it, while they can still change the edit. They're marked shown, so
+ * the PostToolUse after the edit doesn't repeat them. A teammate's learning
+ * just reached the agent, which is when the person gets the workspace link.
+ */
+export function handlePreEdit(input: any, dir: string): void {
+  const learned = learningsOnTouch(input, dir, true);
+  if (!learned) return;
+  const notice = hookNotice(dir, "Claude just got your team's learnings on the file it's changing", { session: payloadSessionId(input) }) ?? undefined;
+  emitHook('PreToolUse', { context: learned, notice });
 }
 
 /**
@@ -521,7 +536,9 @@ export async function main(event: string): Promise<void> {
     const text = orientationAtStart(dir, learningsAtStart(dir));
     const kept = keptAtStart(input, dir);
     // The skills context comes after the learnings; its notice is for the person.
-    const out = [upkeep.join('\n'), text, skills.context, kept.context].filter(Boolean).join('\n\n');
+    // A repo whose team uses a Trail workspace, on a laptop not signed in to it: offered once a session.
+    const team = teamSignInLine(dir);
+    const out = [upkeep.join('\n'), text, team, skills.context, kept.context].filter(Boolean).join('\n\n');
     const notice = [skills.notice, kept.notice].filter(Boolean).join('\n') || undefined;
     emitHook('SessionStart', { context: out, notice });
     return;
@@ -529,6 +546,8 @@ export async function main(event: string): Promise<void> {
 
   // Claude closing: send the queue from a detached child, so quitting isn't slowed.
   if (event === 'session-end') { maybeFlushInBackground(); return; }
+
+  if (event === 'pre-edit') { handlePreEdit(input, dir); return; }
 
   if (event === 'post-edit') { await handlePostEdit(input, dir); return; }
 

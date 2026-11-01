@@ -41,7 +41,7 @@ export const VALUE_COPY = {
   failedCommand: 'failed command',
   before: 'the run it came from had',
   inAll: 'in all',
-  guardrail: 'the timeout guardrail stopped',
+  guardrail: 'the timeout learning stopped',
   command: 'command',
   knownError: 'known error',
   cameWithIts: 'came with its fix',

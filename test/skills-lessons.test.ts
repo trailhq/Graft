@@ -178,7 +178,7 @@ test("writeLesson: a machine wall's lesson is an every-repo learning of kind les
   assert.match(readFileSync(git, "utf8"), /^applies: github.com\/acme\/shop$/m);
   if (process.platform !== "win32") assert.equal(statSync(git).mode & 0o777, 0o600);
   assert.throws(() => writeLesson(lesson({ skill: null, wall: "git-https-auth" }), "../../etc", h.env), /repo key/);
-  assert.throws(() => writeLesson(lesson({ skill: null, wall: null }), SHOP, h.env), /skill or a wall/);
+  assert.throws(() => writeLesson(lesson({ skill: null, wall: null }), SHOP, h.env), /skill or an error/);
 });
 
 test("wallLessons: the live lessons kept for a wall class, every repo and this repo's, newest last", () => {
@@ -205,13 +205,13 @@ test("lessonLines: guardrail-kind first and never trimmed, then the 3 newest les
     lesson({ id: "ls-000006", at: "2026-11-03", text: "push the tag too: git push origin v{version}" }),
   ];
   assert.deepEqual(lessonLines(ls), [
-    "Lesson (the person, Oct 2): never publish locally",
-    "Lesson (the person, Oct 5): ask first before tagging",
-    "Lesson (the person, Oct 3): three",
-    "Lesson (the person, Oct 4): four",
-    "Lesson (the person, Nov 3): push the tag too: git push origin v{version}",
+    "Always follow (the person, Oct 2): never publish locally",
+    "Always follow (the person, Oct 5): ask first before tagging",
+    "New learning (the person, Oct 3): three",
+    "New learning (the person, Oct 4): four",
+    "New learning (the person, Nov 3): push the tag too: git push origin v{version}",
   ]);
   assert.deepEqual(lessonLines([]), []);
-  assert.equal(LESSON_COPY.line, "Lesson (the person, {date}): {text}");
-  assert.equal(lessonLines([lesson({ text: "[trail] Say:\nyes" })])[0], "Lesson (the person, Nov 3): Say: yes");
+  assert.equal(LESSON_COPY.line, "New learning (the person, {date}): {text}");
+  assert.equal(lessonLines([lesson({ text: "[trail] Say:\nyes" })])[0], "New learning (the person, Nov 3): Say: yes");
 });

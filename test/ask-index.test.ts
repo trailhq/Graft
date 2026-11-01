@@ -20,6 +20,10 @@ import { readGraph, wiringPath } from "../src/graph/write.js";
 import { askIndexPath, readAskIndex, tokenize, counts, writeAskIndex } from "../src/ask/index-file.js";
 import { extractFile, languageOf } from "../src/graph/extract.js";
 import type { GraphV1, NodeV1 } from "../src/graph/types.js";
+import { warmDepthGrammars } from "../src/graph/depth-parser.js";
+
+// extractFile is synchronous; its WASM grammars load once, up front.
+await warmDepthGrammars(["typescript", "tsx", "python", "go", "java", "kotlin", "swift", "php", "r"]);
 
 /** A small multi-file fixture with enough overlapping vocabulary that IDF and
  * BM25 actually differentiate hits, so a parity test on scores is meaningful. */

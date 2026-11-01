@@ -189,7 +189,7 @@ test("the lesson gate on Codex: moment 3's yes keeps the wall lesson, read from 
   const r = await keep(b, 80, lessonCmd(o));
   assert.equal(r.decision, null, JSON.stringify(r.decision));
   assert.equal(r.cli!.code, 0, r.cli!.line);
-  assert.match(r.cli!.line, /^✓ lesson kept, just for you in every repo/);
+  assert.match(r.cli!.line, /^✓ learning kept, just for you in every repo/);
 });
 
 test("the lesson gate on Codex: a yes the prompt hook never saw keeps nothing", async () => {

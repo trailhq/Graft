@@ -40,7 +40,7 @@ test("moments 3 and 4: every text says it is from Trail and gives Trail's reason
   const { stop } = texts("yes");
   for (const t of stop) {
     assert.ok(t.startsWith(`${FROM} `), t);
-    assert.match(t, /Trail noticed go failed on .* here 3 times and the same change got past it; it offers once to keep that\.|The person corrected release-npm, a skill Trail brought in for this job; Trail offers once to add what they said to it as a lesson\./, t);
+    assert.match(t, /Trail noticed go failed on .* here 3 times and the same change got past it; it offers once to keep that\.|The person corrected release-npm, a skill Trail brought in for this job; Trail offers once to add what they said to it as a learning\./, t);
   }
   assert.match(stop[0], /If they say show me, run trail skills draft r-1027-3f9a --print/);
   assert.match(stop[2], /If they answer yes, run: trail skills lesson --offer o-3a12 /);

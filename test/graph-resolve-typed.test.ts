@@ -5,6 +5,10 @@ import { resolveEdges } from "../src/graph/resolve.js";
 import { extractFile } from "../src/graph/extract.js";
 import type { RawEdge } from "../src/graph/extract.js";
 import type { NodeV1 } from "../src/graph/types.js";
+import { warmDepthGrammars } from "../src/graph/depth-parser.js";
+
+// extractFile is synchronous; its WASM grammars load once, up front.
+await warmDepthGrammars(["typescript", "python", "go"]);
 
 // `owner` mirrors what extractFile now stamps on a method node: the bare name of
 // its immediate enclosing class (the segment just before its own name in the

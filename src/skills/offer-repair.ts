@@ -34,8 +34,8 @@ import { withFollowLine } from './follow-learnings.js';
 export const REPAIR_COPY: Record<string, string> = {
   line1: '{check} This is the {nth} time {span} that {program} failed on {fixed} and needed {delta}.',
   skill: 'Keep the {k} working steps as a skill, just for you in this repo? (yes / show me / no)',
-  lesson: 'Keep what fixed it as a lesson, just for you {where}: "{lesson}"? (yes / no)',
-  savedWall: '✓ lesson kept, just for you {where} · Trail shows it when {fixed} comes back · undo: trail forget {id}',
+  lesson: 'Keep what fixed it as a learning, just for you {where}: "{lesson}"? (yes / no)',
+  savedWall: '✓ learning kept, just for you {where} · Trail shows it when {fixed} comes back · undo: trail forget {id}',
 };
 
 const fill = (t: string, v: Record<string, string>) => t.replace(/\{(\w+)\}/g, (m, k: string) => v[k] ?? m);

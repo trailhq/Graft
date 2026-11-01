@@ -4,8 +4,9 @@
  * reply with, at most once a session and in wording that changes from one
  * session to the next. A background wait registers the link with Trail, picks
  * up the sign-in, uploads the picked repos' learnings, and the next command
- * says so once. Connected, a repo outside the workspace gets one question.
- * All of it is off unless TRAIL_CLOUD=1, or the machine is already connected.
+ * says so once. Signed in, a repo no workspace here has gets the link to pick one.
+ * On by default wherever telemetry is on; TRAIL_CLOUD=0 turns it off and
+ * TRAIL_CLOUD=1 on, and a machine already connected keeps it.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -16,8 +17,10 @@ import { join } from "node:path";
 import { BRAND_ENV } from "../src/brand.js";
 import { rememberRepo } from "../src/notes/home.js";
 import { writeNote } from "../src/notes/notes.js";
-import { cloudLines, loginLink, NUDGE_WORDS, waitForConnect } from "../src/cloud/nudge.js";
+import { cloudLines, loginLines, loginLink, NUDGE_WORDS, waitForConnect } from "../src/cloud/nudge.js";
+import { readTeamFile, teamWorkspace, writeTeamFile } from "../src/cloud/team-file.js";
 import { readCloud, writeCloud, type Cloud } from "../src/cloud/workspace.js";
+import { CI_ENV_VARS } from "../src/telemetry/gate.js";
 import { tmpRepo } from "./helpers.js";
 
 process.env.DO_NOT_TRACK = "1";
@@ -60,11 +63,29 @@ function stateOf(): { pending?: { state: string } } {
   return JSON.parse(readFileSync(join(process.env.TRAIL_HOME!, "cloud-nudge.json"), "utf8"));
 }
 
-test("with signing in off, nobody is offered a link, learnings or not", () => {
+test("on by default wherever telemetry is on; off where it's off, in CI, or with TRAIL_CLOUD=0", () => {
   freshHome();
   const { dir } = repo();
-  const off = cloudLines(dir, { command: "ask", agent: true, env: { ...process.env, TRAIL_CLOUD: undefined, CLAUDE_CODE_SESSION_ID: "s1" }, startWait: noWait });
-  assert.deepEqual(off, []);
+  let s = 0;
+  const offer = (env: NodeJS.ProcessEnv) => cloudLines(dir, { command: "ask", agent: true, env: { ...process.env, CLAUDE_CODE_SESSION_ID: `default-${++s}`, ...env }, startWait: noWait });
+  // This file runs with DO_NOT_TRACK=1 and no telemetry key: telemetry is off.
+  assert.deepEqual(offer({ TRAIL_CLOUD: undefined }), [], "telemetry off: no link");
+  const saved = { GRAFT_POSTHOG_KEY: process.env.GRAFT_POSTHOG_KEY, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  // A key, and an OS home with no telemetry choice in it: telemetry on.
+  process.env.GRAFT_POSTHOG_KEY = "phc_test_key";
+  process.env.HOME = process.env.USERPROFILE = mkdtempSync(join(tmpdir(), "nudge-os-home-"));
+  try {
+    const on: NodeJS.ProcessEnv = { TRAIL_CLOUD: undefined, DO_NOT_TRACK: undefined };
+    for (const v of CI_ENV_VARS) on[v] = undefined;
+    assert.equal(offer(on).length, 2, "nothing set: the link");
+    assert.deepEqual(offer({ ...on, TRAIL_CLOUD: "0" }), [], "TRAIL_CLOUD=0 turns it off");
+    assert.deepEqual(offer({ ...on, CI: "true" }), [], "never in CI");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 });
 
 test("no learning yet: nobody is asked to sign in", () => {
@@ -84,7 +105,7 @@ test("once a session, a connect link the agent ends its reply with, in wording t
   freshHome();
   const { dir } = repo();
   const first = lines(dir, "ask", "s1");
-  assert.match(first[0]!, /^\[trail\] End your reply with this line, word for word: \[Share your learnings with your team\?\]\(http:\/\/trail\.test\/connect\?state=[\w-]{32}\)$/);
+  assert.match(first[0]!, /^\[trail\] End your reply with this line, word for word: Share your learnings with your team: \[sign in to Trail\]\(http:\/\/trail\.test\/connect\?state=[\w-]{32}\)$/);
   assert.match(first[1]!, /don't run trail login yourself/);
   assert.deepEqual(lines(dir, "note", "s1"), [], "not twice in one session");
   const second = lines(dir, "check", "s2");
@@ -97,7 +118,7 @@ test("at a terminal it's one plain line", () => {
   const { dir } = repo();
   const out = lines(dir, "ask", "s1", { agent: false });
   assert.equal(out.length, 1);
-  assert.match(out[0]!, /^· Share your learnings with your team\? http:\/\/trail\.test\/connect\?state=/);
+  assert.match(out[0]!, /^· Share your learnings with your team: sign in to Trail at http:\/\/trail\.test\/connect\?state=/);
 });
 
 /** A Trail that answers the handoff routes from memory, and records what it was sent. */
@@ -229,6 +250,30 @@ test("a login link for another Trail is a new link: a state registered with one 
   assert.equal(loginLink(dir, env, Date.now(), "https://trail.acme.example.com"), second, "the same Trail again: the same link");
 });
 
+test("trail login --workspace: the page opens on that workspace, and an agent gets the link to show", () => {
+  freshHome();
+  const { dir } = repo();
+  const env = { ...process.env, TRAIL_TEST_SERVER: undefined };
+  const url = loginLink(dir, env, Date.now(), undefined, "acme");
+  assert.match(url, /^https:\/\/team\.trailhq\.com\/connect\?state=[\w-]{32}&ws=acme$/);
+  const out = loginLines(url, "acme").join("\n");
+  assert.ok(out.includes(`[Sign in to Trail](${url})`), out);
+  assert.match(out, /doesn't wait/);
+});
+
+test(".trail/workspace.json: written once the repo is in a workspace, trusted only for the Trail this laptop signs in to", () => {
+  freshHome();
+  const { dir } = repo();
+  const ws = { id: "w1", name: "Acme", slug: "acme", url: "https://team.trailhq.com/w/acme", invite_url: "" };
+  assert.equal(writeTeamFile(dir, { url: "https://team.trailhq.com", workspace: ws }), true);
+  assert.equal(writeTeamFile(dir, { url: "https://team.trailhq.com", workspace: ws }), false, "nothing changed, nothing written");
+  assert.deepEqual(readTeamFile(dir), { trail: "https://team.trailhq.com", workspace: "acme", name: "Acme" });
+  const env = { ...process.env, TRAIL_TEST_SERVER: undefined };
+  assert.equal(teamWorkspace(dir, env)?.workspace, "acme");
+  writeTeamFile(dir, { url: "https://trail.evil.example", workspace: ws });
+  assert.equal(teamWorkspace(dir, env), null, "another Trail named in a repo is never where a laptop signs in");
+});
+
 function connect(repos: string[]): void {
   const c: Cloud = {
     url: "http://trail.test",
@@ -241,16 +286,31 @@ function connect(repos: string[]): void {
   writeCloud(c);
 }
 
-test("connected: a repo with learnings outside the workspace gets one question, ever", () => {
+test("signed in: a repo no workspace here has gets the link to pick one, once a session", () => {
   freshHome();
   const inside = repo();
   const outside = repo();
   connect([inside.key]);
-  assert.deepEqual(lines(inside.dir, "ask", "s1"), [], "nothing to say about a repo already in it");
-  const asked = lines(outside.dir, "ask", "s1");
-  assert.equal(asked.length, 1);
-  assert.match(asked[0]!, /^\[trail\] Ask the user once, at the end of your reply: add acme\/extract-\d+ to their Trail workspace Acme/);
-  assert.match(asked[0]!, /run `trail workspace add`/);
-  assert.deepEqual(lines(outside.dir, "ask", "s2"), [], "never again");
+  assert.deepEqual(lines(inside.dir, "ask", "s1"), [], "nothing to say about a repo already in one");
+  const offered = lines(outside.dir, "ask", "s1");
+  assert.equal(offered.length, 2);
+  assert.match(offered[0]!, /^\[trail\] End your reply with this line, word for word: \[Add acme\/extract-\d+ to Trail\]\(http:\/\/trail\.test\/connect\?state=/);
+  assert.match(offered[1]!, /to pick the workspace they go to/);
+  assert.equal(stateOf().pending && (stateOf().pending as { repo?: string }).repo, outside.key, "the link is for this repo");
+  assert.deepEqual(lines(outside.dir, "ask", "s1"), [], "once a session");
+  assert.equal(lines(outside.dir, "ask", "s2").length, 2, "and again the next one");
   rmSync(join(process.env.TRAIL_HOME!, "cloud.json"));
+});
+
+test("a link made in one repo isn't offered in another: each repo gets its own", () => {
+  freshHome();
+  const a = repo();
+  const b = repo();
+  lines(a.dir, "ask", "s1");
+  const first = stateOf().pending as { state: string; repo?: string };
+  assert.equal(first.repo, a.key);
+  lines(b.dir, "ask", "s2");
+  const second = stateOf().pending as { state: string; repo?: string };
+  assert.equal(second.repo, b.key);
+  assert.notEqual(second.state, first.state);
 });

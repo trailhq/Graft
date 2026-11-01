@@ -22,7 +22,7 @@ Trail-code gives Claude Code, Cursor, Codex and other coding agents a map of you
   <a href="https://trailhq.com/graft"><img src="https://img.shields.io/badge/website-trailhq.com/graft-E5484D?style=for-the-badge" /></a>
   <a href="https://discord.gg/zxmKweAA29"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=for-the-badge&logo=discord&logoColor=white" /></a>
   <a href="https://www.npmjs.com/package/@trailhq/trail-code"><img src="https://img.shields.io/npm/v/%40trailhq%2Ftrail-code?style=for-the-badge&logo=npm&logoColor=white&label=npm" /></a>
-  <a href="https://www.npmjs.com/package/@nanonets/graft"><img src="https://img.shields.io/npm/dm/%40nanonets%2Fgraft?style=for-the-badge&logo=npm&logoColor=white&label=downloads" /></a>
+  <a href="https://www.npmjs.com/package/@trailhq/trail-code"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Ftrailhq.github.io%2FTrail-Code%2Fbadges%2Fnpm-downloads.json&style=for-the-badge&logo=npm&logoColor=white" /></a>
   <a href="https://nodejs.org"><img src="https://img.shields.io/node/v/%40trailhq%2Ftrail-code?style=for-the-badge&logo=nodedotjs&logoColor=white" /></a>
   <img src="https://img.shields.io/badge/TypeScript-strict-3178C6?style=for-the-badge&logo=typescript&logoColor=white" />
   <img src="https://img.shields.io/badge/License-MIT-20C997?style=for-the-badge" />
@@ -80,7 +80,7 @@ npm install -g @trailhq/trail-code && trail init
 - [Quick start](#quick-start)
 - [Part 1: The graft map](#part-1-the-graft-map), your code
 - [Part 2: Learnings](#part-2-learnings), what you, your agents and your team know
-  - [Four kinds, three places](#four-kinds-three-places) · [One decision, two teammates](#one-decision-two-teammates) · [A learning is a file](#a-learning-is-a-file) · [Your agent does the saving](#your-agent-does-the-saving)
+  - [Learnings and skills, three places](#learnings-and-skills-three-places) · [One decision, two teammates](#one-decision-two-teammates) · [A learning is a file](#a-learning-is-a-file) · [Your agent does the saving](#your-agent-does-the-saving)
 - [Your team](#your-team)
 - [What stays on your machine](#what-stays-on-your-machine)
 - [Benchmark](#benchmark) · [SWE-bench Verified](#swe-bench-verified) · [Tested on popular repos](#tested-on-popular-repos)
@@ -106,6 +106,9 @@ The graft map tells your agent *where* things are. Learnings tell it *why* they 
 npm install -g @trailhq/trail-code   # install the CLI, once
 trail init                      # in your repo: build the graft map, set up .trail/, wire your agents
 ```
+
+> [!TIP]
+> **`npm install -g` says EACCES?** Your Node's global folder needs sudo. Skip sudo, or every upgrade will need it too: run `mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global`, add `~/.npm-global/bin` to your `PATH`, open a new terminal and install again. Trail needs Node 22.3 or newer (20.16 works too).
 
 That is the whole setup. `trail init` asks which of your coding agents to wire up, builds the graft map from your code, creates `.trail/` for the repo's learnings, and adds a statusline and hooks to Claude Code. It also reads your past Claude Code sessions in the repo, once, for what you told Claude more than once, and saves those as learnings. Your own Claude Code does that reading, in about a minute. Then work the way you always do. No daemon, no server, nothing to babysit: it is all files.
 
@@ -168,9 +171,9 @@ Your agent forgets everything when a session ends. Next week, it digs through th
 
 Trail-code keeps what your agent works out as **learnings**, saved from your conversations as you work. The next session starts from what you, your agents and your team already know. You don't have to write any of it by hand.
 
-### Four kinds, three places
+### Learnings and skills, three places
 
-Every learning has a kind (what it is) and a place (who it is for).
+Everything Trail keeps has a place (who it is for): just you, this repo, or your team.
 
 **Three places:**
 
@@ -182,16 +185,13 @@ Every learning has a kind (what it is) and a place (who it is for).
 
 Your agent picks between personal and repo: something about your own setup stays personal ("saved just for you"); something about the code goes in the repo ("added to this repo"). The team place will gather the repo learnings of every repo in your workspace, so your team sees them together.
 
-**Four kinds:**
+**What it keeps:**
 
-| Kind | Example | Personal | Repo | Team |
+| | Example | Personal | Repo | Team |
 |---|---|:---:|:---:|:---:|
-| **Decisions**: why the code is the way it is | *"Keep retries at 4. Ruled out 10: one call could block for over an hour."* | ✅ | ✅ | soon |
-| **Preferences**: how you like things done | *"Use pnpm, not npm."* Saved when you correct your agent, and found in your past sessions by `trail init`. | ✅ | ✅ | soon |
-| **Skills**: how a job is done here | *"Read rotation with page.Rotation(), never pdfcpu: it drops /Rotate."* | soon | soon | soon |
-| **Guardrails**: what must never happen | *"Never push to main."* Checked before the command runs. | soon | soon | soon |
-
-Decision or preference? Ask whether it points at specific code and goes stale when that code changes. If it does, it is a decision. If not, it is a preference.
+| **Learnings**: what your agent follows by default; you can say otherwise in the moment | *"Keep retries at 4. Ruled out 10: one call could block for over an hour."* *"Use pnpm, not npm."* Saved when you correct your agent, and found in your past sessions by `trail init`. | ✅ | ✅ | soon |
+| **Always follow**: a mark on a learning your agent won't go against, even if asked. It stops and names the learning and who added it | *"Store money in integer cents."* Saved with `trail note --always-follow`, only when you say so. | ✅ | ✅ | soon |
+| **Skills**: how a job is done here, its steps and files, with the learnings taught on it | *"Read rotation with page.Rotation(), never pdfcpu: it drops /Rotate."* | soon | soon | soon |
 
 ### One decision, two teammates
 
@@ -236,7 +236,7 @@ None of this needs a server. Learnings travel through git, like the code they ar
 
 ### A learning is a file
 
-A decision is a short markdown file in `.trail/learnings/`, reviewed in the pull request like any other change:
+A learning is a short markdown file in `.trail/learnings/`, reviewed in the pull request like any other change:
 
 ```markdown
 ---
@@ -651,7 +651,8 @@ trail map --max-dirs N               # raise/lower the number of directories sho
 #   GRAFT_REFRESH=hash               # hash every file instead of trusting size+mtime
 
 # learnings
-trail note --title "<about>" [dir]   # save a decision: what this session decided, tried and ruled out (the text on stdin)
+trail note --title "<about>" [dir]   # save a learning: what this session decided, tried and ruled out (the text on stdin)
+trail note --always-follow           # mark it always follow: your agent won't go against it, even if asked
 trail note --personal                # about your own setup, not the code: keep it in ~/.trail, out of the repo
 trail check [dir]                    # check your branch's diff against the repo's learnings, yours and your skills (exit 1 on a conflict)
 trail check --base origin/main       # compare against this base instead of origin's default branch

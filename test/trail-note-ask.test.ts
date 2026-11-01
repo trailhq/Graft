@@ -37,7 +37,7 @@ test('a check that failed, then passed after an edit to the code, is a sign', ()
   const [s] = noteSignals(fixed, REPO);
   assert.equal(s?.kind, 'fixed');
   assert.equal(s?.what, 'npm test failed once, then passed after your change to src/retry.ts.');
-  assert.match(noteAsk(s!), /^\[trail\] npm test failed once, then passed after your change to src\/retry\.ts\. If the cause isn't obvious from the diff, save it: `trail note --title "<the fact, not the task>"`, naming the file and the why\. Nothing worth keeping\? Say so and stop\.\n/);
+  assert.match(noteAsk(s!), /^\[trail\] npm test failed once, then passed after your change to src\/retry\.ts\. If the cause isn't obvious from the diff, save it: `trail note --title "<the decision in plain words a teammate understands, no file names>"`, with the why\. Nothing worth keeping\? Say so and stop\.\nPut files, commands and values in the body under "In the code:"\./);
 
   const thrice = jsonl(prompt('fix it'), bash('go test ./...', 'x', true), edit('a.go'), bash('go test ./pkg/...', 'x', true), bash('go test -run X ./...', 'x', true), edit('b.go'), bash('go test ./...', 'ok'));
   assert.match(noteSignals(thrice, REPO)[0]!.what, /^go test failed 3 times, then passed after your change to b\.go\.$/);
@@ -73,7 +73,7 @@ test('the person correcting the agent is a sign, when the agent goes on to chang
   const [s] = noteSignals(corrected, REPO);
   assert.equal(s?.kind, 'corrected');
   assert.equal(s?.what, 'The user corrected you ("no, use a channel instead, we never share memory here").');
-  assert.match(noteAsk(s!), /^\[trail\] The user corrected you \(.*\)\. Save the rule so nobody has to say it again/);
+  assert.match(noteAsk(s!), /^\[trail\] The user corrected you \(.*\)\. Save it as a learning so nobody has to say it again/);
 
   assert.deepEqual(kinds(jsonl(prompt("don't touch the db, add a cache"), edit('cache.go'))), [], "the session's first message can't correct anything");
   assert.deepEqual(kinds(jsonl(prompt('x'), say('done'), prompt('no, I mean the other file'), edit('b.go'))), [], 'a clarification');

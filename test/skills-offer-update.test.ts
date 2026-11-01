@@ -59,7 +59,7 @@ test("J07 then the fold: a kept lesson's command ran and passed, so the offer fo
   assert.equal(o.shownAt, NOW.toISOString());
   assert.deepEqual(o.lines, [
     "Published 0.22.4: npm shows it. This time release-npm also needed 'node scripts/stamp-cli.mjs 0.22.4' after step 2.",
-    "Fold your Oct 30 lesson into release-npm as step 3? 1 line changes. (yes / show me / no)",
+    "Fold your Oct 30 learning into release-npm as step 3? 1 line changes. (yes / show me / no)",
   ]);
   const r = standIn.replan(l.id, "r-1112-0002", "extend", l.env, { inj: u.st.injected[0] })!;
   assert.deepEqual(o.fold, { op: "extend", skillId: l.id, baseHash: skillHash(readFileSync(l.file, "utf8")), proposalSha: r.proposalSha, handEdited: false, version: 1, lessonIds: ["ls-1a2b3c"] });

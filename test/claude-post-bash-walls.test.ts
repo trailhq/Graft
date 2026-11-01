@@ -129,7 +129,7 @@ test('wall_hit carries the class and whether a lesson applies; a lesson that wor
     noteWalls({ worked: [{ cls: 'docker-rootless', lessonId: id, sh: 'a1b2c3d4e5f6', epoch: 1, d: '2026-10-09' }] }, env);
     const twice = postBashRun(payload, b.repo, env, true);
     for (const r of [first, once, twice]) contractOnly(r.sent as Array<[string, Record<string, string>]>);
-    assert.match(twice.out.context ?? '', /\n\[trail\] What fixed this here before \(a lesson this person kept in Trail, worked on Oct 2 and Oct 9\): "rootless Docker not found": colima start/);
+    assert.match(twice.out.context ?? '', /\n\[trail\] What fixed this here before \(a learning this person kept in Trail, worked on Oct 2 and Oct 9\): "rootless Docker not found": colima start/);
   } finally {
     done(b);
   }

@@ -59,11 +59,12 @@ const REPO_WALLS = new Set<WallClass>(['git-https-auth']);
 
 /** The words a lesson reaches the agent and the person in (J07, 4.14, 4.15). Information, tied to the skill (D88). */
 export const LESSON_COPY: Record<string, string> = {
-  line: 'Lesson (the person, {date}): {text}',
+  line: 'New learning (the person, {date}): {text}',
+  lineAlways: 'Always follow (the person, {date}): {text}',
   offerFirst: 'You corrected {skill}: {said}.',
-  offerSecond: 'Add a lesson to it, just for you: "{lesson}"? (yes / no)',
-  saved: "✓ lesson added to {skill}, just for you · it rides at the end of the skill's steps · undo: trail forget {id}",
-  savedWall: '✓ lesson kept, just for you {where} · Trail shows it when "{fixed}" comes back · undo: trail forget {id}',
+  offerSecond: 'Add a learning to it, just for you: "{lesson}"? (yes / no)',
+  saved: "✓ learning added to {skill}, just for you · it rides at the end of the skill's steps · undo: trail forget {id}",
+  savedWall: '✓ learning kept, just for you {where} · Trail shows it when "{fixed}" comes back · undo: trail forget {id}',
 };
 
 const fill = (t: string, v: Record<string, string>) => t.replace(/\{(\w+)\}/g, (m, k: string) => v[k] ?? m);
@@ -258,7 +259,7 @@ function freeName(dir: string, stem: string, numbered: boolean): string {
     try { lstatSync(join(dir, name)); } catch { taken = false; }
     if (!taken) return name;
   }
-  throw new Error('trail: too many lessons on one day');
+  throw new Error('trail: too many new learnings on one day');
 }
 
 /** Throws when `dir` or a folder between the Trail home and it is a link: a planted link would carry the lesson out (b4 review). */
@@ -297,10 +298,10 @@ function wallLearning(l: Lesson, text: string, repoKey: string, env?: NodeJS.Pro
  */
 export function writeLesson(l: Lesson, repoKey: string, env?: NodeJS.ProcessEnv): string {
   const text = flatLine(l.text, LESSON_MAX);
-  if (!text) throw new Error('trail: a lesson needs its text');
-  if (!DATE.test(String(l.at))) throw new Error('trail: a lesson needs its date');
+  if (!text) throw new Error('trail: a learning needs its text');
+  if (!DATE.test(String(l.at))) throw new Error('trail: a learning needs its date');
   if (l.skill === null || l.skill === undefined) {
-    if (!isWall(l.wall)) throw new Error('trail: a lesson needs a skill or a wall');
+    if (!isWall(l.wall)) throw new Error('trail: a learning needs a skill or an error');
     return wallLearning({ ...l, src: l.src === 'correction' ? 'correction' : 'repair' }, text, repoKey, env);
   }
   if (!safeName(l.skill)) throw new Error(`trail: not a skill name: ${flatLine(l.skill, 60)}`);
@@ -308,7 +309,7 @@ export function writeLesson(l: Lesson, repoKey: string, env?: NodeJS.ProcessEnv)
   const dir = join(skillsDir(env), l.skill);
   let st;
   try { st = lstatSync(dir); } catch { throw new Error(`trail: no skill called ${l.skill}`); }
-  if (st.isSymbolicLink()) throw new Error(`trail: ${dir} is a link; Trail won't write a lesson through it.`);
+  if (st.isSymbolicLink()) throw new Error(`trail: ${dir} is a link; Trail won't write a learning through it.`);
   if (!st.isDirectory()) throw new Error(`trail: no skill called ${l.skill}`);
   const lessons = join(dir, 'lessons');
   ownFolder(lessons);
@@ -386,8 +387,9 @@ function dayOf(d: string): string {
 export const isGuardrailLesson = (l: Lesson) => kindOf(flatLine(l.text, LESSON_MAX), l.kind) === 'guardrail';
 
 /** Guardrail-kind lessons first (never trimmed), then up to 3 newest lessons, oldest of them first (4.16, J07). */
-/** One lesson's line (`Lesson (the person, Nov 3): ...`). */
-export const lessonLine = (l: Lesson) => fill(LESSON_COPY.line!, { date: dayOf(l.at), text: flatLine(l.text, LESSON_MAX) });
+/** One lesson's line (`New learning (the person, Nov 3): ...`, or `Always follow (...)` for a guardrail-kind one). */
+export const lessonLine = (l: Lesson) =>
+  fill((isGuardrailLesson(l) ? LESSON_COPY.lineAlways : LESSON_COPY.line)!, { date: dayOf(l.at), text: flatLine(l.text, LESSON_MAX) });
 
 export function lessonLines(lessons: Lesson[]): string[] {
   const line = lessonLine;

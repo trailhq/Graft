@@ -31,7 +31,7 @@ function timeouts(hooks: Hooks): Record<string, number[]> {
   return out;
 }
 
-const EXPECTED = { PostToolUse: [10, 8], UserPromptSubmit: [15], PreToolUse: [5], PostToolUseFailure: [5], SessionStart: [10], Stop: [10], SessionEnd: [5] };
+const EXPECTED = { PostToolUse: [10, 8], UserPromptSubmit: [15], PreToolUse: [5, 5], PostToolUseFailure: [5], SessionStart: [10], Stop: [10], SessionEnd: [5] };
 
 test('the repo and ~/.claude installs write every hook timeout in seconds', () => {
   assert.deepEqual(timeouts(mergeGraftSettings({}, { name: 'trail' }).merged.hooks), EXPECTED);

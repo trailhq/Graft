@@ -23,6 +23,7 @@ import { readBranchCache } from "./branches.js";
 import { tokensLabel, tokensWorthSaying } from "./credit.js";
 import type { NoteHit } from "./find-notes.js";
 import { flatLine } from "./flatten.js";
+import { isAlwaysFollow } from "./units.js";
 import { ensureRepoHome, notePlaces, shownPath } from "./home.js";
 import { LEARNING_KEYS, learningFileName, liveLearnings, newLearningId, readLearningFields, type LearningFields } from "./learning-fields.js";
 import { ensureRepoTrail, LEARNINGS_DIR, learningsDir } from "./repo-trail.js";
@@ -390,7 +391,7 @@ export function formatNoteHits(hits: NoteHit[]): string[] {
   for (const { note } of hits) {
     const author = flatLine(note.author, 80);
     const who = `${author ? `${author}'s learning` : "a learning"}${note.teammate ? ", a teammate's" : ""}`;
-    lines.push(`from ${who} · ${flatLine(shortDate(note.date), 40)} · ${flatLine(note.title)}`);
+    lines.push(`from ${who}${isAlwaysFollow(note) ? " · always follow" : ""} · ${flatLine(shortDate(note.date), 40)} · ${flatLine(note.title)}`);
     const cost = costLabel(note.cost);
     for (const s of SECTIONS) {
       const lead = sectionLead(note.body, s.heading);

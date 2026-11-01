@@ -1,5 +1,5 @@
 /**
- * D117 (5): a kept "this repo" preference is named "your preference for this repo" in the D87 notice, and a
+ * D117 (5): a kept "this repo" preference is named "your learning for this repo" in the D87 notice, and a
  * `timeout-missing` lesson counts as worked when the next timeout-free run of the same program passes.
  * Made-up repos and commands only.
  */
@@ -19,7 +19,7 @@ import { tmpRepo } from './helpers.js';
 const made: string[] = [];
 after(() => { for (const d of made) rmSync(d, { recursive: true, force: true }); });
 
-test('D117 (5): a kept preference for this repo is "your preference for this repo"; an every-repo one keeps its title', () => {
+test('D117 (5): a kept preference for this repo is "your learning for this repo"; an every-repo one keeps its title', () => {
   const root = tmpRepo('d117-pref');
   made.push(root);
   const env = { HOME: root, TRAIL_HOME: join(root, 'trail-home') };
@@ -30,7 +30,7 @@ test('D117 (5): a kept preference for this repo is "your preference for this rep
     { kind: 'preference', name: '', id: every, forget: every },
     { kind: 'preference', name: '', id: 'l-0a0b0c0d', forget: 'l-0a0b0c0d' },
   ], env);
-  assert.equal(line, `trail: kept from trail init in your terminal: "use plain words" (preference, undo: trail forget ${every}) · your preference for this repo (preference, undo: trail forget l-0a0b0c0d)`);
+  assert.equal(line, `trail: kept from trail init in your terminal: "use plain words" (learning, undo: trail forget ${every}) · your learning for this repo (learning, undo: trail forget l-0a0b0c0d)`);
 });
 
 const TIMEOUT_ERR = 'zsh:1: command not found: timeout';

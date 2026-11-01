@@ -62,7 +62,7 @@ test("the correction line the fold meets at Stop fills its offset, and the lesso
   assert.equal(state(b).lessonWatch?.typedSha, typedSha(CORRECTION));
   const r = stopNow(b);
   assert.ok(r.out.block, JSON.stringify(r));
-  assert.match(r.out.block!, /\nYou corrected release-npm: it didn't push the tag\.\nAdd a lesson to it, just for you: "push the tag too: git push origin --tags"\? \(yes \/ no\)\n/);
+  assert.match(r.out.block!, /\nYou corrected release-npm: it didn't push the tag\.\nAdd a learning to it, just for you: "push the tag too: git push origin --tags"\? \(yes \/ no\)\n/);
   assert.match(r.out.block!, /^\[trail\] From Trail, the tool this person installed/);
   assert.deepEqual(r.sent, [["skill_offered", { moment: "correction" }]]);
   const st = state(b);

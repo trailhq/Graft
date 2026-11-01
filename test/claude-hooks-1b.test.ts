@@ -147,7 +147,7 @@ test('J06 end to end: day 1 hits the docker wall and gets the fix, Stop records 
     assert.equal(offer.moment, 'repaired');
     const lines = offer.lines!;
     assert.match(lines[0], /This is the 2nd time this week that go failed on "rootless Docker not found" and needed Colima's socket\.$/);
-    assert.equal(lines[1], `Keep what fixed it as a lesson, just for you in every repo: "'rootless Docker not found': DOCKER_HOST=unix://$HOME/.colima/default/docker.sock"? (yes / no)`);
+    assert.equal(lines[1], `Keep what fixed it as a learning, just for you in every repo: "'rootless Docker not found': DOCKER_HOST=unix://$HOME/.colima/default/docker.sock"? (yes / no)`);
     assert.ok(stop!.reason.includes(lines[0]) && stop!.reason.includes(lines[1]));
     await sayOfferLines(s2, 14, lines);
     await promptHook(s2, at(14, 60), 'yes');
@@ -157,7 +157,7 @@ test('J06 end to end: day 1 hits the docker wall and gets the fix, Stop records 
       return { out: r.line, failed: r.code !== 0 };
     });
     assert.equal(kept.decision, null, 'the lesson gate let it through');
-    assert.match(kept.out, /^✓ lesson kept, just for you in every repo · Trail shows it when "rootless Docker not found" comes back · undo: trail forget l-[0-9a-f]{8}$/);
+    assert.match(kept.out, /^✓ learning kept, just for you in every repo · Trail shows it when "rootless Docker not found" comes back · undo: trail forget l-[0-9a-f]{8}$/);
     assert.ok(ls(everyRepoDir({ TRAIL_HOME: b.trail })).some((f) => f.startsWith('lesson-docker-rootless-')));
     assert.deepEqual(offersLog(b).map((o) => [o.event, o.moment, o.answer ?? null]), [['shown', 'repaired', null], ['answer', 'repaired', 'yes']]);
   } finally {
@@ -265,7 +265,7 @@ test('D87: what the person kept on trail init\'s screen is named once at the nex
       ] };
     }, { TRAIL_HOME: b.trail });
     const first = await startContext(session(b), at(17, 0));
-    assert.match(first.context, /\[trail\] From Trail, the tool this person installed[^\n]*tell them once, at the start of your first reply: "kept from trail init in your terminal: release-npm \(skill, undo: trail forget release-npm\) · no-timeout \(guardrail, undo: trail forget no-timeout\)"/);
+    assert.match(first.context, /\[trail\] From Trail, the tool this person installed[^\n]*tell them once, at the start of your first reply: "kept from trail init in your terminal: release-npm \(skill, undo: trail forget release-npm\) · no-timeout \(always-follow learning, undo: trail forget no-timeout\)"/);
     assert.ok(readInitRecord(SHOP, { TRAIL_HOME: b.trail }).notice?.shownAt);
     assert.doesNotMatch((await startContext(session(b), at(17, 5))).context, /kept from trail init/, 'once');
   } finally {
@@ -304,7 +304,7 @@ test('J07 end to end: a release from the block, the person\'s correction, the fi
     const lines = offerLinesOf(offer, s.tx, { HOME: b.home, TRAIL_HOME: b.trail })!;
     assert.ok(stop!.reason.includes(lines[0]) && stop!.reason.includes(lines[1]));
     assert.match(lines[0]!, new RegExp(`^You corrected ${name}: it didn't push the tag\\.`));
-    assert.match(lines[1]!, /^Add a lesson to it, just for you: "push the tag too: git push origin --tags"\? \(yes \/ no\)$/);
+    assert.match(lines[1]!, /^Add a learning to it, just for you: "push the tag too: git push origin --tags"\? \(yes \/ no\)$/);
     await sayOfferLines(s, 22, lines, 85);
     await promptHook(s, at(22, 100), 'yes');
     const cmd = `trail skills lesson ${name} --offer ${offer.offerId}`;
@@ -313,14 +313,14 @@ test('J07 end to end: a release from the block, the person\'s correction, the fi
       return { out: r.line, failed: r.code !== 0 };
     });
     assert.equal(kept.decision, null, 'the lesson gate let it through');
-    assert.match(kept.out, new RegExp(`^✓ lesson added to ${name}, just for you · it rides at the end of the skill's steps · undo: trail forget ls-[0-9a-f]{6}$`));
+    assert.match(kept.out, new RegExp(`^✓ learning added to ${name}, just for you · it rides at the end of the skill's steps · undo: trail forget ls-[0-9a-f]{6}$`));
     assert.equal(ls(join(b.trail, 'skills', name!, 'lessons')).length, 1);
 
     // Oct 24: the next block ends with the lesson.
     const s2 = session(b);
     const block = ctxOf(await promptHook(s2, at(24, 0), 'publish 1.4.2'));
     const last = block.trimEnd().split('\n').pop()!;
-    assert.equal(last.trim(), 'Lesson (the person, Oct 22): push the tag too: git push origin --tags', block);
+    assert.equal(last.trim(), 'New learning (the person, Oct 22): push the tag too: git push origin --tags', block);
     assert.deepEqual(offersLog(b).filter((o) => o.moment === 'correction').map((o) => [o.event, o.answer ?? null]), [['shown', null], ['answer', 'yes']]);
   } finally {
     done(b);

@@ -108,7 +108,7 @@ test("pnpm vs npm at a save: the steps follow the preference, the check too, and
   assert.equal(c.checkIsStep, true);
   assert.equal(c.meta.needs, "pnpm");
   assert.deepEqual(c.steps.map((s) => s.from), plain.steps.map((s) => s.from), "each step still points at the call it was copied from");
-  assert.equal(c.followed, 'Steps 1, 2 and 3 follow your preference "use pnpm, not npm" rather than this run\'s commands.');
+  assert.equal(c.followed, 'Steps 1, 2 and 3 follow your learning "use pnpm, not npm" rather than this run\'s commands.');
   // The same learnings give the same skill: both halves of a save agree on what the yes was to.
   assert.equal(skillSha(compiled(sheet, [PNPM])), skillSha(c));
   assert.notEqual(skillSha(c), skillSha(plain));
@@ -119,11 +119,11 @@ test("pnpm vs npm at a save: the steps follow the preference, the check too, and
 test("a step that can't follow safely is left out, and the line says which and why", () => {
   const c = compiled(testsSheet(["npm ci", "npx prisma db push", "npm run build"]), [learning("never run npx prisma db push", { kind: "decision" })]);
   assert.deepEqual(c.steps.map((s) => s.cmd), ["npm ci", "npm run build", "npm test"]);
-  assert.equal(c.followed, "Trail left out 'npx prisma db push': it goes against your decision \"never run npx prisma db push\", and Trail can't change it safely.");
+  assert.equal(c.followed, "Trail left out 'npx prisma db push': it goes against your learning \"never run npx prisma db push\", and Trail can't change it safely.");
   // The check itself can't be left out: no skill.
   const r = compileRun(testsSheet(), { ...OPTS, learnings: [learning("never run npm test", { scope: "repo" })] });
   assert.equal(r.ok, false);
-  assert.match(!r.ok ? r.detail : "", /^goes against this repo's preference "never run npm test", and it is the check$/);
+  assert.match(!r.ok ? r.detail : "", /^goes against this repo's learning "never run npm test", and it is the check$/);
 });
 
 test("a learning that only repeats a step changes nothing at a save", () => {
@@ -134,7 +134,7 @@ test("a learning that only repeats a step changes nothing at a save", () => {
 
 test("the offer names it at the end of line 1; line 2 is the question as always", () => {
   const lines: [string, string] = ["Tests pass (12 passed). That's the 3rd day I've worked out the tests from scratch (5 commands this time, 1 failed).", "Keep the 3 that worked as a skill, just for you in this repo? (yes / show me / no)"];
-  const f = 'Steps 1, 2 and 3 follow your preference "use pnpm, not npm" rather than this run\'s commands.';
+  const f = 'Steps 1, 2 and 3 follow your learning "use pnpm, not npm" rather than this run\'s commands.';
   assert.deepEqual(withFollowLine(lines, f), [`${lines[0]} ${f}`, lines[1]]);
   assert.deepEqual(withFollowLine(lines, undefined), lines);
   const long = withFollowLine(lines, "x".repeat(300));
@@ -149,7 +149,7 @@ test("followAtSave keeps a gated step as it is: it never rewrites a step that ca
   assert.equal(f.line, "To follow your learnings, Trail changed 1 step and left out 1 step; say show me to see them.");
   const short = learning("use bun, not npm");
   assert.equal(followAtSave([{ cmd: "npm test", gated: false, isCheck: false }, { cmd: "npm pack", gated: false, isCheck: false }], [short]).line,
-    "Step 1 runs 'bun run test' rather than this run's 'npm test', as your preference \"use bun, not npm\" says. Trail left out 'npm pack': it goes against your preference \"use bun, not npm\", and Trail can't change it safely.");
+    "Step 1 runs 'bun run test' rather than this run's 'npm test', as your learning \"use bun, not npm\" says. Trail left out 'npm pack': it goes against your learning \"use bun, not npm\", and Trail can't change it safely.");
 });
 
 /* ------------------------------------------------------------ at recall */
@@ -167,7 +167,7 @@ test("recall, a repeat: the block says the preference once, under its steps, and
     "  2 npm run build",
     "  3 npm test",
     "  check: step 3 passing is the check.",
-    "  Step 1 follows your preference: \"don't edit _schema.py by hand, run scripts/gen_schema.py\".",
+    "  Step 1 follows your learning: \"don't edit _schema.py by hand, run scripts/gen_schema.py\".",
     "  If a step fails, fix that step and say so. End with \"Used skill run-tests\".",
   ]);
   assert.deepEqual(saidIn(block, marks), ["l-1a2b3c4d"]);
@@ -178,11 +178,11 @@ test("recall, a contradiction: the preference wins, the block marks each step an
   const marks = recallMarks(c.skill.steps, [PNPM]);
   const block = runBlock(c, { ...blockCtx, marks });
   assert.deepEqual(block.split("\n").slice(1), [
-    "  1 pnpm install --frozen-lockfile (your preference's way; the skill has npm ci)",
-    "  2 pnpm run build (your preference's way; the skill has npm run build)",
-    "  3 pnpm test (your preference's way; the skill has npm test)",
+    "  1 pnpm install --frozen-lockfile (your learning's way; the skill has npm ci)",
+    "  2 pnpm run build (your learning's way; the skill has npm run build)",
+    "  3 pnpm test (your learning's way; the skill has npm test)",
     "  check: step 3 passing is the check.",
-    "  Your preference wins over the skill: \"use pnpm, not npm\". Steps 1, 2 and 3 are written its way; run them as shown.",
+    "  Your learning wins over the skill: \"use pnpm, not npm\". Steps 1, 2 and 3 are written its way; run them as shown.",
     "  If a step fails, fix that step and say so. End with \"Used skill run-tests\".",
   ]);
   // What credit and fidelity read: the steps as the block showed them.
@@ -196,8 +196,8 @@ test("recall, a step to leave out: marked on its line, and why after the steps",
   const c = skillOf(["npm ci", "npx prisma db push"]);
   const never = learning("never run npx prisma db push", { kind: "decision", scope: "repo", id: "l-2b3c4d5e" });
   const lines = runBlock(c, { ...blockCtx, marks: recallMarks(c.skill.steps, [never]) }).split("\n");
-  assert.equal(lines[2], "  2 npx prisma db push (against this repo's decision: see below)");
-  assert.ok(lines.includes("  This repo's decision \"never run npx prisma db push\" goes against step 2: leave it out, do that part its way, and tell the person."), lines.join("\n"));
+  assert.equal(lines[2], "  2 npx prisma db push (against this repo's learning: see below)");
+  assert.ok(lines.includes("  This repo's learning \"never run npx prisma db push\" goes against step 2: leave it out, do that part its way, and tell the person."), lines.join("\n"));
 });
 
 test("a contradiction wins over a repeat; a plain learning quoted only in part repeats nothing; at most 3 learnings", () => {

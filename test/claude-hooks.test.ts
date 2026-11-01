@@ -338,6 +338,32 @@ test('prompt hook omits --in on a single-scope repo even with lastFile set', asy
   }
 });
 
+test("prompt hook's graft child never waits for a repo's first build", async () => {
+  const d = mkdtempSync(join(tmpdir(), 'graft-prompt-wait-'));
+  mkdirSync(join(d, 'graft', '.graph'), { recursive: true });
+  writeFileSync(join(d, 'graft', '.graph', 'wiring.json'),
+    JSON.stringify({ meta: { nodeCount: 0, edgeCount: 0, languages: [] }, nodes: [], edges: [] }));
+  const stub = join(d, 'env-stub.cjs');
+  const seen = join(d, 'wait-seen.txt');
+  writeFileSync(
+    stub,
+    `require('fs').writeFileSync(${JSON.stringify(seen)}, String(process.env.GRAFT_FIRST_BUILD_WAIT_MS));\n` +
+      `process.stdout.write(JSON.stringify({ query: '', mode: 'lexical', hits: [], coverage: 1 }));\n`,
+  );
+  process.env.CLAUDE_PROJECT_DIR = d;
+  process.env.GRAFT_TEST_CLI = stub;
+  try {
+    await runWithStdin(
+      JSON.stringify({ session_id: 'p-wait', prompt: 'how does auth work here' }),
+      () => main('prompt'),
+    );
+    assert.equal(readFileSync(seen, 'utf8'), '0', 'it starts the build and answers within the hook budget');
+  } finally {
+    delete process.env.GRAFT_TEST_CLI;
+    delete process.env.CLAUDE_PROJECT_DIR;
+  }
+});
+
 test('prompt hook omits --in and logs to stderr when lastFile is ambiguous across scopes', async () => {
   const d = mkdtempSync(join(tmpdir(), 'graft-prompt-scope-'));
   mkdirSync(join(d, 'graft', '.graph'), { recursive: true });

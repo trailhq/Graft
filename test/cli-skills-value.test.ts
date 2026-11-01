@@ -66,7 +66,7 @@ async function trail(b: Box, args: string[]): Promise<{ code: number; out: strin
   return { code, out, sent };
 }
 
-const LINE = "Last week in this repo, on this machine: release-npm ran 2 times, 0 failed commands in all; the timeout guardrail stopped 2 commands.";
+const LINE = "Last week in this repo, on this machine: release-npm ran 2 times, 0 failed commands in all; the timeout learning stopped 2 commands.";
 
 test("trail skills: the value line is on top, and skill_value{list} says it went out", async () => {
   const b = box("top");

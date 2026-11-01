@@ -115,7 +115,7 @@ test('J07 then the fold: the lesson the person kept on Oct 22 runs on Oct 24, an
     const offer = stateOf(s).pendingOffer!;
     assert.equal(offer.moment, 'correction');
     const lines = offerLinesOf(offer, s.tx, envOf(b, at(22, 81)))!;
-    assert.match(lines[1]!, /^Add a lesson to it, just for you: "stamp the build too: node scripts\/stamp-cli\.mjs \{version\}"\? \(yes \/ no\)$/, lines[1]);
+    assert.match(lines[1]!, /^Add a learning to it, just for you: "stamp the build too: node scripts\/stamp-cli\.mjs \{version\}"\? \(yes \/ no\)$/, lines[1]);
     await sayOfferLines(s, 22, lines, 85);
     await promptHook(s, at(22, 100), 'yes');
     const lessonCmd = `trail skills lesson ${name} --offer ${offer.offerId}`;
@@ -123,7 +123,7 @@ test('J07 then the fold: the lesson the person kept on Oct 22 runs on Oct 24, an
       const r = keepLessonCli(name, offer.offerId, envOf(b, at(22, 111)), new Date(at(22, 111)));
       return { out: r.line, failed: r.code !== 0 };
     });
-    assert.match(keptLesson.out, new RegExp(`^✓ lesson added to ${name}`), keptLesson.out);
+    assert.match(keptLesson.out, new RegExp(`^✓ learning added to ${name}`), keptLesson.out);
 
     // Oct 24: the block ends with the lesson; the agent runs it after the build; Stop offers to fold it in.
     const s2 = session(b);
@@ -131,7 +131,7 @@ test('J07 then the fold: the lesson the person kept on Oct 22 runs on Oct 24, an
     reply(s2, at(24, 40), 'Published 1.4.2: npm shows it.');
     const block = blockOf(one(await stopHook(s2, at(24, 41), 'Published 1.4.2: npm shows it.')));
     const [l1, l2] = offerLinesIn(block);
-    assert.match(l2, new RegExp(`^Fold your Oct 22 lesson into ${name} as step 5\\? 1 line changes\\. \\(yes / show me / no\\)$`), l2);
+    assert.match(l2, new RegExp(`^Fold your Oct 22 learning into ${name} as step 5\\? 1 line changes\\. \\(yes / show me / no\\)$`), l2);
     await sayOfferLines(s2, 24, [l1, l2], 45);
     const update = updateCommandIn(ctxOf(one(await promptHook(s2, at(24, 60), 'yes'))));
     // The agent's shell runs the CLI: `updateCommand` prints what cliUpdate returns and sends skill_changed itself.

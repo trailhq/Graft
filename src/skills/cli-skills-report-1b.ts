@@ -60,7 +60,7 @@ export function skillExtras(ref: SkillRef, parsed: ParsedSkill | null, st: Skill
 /** The part a skill's line gains (2.12). */
 export function extrasWords(x: SkillExtras): string {
   const parts: string[] = [];
-  if (x.lessons) parts.push(plural(x.lessons, 'lesson'));
+  if (x.lessons) parts.push(plural(x.lessons, 'learning'));
   if (x.outOfDate) parts.push(`may be out of date: ${one(x.outOfDate, 160)}`);
   if (x.unusedSince) parts.push(`unused since ${dayOfLocal(x.unusedSince)} (not in the list agents see; asking for it still brings it)`);
   return parts.map((p) => ` · ${p}`).join('');
@@ -116,7 +116,7 @@ function guardrailDoes(g: GuardrailRow): string {
 export function guardrailLines(rows: GuardrailRow[]): string[] {
   if (!rows.length) return [];
   const width = Math.max(...rows.map((g) => one(g.name).length)) + 3;
-  return ['guardrails:', ...rows.map((g) => `  ${one(g.name).padEnd(width)}${g.applies} · ${guardrailDoes(g)}`)];
+  return ['always follow:', ...rows.map((g) => `  ${one(g.name).padEnd(width)}${g.applies} · ${guardrailDoes(g)}`)];
 }
 
 /** The errors in the catalog Trail saw in this repo over 30 days, and how often a repair followed. */
@@ -148,7 +148,7 @@ export function lessonTotal(skillLessons: number, place: RepoPlace | null, env: 
   return skillLessons + ids.size;
 }
 
-export const lessonsLine = (n: number) => (n ? `lessons: ${n} (trail skills show <name> lists them)` : null);
+export const lessonsLine = (n: number) => (n ? `new learnings: ${n} (trail skills show <name> lists them)` : null);
 
 /**
  * Phase 2 (3.6, 4.14): the weekly value line for the repo `trail skills` runs in, on top of the list, any day once

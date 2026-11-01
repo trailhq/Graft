@@ -328,7 +328,7 @@ test("run by an agent, trail init looks back with no model and relays the person
   assert.match(r.err, /· looking back at your past Claude Code sessions here \(about a minute\)/);
   assert.match(r.err, /✓ looked back at 2 Claude Code sessions about this repo, typed into on 2 days \(Oct 1 to Oct 3\)/);
   assert.equal(r.err.match(/Show the list as written/g)?.length, 1, "printed once");
-  assert.match(r.err, /\n1\. "never use em dashes in the copy" \(preference, your own words\) · You said this on 2 days · just for you, in every repo\n/);
+  assert.match(r.err, /\n1\. "never use em dashes in the copy" \(learning in your own words, every repo\)\n   You said this on 2 days\.\n/);
   assert.match(r.err, /Keep: trail keep <numbers> · none: trail keep none\n/);
   assert.doesNotMatch(r.err, /skills are off/, "skills are on by default: no line saying how to turn them on");
   assert.doesNotMatch(r.err, /—|for your team|\bnotes?\b|\brules?\b|\bmemory\b|\bworkflows?\b/i, "init's words: learnings, no em dashes");
@@ -347,7 +347,7 @@ test("an agent's trail init --yes keeps nothing (R25)", { skip: process.platform
   const repo = repoWithHistory("cold-yes", home);
   const r = initRun(repo, home, fakeClaude(), ["--yes"], { CLAUDECODE: "1" });
   assert.equal(r.status, 0, r.err);
-  assert.match(r.err, /found 0 skills, 0 guardrails and 1 preference\. Kept nothing: an agent ran this\./);
+  assert.match(r.err, /found 0 skills, 0 always-follow learnings and 1 learning\. Kept nothing: an agent ran this\./);
   assert.ok(!existsSync(join(home, ".trail", "learnings")));
   assert.deepEqual(learningFiles(repo), []);
 });

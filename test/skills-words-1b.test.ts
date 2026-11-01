@@ -3,9 +3,10 @@
  * src/skills/* and the skills hooks; this one adds 1b's copy outside them:
  * the wall catalog (WALL_COPY and each fix), the sure-fail deny, init's
  * screen, relay and keep words, the hooks b7 added (walls, the kept-at-start
- * notice) and the linked-folder refusal. The words are learnings, skills,
- * lessons, guardrails, preferences or decisions; never notes, rules, memory,
- * remember or workflows; no em dash. The copy constants are checked by value
+ * notice) and the linked-folder refusal. The words are learnings (a new one
+ * for what used to be a lesson), always follow and skills; never notes,
+ * rules, memory, remember or workflows; no em dash (test/vocabulary-units
+ * checks the old kind words stay out of the copy). The copy constants are checked by value
  * too, and anchors.ts and anchors-git.ts never start a process.
  */
 import { test } from "node:test";

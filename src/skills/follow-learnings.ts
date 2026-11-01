@@ -23,6 +23,7 @@ import { EVERY_REPO, learningFileName, liveLearnings, type LearningKind, type Sc
 import { repoNotesDir } from '../notes/repo-notes-dir.js';
 import { learningsDir } from '../notes/repo-trail.js';
 import { flatLine } from '../notes/flatten.js';
+import { learningWord } from '../notes/units.js';
 import { gatedKind } from './risk.js';
 import { neverSave } from './never-save.js';
 import { matchSteps, rulesOf, type StepRule } from './learning-steps.js';
@@ -70,9 +71,9 @@ export const cmdWords = (cmd: string) => `'${flatLine(String(cmd ?? '').replace(
 const listWords = (ns: number[]) => (ns.length < 2 ? ns.join('') : `${ns.slice(0, -1).join(', ')} and ${ns[ns.length - 1]}`);
 
 const OWNER: Record<Scope, string> = { personal: 'your', repo: "this repo's", team: "your team's" };
-/** 'your preference', "this repo's decision", "your team's learning". */
+/** 'your learning', "this repo's learning", "your team's always-follow learning" (notes/units.ts). */
 export function whose(l: Pick<StepLearning, 'kind' | 'scope'>): string {
-  return `${OWNER[l.scope] ?? 'your'} ${l.kind && l.kind !== 'lesson' ? l.kind : 'learning'}`;
+  return `${OWNER[l.scope] ?? 'your'} ${learningWord(l)}`;
 }
 
 /* ------------------------------------------------------------ reading */

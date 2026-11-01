@@ -140,8 +140,9 @@ test('the PreToolUse module loads only node builtins and small files, never the 
   const names = files.map((f) => relative(SRC, f).split('\\').join('/'));
   for (const heavy of ['cli.ts', 'claude/hooks.ts', 'upkeep.ts', 'upkeep-run.ts']) assert.ok(!names.includes(heavy), `${heavy} stays out`);
   assert.ok(!names.some((n) => /^(telemetry|graph|ask|notes|cloud)\//.test(n)), `nothing heavier: ${names.join(', ')}`);
-  // Itself, the one-copy check (hook-layers, brand, host) and the skills fast path below.
-  assert.ok(files.length <= 12, `a small closure: ${names.join(', ')}`);
+  // Itself, the one-copy check (hook-layers, brand, host), the skills fast path below, and the
+  // commit check (pre-bash-check.ts), loaded only before a commit, a push or a PR.
+  assert.ok(files.length <= 13, `a small closure: ${names.join(', ')}`);
   // Loading it costs nothing but itself: no other file, and no ESM import of
   // node:fs, which alone costs Node several ms before every shell command.
   const atLoad = importClosure(join(SRC, 'claude', 'pre-bash.ts'), true);
@@ -192,7 +193,9 @@ test('a plain command with no gate file loads none of the skills code; a skills 
     assert.equal(r.stdout, '');
     return existsSync(loaded) ? readFileSync(loaded, 'utf8').trim().split('\n') : [];
   };
-  for (const command of ['npm test', 'git push origin beta', 'echo skillset', 'cat README.md']) assert.deepEqual(run(command), [], command);
+  for (const command of ['npm test', 'echo skillset', 'cat README.md']) assert.deepEqual(run(command), [], command);
+  // A push runs trail check first (pre-bash-check.ts), after the one-copy check; never the skills part.
+  assert.deepEqual(run('git push origin beta'), ['hook-layers'], 'git push origin beta');
   assert.deepEqual(run('trail skills on'), ['hook-layers', 'pre-bash-skills'], 'the one-copy check first, then the skills part');
   assert.deepEqual(run('tr""ail sk\'ills\' on'), ['hook-layers', 'pre-bash-skills'], 'quotes inside the words still read as skills');
   assert.deepEqual(run('node ~/.claude/helpers/trail-hooks.cjs prompt'), ['hook-layers', 'pre-bash-skills'], 'a hook script by hand');

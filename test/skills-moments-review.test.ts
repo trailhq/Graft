@@ -133,9 +133,9 @@ test("D111: the lesson gate's refusals say lesson: from a subagent, with no pers
   const input = { ...b.payload, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: lessonCmd(o) }, tool_use_id: "toolu_x9" };
   const sub = await lessonGatePre(input, { ...ctxAt(b, 80), subagent: true });
   assert.equal(sub?.reason, LESSON_DENY.subagent);
-  assert.match(sub!.reason!, /^trail · lesson not kept: only the main session can keep a lesson\.$/);
+  assert.match(sub!.reason!, /^trail · learning not kept: only the main session can keep a learning\.$/);
   const head = await lessonGatePre(input, { ...ctxAt(b, 80), fold: false });
-  assert.match(head!.reason!, /^trail · lesson not kept: /);
+  assert.match(head!.reason!, /^trail · learning not kept: /);
   assert.doesNotMatch(`${sub!.reason} ${head!.reason} ${LESSON_DENY.busy}`, /\bskill\b|not saved/);
 });
 
@@ -257,7 +257,7 @@ test("an offer from another session: that session's agent can't keep it (no pend
   const input = { ...b.payload, ...other, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: lessonCmd(o) }, tool_use_id: "toolu_b0001" };
   const d = await lessonGatePre(input, ctxAt(b, 80, other));
   assert.equal(d?.permissionDecision, "deny");
-  assert.match(d!.reason!, /^trail · lesson not kept: there is no lesson offer with that id in this session/);
+  assert.match(d!.reason!, /^trail · learning not kept: there is no learning offer with that id in this session/);
   const { keepLessonCli } = await import("../src/skills/lesson-gate.js");
   assert.equal(keepLessonCli(null, o.offerId, b.env, T(81)).code, 1);
   assert.equal(readdirSync(b.env.TRAIL_HOME!).includes("learnings") ? readdirSync(join(b.env.TRAIL_HOME!, "learnings")).length : 0, 0);
