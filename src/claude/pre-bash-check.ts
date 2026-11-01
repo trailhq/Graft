@@ -70,7 +70,7 @@ export function branchConflicts(dir: string, env: NodeJS.ProcessEnv = process.en
 
 /** What the command is about to do, in the reason's words. */
 function shipping(command: string): string {
-  return /\bgh\s+pr\s+create\b/.test(command) ? 'opening this PR' : /\bgit\s+push\b/.test(command) ? 'this push' : 'this commit';
+  return /\bglab\s+mr\s+create\b/.test(command) ? 'opening this MR' : /\bgh\s+pr\s+create\b/.test(command) ? 'opening this PR' : /\bgit\s+push\b/.test(command) ? 'this push' : 'this commit';
 }
 
 /** The reason the agent reads: each conflict, then the way through (a stop) or what to do next (a warning). */

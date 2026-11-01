@@ -10,6 +10,7 @@
  * had dirty before init stays theirs, whatever init then wrote into it. Links,
  * FIFOs and files over 1 MB are never recorded or vouched for.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, readSync, realpathSync } from 'node:fs';
@@ -101,8 +102,7 @@ export function initLeftIt(files: InstallFiles | null, checkout: string, rel: st
 /** The paths of `git status --porcelain -z` (a rename's both sides), for the paths asked about. */
 function dirtyPaths(checkout: string, rels: string[], env: NodeJS.ProcessEnv): Set<string> | null {
   if (!rels.length) return new Set();
-  const r = spawnSync('git', ['status', '--porcelain', '-z', '--untracked-files=all', '--', ...rels], {
-    cwd: checkout, encoding: 'utf8', timeout: 10_000, env: { ...env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
+  const r = spawnSync('git', ['status', '--porcelain', '-z', '--untracked-files=all', '--', ...rels], { ...WINHIDE, cwd: checkout, encoding: 'utf8', timeout: 10_000, env: { ...env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
   });
   if (r.status !== 0 || typeof r.stdout !== 'string') return null;
   const out = new Set<string>();

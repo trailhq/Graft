@@ -21,6 +21,7 @@
  * Commands never wait on any of this: when something changed, a detached
  * `_trail-sync` child does it.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
@@ -130,8 +131,7 @@ function skillTitle(name: string): string {
 function trackedAmong(root: string, paths: string[]): Set<string> {
   if (paths.length === 0) return new Set();
   try {
-    const out = execFileSync("git", ["--literal-pathspecs", "ls-files", "-z", "--", ...paths], {
-      cwd: root,
+    const out = execFileSync("git", ["--literal-pathspecs", "ls-files", "-z", "--", ...paths], { ...WINHIDE, cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 15_000,
@@ -317,7 +317,7 @@ interface SyncState {
 /** The checkout's branch, or "" when git can't say (detached HEAD, no git). */
 function currentBranch(checkout: string): string {
   try {
-    const b = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: checkout, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim();
+    const b = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { ...WINHIDE, cwd: checkout, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim();
     return b === "HEAD" ? "" : b;
   } catch {
     return "";

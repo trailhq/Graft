@@ -44,6 +44,10 @@ export interface WorkspaceBuildOptions {
   followSubmodules?: boolean;
   /** An explicit CLI nested-clone choice to persist into every child repo. */
   followNestedRepos?: boolean;
+  /** An explicit CLI --include-md choice to persist into every child repo. */
+  includeMd?: boolean;
+  /** Repo-relative dirs to limit .md indexing to, persisted into each child. */
+  mdOnlyDirs?: string[];
   /** The npm package this runs from, for the fix in the native-parser notice. */
   packageName?: string;
 }
@@ -67,6 +71,12 @@ export async function runWorkspaceBuild(root: string, opts: WorkspaceBuildOption
     }
     if (opts.followNestedRepos !== undefined) {
       childConfigPatch.followNestedRepos = opts.followNestedRepos;
+    }
+    if (opts.includeMd !== undefined) {
+      childConfigPatch.includeMd = opts.includeMd;
+    }
+    if (opts.mdOnlyDirs && opts.mdOnlyDirs.length > 0) {
+      childConfigPatch.mdOnlyDirs = opts.mdOnlyDirs;
     }
     if (Object.keys(childConfigPatch).length > 0) {
       patchBuildConfig(childDir, childConfigPatch);

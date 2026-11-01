@@ -6,6 +6,7 @@ import { disableGraftServerIn, installClaudeGlobal, type GlobalWrite } from '../
 import { mergeGraftSettings, mergeTrailShared, mergeTrailLocal } from './settings-merge.js';
 import { statuslineShim, hooksShim, rememberInstall } from './shim-template.js';
 import { skillTemplate } from './skill-template.js';
+import { hermesSkillTemplate } from './hermes-skill-template.js';
 import { mergeJsonKey, serverEntry, type McpWrite } from '../hosts/mcp-config.js';
 import { readJsonObject } from '../hosts/config-write.js';
 import { ignoreInTrailDir } from '../notes/repo-trail.js';
@@ -21,6 +22,27 @@ export const TRAIL_STATUSLINE = join('.trail', 'statusline.cjs');
 /** Where trail's skill goes: the user's own `~/.claude`, never the repo. */
 export function trailSkillPath(home: string = homedir()): string {
   return join(home, '.claude', 'skills', 'trail', 'SKILL.md');
+}
+
+/**
+ * Where trail's Hermes skill goes: the user's Hermes profile skills directory.
+ * On Windows: %LOCALAPPDATA%/hermes/skills/trail/SKILL.md
+ * On Linux/macOS: ~/.hermes/skills/trail/SKILL.md
+ */
+export function hermesSkillPath(home: string = homedir()): string {
+  if (process.platform === 'win32') {
+    const local = process.env.LOCALAPPDATA ?? join(home, 'AppData', 'Local');
+    return join(local, 'hermes', 'skills', 'trail', 'SKILL.md');
+  }
+  return join(home, '.hermes', 'skills', 'trail', 'SKILL.md');
+}
+
+/** Whether the Hermes skills directory exists on this machine. */
+export function hermesInstalled(home: string = homedir()): boolean {
+  const dir = process.platform === 'win32'
+    ? join(process.env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'hermes', 'skills')
+    : join(home, '.hermes', 'skills');
+  return existsSync(dir);
 }
 
 /**
@@ -230,6 +252,13 @@ function runTrailInit(
     mkdirSync(dirname(skill), { recursive: true });
     writeFileSync(skill, skillTemplate('trail'));
     skillPath = skill;
+
+    // Also write the Hermes skill when Hermes is installed on this machine.
+    if (hermesInstalled(home)) {
+      const hPath = hermesSkillPath(home);
+      mkdirSync(dirname(hPath), { recursive: true });
+      writeFileSync(hPath, hermesSkillTemplate('trail'));
+    }
   }
 
   // An old settings.json left as it was still runs the old shims: they stay until it can be rewritten.

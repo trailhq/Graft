@@ -1,6 +1,7 @@
 /**
  * Filesystem walking used by `init`/`check` to enumerate a repo's source files.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -189,8 +190,7 @@ function gitVisibleFiles(
   const result = spawnSync(
     "git",
     ["ls-files", "-t", "--stage", "--cached", "--others", "--exclude-standard", "-z", "--"],
-    {
-      cwd: root,
+    { ...WINHIDE, cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       maxBuffer: 64 * 1024 * 1024,
@@ -293,8 +293,7 @@ function gitVisibleFilesShallow(root: string, includes?: ReadonlySet<string>): s
   const result = spawnSync(
     "git",
     ["ls-files", "--cached", "--others", "--exclude-standard", "-z", "--"],
-    {
-      cwd: root,
+    { ...WINHIDE, cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       maxBuffer: 64 * 1024 * 1024,

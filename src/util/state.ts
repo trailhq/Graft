@@ -9,7 +9,7 @@
  * on top of each other. `claude/state.ts` re-exports all of this, so nothing
  * outside had to change when it moved.
  */
-import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync, openSync, writeSync, closeSync, fchmodSync, constants } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync, openSync, writeSync, closeSync, fchmodSync, constants } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, dirname, isAbsolute } from 'node:path';
 import { mapDirFor } from '../context/map-dir.js';
@@ -116,14 +116,31 @@ export interface BuildConfig {
    * checkout someone parked in the tree. Absent/false keeps the historical
    * boundary. */
   followNestedRepos?: boolean;
+  /** Whether `.md` files are indexed as graph nodes (headings → symbols).
+   * Opt-in: off by default so code repos are unaffected. */
+  includeMd?: boolean;
+  /**
+   * When set, only `.md` files under these repo-relative paths are indexed.
+   * Useful to exclude `archive/`, `changes/` etc. from knowledge repos.
+   * Example: ["specs"] indexes only the specs/ directory.
+   */
+  mdOnlyDirs?: string[];
 }
 
-/** Local, Git-ignored repository configuration. Kept outside generated
- * `graft/` output so deleting/replacing that cache, workspace federation, and
- * custom `--dir` builds cannot erase or redirect the persisted choice. */
-export const BUILD_CONFIG_DIR = '.graft';
+/** Local, Git-ignored repository configuration. Under trail, lives in `.trail/`
+ * (alongside learnings, hooks and the graph cache) to keep all trail files together.
+ * Falls back to `.graft/` for repos that were configured with the old upstream name. */
+export const BUILD_CONFIG_DIR = '.trail';
+const BUILD_CONFIG_DIR_LEGACY = '.graft';
 
-export function buildConfigPath(d: string): string { return join(d, BUILD_CONFIG_DIR, 'config.json'); }
+export function buildConfigPath(d: string): string {
+  // Prefer .trail/config.json; fall back to .graft/config.json for migration.
+  const legacy = join(d, BUILD_CONFIG_DIR_LEGACY, 'config.json');
+  if (!existsSync(join(d, BUILD_CONFIG_DIR, 'config.json')) && existsSync(legacy)) {
+    return legacy;
+  }
+  return join(d, BUILD_CONFIG_DIR, 'config.json');
+}
 
 /** Keep local build configuration out of Git without coupling it to the
  * generated graph directory. Best-effort, matching graph-cache ignore setup. */
@@ -133,20 +150,40 @@ function ensureBuildConfigIgnored(d: string): void {
   const path = join(d, '.gitignore');
   let current = '';
   try { current = readFileSync(path, 'utf8'); } catch { /* no .gitignore yet */ }
+  // Only ignore the config.json file itself, not the whole .trail/ dir
+  // (.trail/ contains learnings/, hook.cjs etc. that must be committed).
+  const CONFIG_IGNORE = `${BUILD_CONFIG_DIR}/config.json`;
   const present = current.split('\n').some((line) => {
     const value = line.trim();
-    return value === BUILD_CONFIG_DIR || value === `${BUILD_CONFIG_DIR}/` || value === `/${BUILD_CONFIG_DIR}/`;
+    return value === CONFIG_IGNORE || value === `/${CONFIG_IGNORE}`;
   });
   if (present) return;
   const gap = current === '' ? '' : current.endsWith('\n') ? '\n' : '\n\n';
-  const block = `${gap}# graft's local repository settings — not committed.\n/${BUILD_CONFIG_DIR}/\n`;
+  const block = `${gap}# trail's local build config — not committed.\n/${CONFIG_IGNORE}\n`;
   try { writeFileSync(path, current + block); } catch { /* best-effort */ }
 }
 
-export function readBuildConfig(d: string): BuildConfig | null { return readJson<BuildConfig>(buildConfigPath(d)); }
+export function readBuildConfig(d: string): BuildConfig | null {
+  const cfg = readJson<BuildConfig>(buildConfigPath(d));
+  // Auto-migrate: if we read from legacy .graft/, write to .trail/ and clean up.
+  if (cfg && existsSync(join(d, BUILD_CONFIG_DIR_LEGACY, 'config.json')) && !existsSync(join(d, BUILD_CONFIG_DIR, 'config.json'))) {
+    writeBuildConfig(d, cfg);
+  }
+  return cfg;
+}
 export function writeBuildConfig(d: string, c: BuildConfig): void {
   ensureBuildConfigIgnored(d);
-  writeJsonAtomic(buildConfigPath(d), c);
+  // Always write to .trail/config.json (canonical path for the trail fork).
+  const targetDir = join(d, BUILD_CONFIG_DIR);
+  mkdirSync(targetDir, { recursive: true });
+  const targetPath = join(targetDir, 'config.json');
+  writeJsonAtomic(targetPath, c);
+  // Migrate: remove legacy .graft/ after writing to .trail/.
+  const legacyDir = join(d, BUILD_CONFIG_DIR_LEGACY);
+  const legacyConfig = join(legacyDir, 'config.json');
+  if (existsSync(legacyConfig)) {
+    try { rmSync(legacyDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
 }
 
 /** Merge explicit CLI choices into the existing local config, so updating one
@@ -173,6 +210,16 @@ export function readFollowSubmodules(d: string): boolean {
 /** Missing and explicit false both retain the backwards-compatible default. */
 export function readFollowNestedRepos(d: string): boolean {
   return readBuildConfig(d)?.followNestedRepos === true;
+}
+
+/** Whether `.md` files are included in this repo's graph. Opt-in, off by default. */
+export function readIncludeMd(d: string): boolean {
+  return readBuildConfig(d)?.includeMd === true;
+}
+
+/** Repo-relative dirs to limit .md indexing to. Empty/absent = all dirs. */
+export function readMdOnlyDirs(d: string): string[] {
+  return readBuildConfig(d)?.mdOnlyDirs ?? [];
 }
 // Best-effort read-modify-write; not atomic across concurrent processes, but acceptable
 // for episodic hook writes (worst case is a lost update, not corruption).

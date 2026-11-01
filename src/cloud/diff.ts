@@ -2,11 +2,12 @@
  * The change `trail check` looks at: everything this branch would put in a
  * pull request, committed or not, measured from where it left its base.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { execFileSync } from "node:child_process";
 
 function git(repo: string, args: string[]): string | null {
   try {
-    return execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 });
+    return execFileSync("git", args, { ...WINHIDE, cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 });
   } catch {
     return null;
   }

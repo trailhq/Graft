@@ -3,13 +3,14 @@
  * and which files the session changed. All from git, all best-effort: a
  * missing answer leaves the field out rather than guessing.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { execFileSync } from "node:child_process";
 import { userInfo } from "node:os";
 
 /** git's stdout, trimmed unless `raw` (porcelain status starts lines with a meaningful space). */
 function git(repo: string, args: string[], raw = false): string | null {
   try {
-    const out = execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const out = execFileSync("git", args, { ...WINHIDE, cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
     return raw ? out : out.trim();
   } catch {
     return null;

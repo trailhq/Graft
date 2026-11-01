@@ -7,6 +7,7 @@
  * and compares the functions each change lands in. It only parses for a file
  * some cached branch changes, so most edits cost one cache read.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -52,8 +53,7 @@ export interface FunctionOverlap {
 
 function git(repo: string, args: string[]): string | null {
   try {
-    return execFileSync("git", args, {
-      cwd: repo,
+    return execFileSync("git", args, { ...WINHIDE, cwd: repo,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 5_000,

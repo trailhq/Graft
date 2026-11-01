@@ -7,6 +7,7 @@
  * learning, say) stay on this machine: what goes up is what anyone who clones
  * the repo would read.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { execFileSync } from "node:child_process";
 import { LEARNINGS_DIR } from "../notes/repo-trail.js";
 
@@ -16,8 +17,7 @@ const FILE_MODES = new Set(["100644", "100755"]);
 function git(checkout: string, args: string[], input?: string): Buffer | null {
   try {
     // Never a credential prompt: this runs detached, where nobody could answer it.
-    return execFileSync("git", args, {
-      cwd: checkout,
+    return execFileSync("git", args, { ...WINHIDE, cwd: checkout,
       input,
       stdio: ["pipe", "pipe", "ignore"],
       timeout: 15_000,

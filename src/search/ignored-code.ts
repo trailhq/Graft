@@ -5,6 +5,7 @@
  * searched, and the agent's own grep then found the file. After that the agent
  * stopped trusting trail for the session.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { extname, join } from "node:path";
@@ -41,8 +42,7 @@ function holdsCode(dir: string, exts: Set<string>): boolean {
  * dot folders are left out. Empty outside git, or when git can't say.
  */
 export function ignoredCode(root: string, limit = 20): string[] {
-  const r = spawnSync("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory"], {
-    cwd: root,
+  const r = spawnSync("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory"], { ...WINHIDE, cwd: root,
     encoding: "utf8",
     timeout: 3000,
   });

@@ -15,6 +15,8 @@
  * squash-merged branch still on the remote looks unmerged to git's history,
  * and so does one whose pull request was closed.
  */
+import { WINHIDE } from "../util/child-process.js";
+import { makeAdapter } from "./forge.js";
 import { execFileSync, spawn } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -107,8 +109,7 @@ export function readBranchCache(repo: string): BranchCache | null {
 function git(repo: string, args: string[], timeout = 15_000): string | null {
   try {
     // Never a credential prompt: this runs detached, where nobody could answer it.
-    return execFileSync("git", args, {
-      cwd: repo,
+    return execFileSync("git", args, { ...WINHIDE, cwd: repo,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout,
@@ -157,22 +158,16 @@ export function onBase(repo: string, base: string, ref: string): boolean {
 }
 
 /**
- * Branches whose GitHub pull request was merged or closed, with the commit it
- * ended on, from `gh`. Null when origin isn't on GitHub, or gh is missing,
- * signed out or slow: then only `onBase` decides.
+ * Branches whose MR/PR was merged or closed, with the commit it ended on,
+ * via the forge adapter. Returns null when the forge CLI is unavailable or
+ * when the origin is an unsupported forge.
  */
 function closedPrHeads(repo: string): ClosedHeads | null {
-  const origin = git(repo, ["remote", "get-url", "origin"])?.trim() ?? "";
-  if (!/github\.com[:/]/.test(origin)) return null;
+  const adapter = makeAdapter(repo);
+  if (!adapter.isReady(repo)) return null;
   let out: string;
   try {
-    out = execFileSync("gh", ["pr", "list", "--state", "all", "--limit", "200", "--json", "headRefName,headRefOid,state"], {
-      cwd: repo,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 10_000,
-      env: { ...process.env, GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0" },
-    });
+    out = adapter.listBranches(repo);
   } catch {
     return null;
   }

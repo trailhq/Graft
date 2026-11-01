@@ -8,6 +8,7 @@
  * Both names run this file. Under `graft` every command keeps its old name and
  * meaning; under `trail` the layout changes (see `TRAIL` below and brand.ts).
  */
+import { WINHIDE } from "./util/child-process.js";
 import { spawnSync } from "node:child_process";
 import "dotenv/config";
 import { Command } from "commander";
@@ -33,7 +34,7 @@ import { committedAtBase, learningsAtBase, teammateEdits, withBaseLearnings } fr
 import { contextDirFor } from "./context/node-file.js";
 import { loadGraphCached } from "./graph/load.js";
 import { ensureFreshChildren, ensureFreshGraph, refreshNote } from "./graph/refresh.js";
-import { isWorkspaceBuildRoot, readWorkspace } from "./graph/workspace.js";
+import { isWorkspaceBuildRoot, readWorkspace, writeWorkspace } from "./graph/workspace.js";
 import { NOT_GIT_LINE, NOT_GIT_PAIR_REFUSAL, homeFolderRefusal, isGitWorkTree } from "./init-guard.js";
 import { hasGraftIndex, nearestGraftRoot } from "./graph/root.js";
 import { unsupportedExtensions, supportedExtensions } from "./graph/source-files.js";
@@ -443,6 +444,63 @@ grouped(program.command("upgrade"), GROUP.setup)
     if (!TRAIL && result.ok && result.trailVersion) moveHereToTrail(process.cwd());
   });
 
+// `trail config`: workspace-level configuration (knowledge repos, etc.)
+grouped(program.command("config", { hidden: !TRAIL }), GROUP.setup)
+  .description("Read or update workspace configuration (workspace root only)")
+  .addCommand(
+    (() => {
+      const sub = new Command("knowledge-repo");
+      sub
+        .description("Add or remove a knowledge repo URL from this workspace's trail init auto-clone list")
+        .argument("<action>", "add | remove | list")
+        .argument("[url]", "Git remote URL of the knowledge repo (required for add/remove)")
+        .argument("[dir]", "repo or workspace root (default: cwd)", ".")
+        .action(async (action: string, url: string | undefined, dir: string) => {
+          const root = resolve(dir);
+          // Works in any trail-wired directory: repo, workspace, or plain folder.
+          // When it's a git repo, .trail/knowledge-repos.json is committeable.
+          const { readKnowledgeRepos, writeKnowledgeRepos } = await import('./graph/workspace.js');
+          const repos = readKnowledgeRepos(root);
+          if (action === "list") {
+            if (repos.length === 0) console.error("· no knowledge repos configured");
+            else repos.forEach((r) => console.error(`  ${r}`));
+            return;
+          }
+          if (!url) {
+            console.error("✗ url is required for add/remove");
+            process.exitCode = 1;
+            return;
+          }
+          if (action === "add") {
+            if (repos.includes(url)) {
+              console.error(`· already listed: ${url}`);
+              return;
+            }
+            writeKnowledgeRepos(root, [...repos, url]);
+            console.error(`✓ added: ${url}`);
+            if (repos.length > 0) {
+              console.error(`⚠ now ${repos.length + 1} knowledge repos — trail note --team uses the first one.`);
+              console.error(`  Current order in .trail/knowledge-repos.json:`);
+              [...repos, url].forEach((r, i) => console.error(`  ${i + 1}. ${r}`));
+            }
+            console.error(`  Commit .trail/knowledge-repos.json so teammates get it on their next trail init`);
+          } else if (action === "remove") {
+            const next = repos.filter((r) => r !== url);
+            if (next.length === repos.length) {
+              console.error(`· not found: ${url}`);
+              return;
+            }
+            writeKnowledgeRepos(root, next);
+            console.error(`✓ removed: ${url}`);
+          } else {
+            console.error(`✗ unknown action "${action}" — use add, remove or list`);
+            process.exitCode = 1;
+          }
+        });
+      return sub;
+    })(),
+  );
+
 /**
  * After `graft upgrade` brought the trail command along, the repo it ran in
  * moves to trail now, with the agents and flags its last init chose, and its
@@ -461,7 +519,7 @@ function moveHereToTrail(dir: string): void {
   // An `--agents auto` run moves the same way: the main agents' repo files, laptop settings for the ones installed.
   const agents = o.laptop ? ["auto"] : hosts;
   console.log(`· moving this repo to trail: trail init ${agents.length ? `--agents ${agents.join(" ")} ` : ""}${flags.join(" ")}`.trimEnd());
-  spawnSync("trail", ["init", root, "--agents", ...agents, ...flags], { stdio: "inherit" });
+  spawnSync("trail", ["init", root, "--agents", ...agents, ...flags], { ...WINHIDE, stdio: "inherit" });
 }
 
 grouped(program.command("build"), GROUP.setup)
@@ -520,6 +578,20 @@ grouped(program.command("build"), GROUP.setup)
   .option("--no-gitignore", "skip writing graft/ into .gitignore (same as GRAFT_NO_GITIGNORE=1)")
   .option("--no-ignore", "skip writing .ignore for ripgrep re-admit (same as GRAFT_NO_IGNORE=1)")
   .option("--no-semantic", "skip embedding nodes for semantic search after building the graph")
+  .option(
+    "--include-md",
+    "index .md files as graph nodes (headings → symbols); persisted for later builds and refreshes",
+  )
+  .option(
+    "--no-include-md",
+    "stop indexing .md files (revert a previous --include-md); persisted",
+  )
+  .option(
+    "--md-only-dir <path>",
+    "limit .md indexing to this repo-relative dir, repeatable (e.g. --md-only-dir specs); persisted",
+    (val: string, prev: string[]) => [...prev, val],
+    [] as string[],
+  )
   .action(async (
     dir: string,
     opts: {
@@ -536,6 +608,8 @@ grouped(program.command("build"), GROUP.setup)
       onlyDir?: string[];
       followSubmodules?: boolean;
       followNestedRepos?: boolean;
+      includeMd?: boolean;
+      mdOnlyDir?: string[];
       gitignore?: boolean;
       ignore?: boolean;
       semantic: boolean;
@@ -610,6 +684,13 @@ grouped(program.command("build"), GROUP.setup)
     if (followNestedReposWasExplicit && typeof opts.followNestedRepos === "boolean") {
       buildConfigPatch.followNestedRepos = opts.followNestedRepos;
     }
+    const includeMdWasExplicit = command.getOptionValueSource("includeMd") === "cli";
+    if (includeMdWasExplicit && typeof opts.includeMd === "boolean") {
+      buildConfigPatch.includeMd = opts.includeMd;
+    }
+    if (opts.mdOnlyDir && opts.mdOnlyDir.length > 0) {
+      buildConfigPatch.mdOnlyDirs = opts.mdOnlyDir;
+    }
     if (Object.keys(buildConfigPatch).length > 0) {
       patchBuildConfig(resolve(dir), buildConfigPatch);
     }
@@ -651,6 +732,8 @@ grouped(program.command("build"), GROUP.setup)
         includeDirs: opts.includeDir,
         followSubmodules: followSubmodulesWasExplicit ? opts.followSubmodules : undefined,
         followNestedRepos: followNestedReposWasExplicit ? opts.followNestedRepos : undefined,
+        includeMd: includeMdWasExplicit ? opts.includeMd : undefined,
+        mdOnlyDirs: opts.mdOnlyDir && opts.mdOnlyDir.length > 0 ? opts.mdOnlyDir : undefined,
         packageName: readPackageName(import.meta.url),
       });
       // --semantic: embed each child repo after workspace build.
@@ -833,13 +916,54 @@ grouped(program.command("ask"), GROUP.find)
   .option("--in <path>", "narrow to nodes under this path prefix, filtered before scoring (segment-aware, like scopeOf)")
   .option("--json", "output the result as JSON")
   .option("--no-graph-rank", "rank by lexical relevance only, without the graph-connectivity re-rank (ablation/eval)")
+  .option("--semantic", "use semantic (embedding) search instead of lexical — finds conceptually related code even without exact keywords; fallback when MCP trail_search_semantic is not available")
   .option(...NO_REFRESH_FLAG)
-  .action(async (query: string, dirArg: string | undefined, opts: { limit: string; source?: boolean; full?: boolean; in?: string; json?: boolean; refresh?: boolean; graphRank?: boolean }) => {
+  .action(async (query: string, dirArg: string | undefined, opts: { limit: string; source?: boolean; full?: boolean; in?: string; json?: boolean; refresh?: boolean; graphRank?: boolean; semantic?: boolean }) => {
     // The prompt hook passes what the person typed on stdin, out of sight of `ps`.
     if (query === "-") query = readFileSync(0, "utf8").trim();
     const dir = noteQuery(queryRoot(dirArg));
     await refreshBefore(dir, opts);
     const askGlobalDir = program.opts<GlobalOpts>().dir;
+
+    // --semantic: vector search fallback (equivalent to MCP trail_search_semantic).
+    if (opts.semantic) {
+      const limit = Number(opts.limit);
+      const { searchSemantic } = await import('./ask/semantic.js');
+      const { contextDirFor } = await import('./context/node-file.js');
+      const ws = readWorkspace(dir, askGlobalDir);
+      const results: Array<{ score: number; file_path: string; symbol: string; snippet: string }> = [];
+      const children = ws?.children ?? [];
+      if (children.length > 0) {
+        // Workspace: search each child's DB.
+        const { join: pjoin } = await import('node:path');
+        for (const child of children) {
+          const childCtx = contextDirFor(join(dir, child));
+          const db = pjoin(childCtx, '.cache', 'embeddings.db');
+          if (!existsSync(db)) continue;
+          try {
+            const hits = await searchSemantic(query, db, limit);
+            hits.forEach(h => results.push({ ...h, file_path: h.file_path.startsWith(child) ? h.file_path : `${child}/${h.file_path}` }));
+          } catch { /* DB not ready */ }
+        }
+      } else {
+        // Single repo.
+        const ctx = contextDirFor(dir, askGlobalDir);
+        const db = join(ctx, '.cache', 'embeddings.db');
+        if (existsSync(db)) {
+          try { (await searchSemantic(query, db, limit)).forEach(h => results.push(h)); } catch { /* DB not ready */ }
+        }
+      }
+      if (results.length === 0) {
+        console.error('no semantic matches found — run `trail build` to build the semantic index');
+        process.exitCode = 1;
+        return;
+      }
+      results.sort((a, b) => b.score - a.score);
+      results.slice(0, limit).filter(h => h.score > 0.05).forEach((h, i) => {
+        console.log(`${i + 1}. ${h.file_path} · ${h.symbol}  (score: ${h.score.toFixed(3)})\n   ${h.snippet}`);
+      });
+      return;
+    }
     if (readWorkspace(dir, askGlobalDir)) {
       runWorkspaceAsk(dir, askGlobalDir, query, {
         limit: Number(opts.limit), source: opts.source, full: opts.full, in: opts.in, json: opts.json,
@@ -1199,6 +1323,8 @@ grouped(program.command("note", { hidden: !TRAIL }), GROUP.memory)
   .option("-m, --body <text>", "the learning itself, instead of stdin")
   .option("--personal", "about your own setup or habits, not the code: keep it in ~/.trail, out of the repo")
   .option("--always-follow", "the person says it must hold even if someone asks otherwise: Claude won't go against it (only on their word)")
+  .option("--issue <ref>", "issue or ticket this learning came from (any tracker: MTD-287, #134, or a URL)")
+  .option("--team", "save to the workspace knowledge repo (knowledgeRepos in workspace.json) + git commit + push")
   .option("--touches <list>", "comma-separated files or file#Symbol it's about (default: the files this session changed, in every repo it changed)")
   .option("--author <name>", "who wrote it (default: the first word of git config user.name)")
   .option("--minutes <n>", "what it took to work out, when the agent's transcript can't say")
@@ -1287,6 +1413,8 @@ interface NoteOptions {
   alwaysFollow?: boolean;
   replaces?: string;
   anyway?: boolean;
+  issue?: string;
+  team?: boolean;
 }
 
 async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
@@ -1297,6 +1425,34 @@ async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
     console.error("  ## Decided\n  …\n  ## Tried and ruled out\n  …\n  ## Watch out\n  …\n  EOF");
     process.exitCode = 1;
     return;
+  }
+
+  // --team: redirect to the workspace knowledge repo.
+  if (opts.team && TRAIL) {
+    const { findWorkspaceRoot, readWorkspace: readWs, readKnowledgeRepos } = await import('./graph/workspace.js');
+    const wsRoot = findWorkspaceRoot(resolve(repo));
+    const knowledgeRepos = wsRoot ? readKnowledgeRepos(wsRoot) : (wsRoot ? readWs(wsRoot)?.knowledgeRepos ?? [] : []);
+    const knowledgeUrl = knowledgeRepos[0];
+    if (!knowledgeUrl || !wsRoot) {
+      console.error('✗ --team requires knowledgeRepos configured — run: trail config knowledge-repo add <url>');
+      process.exitCode = 1;
+      return;
+    }
+    // Warn when multiple knowledge repos are configured — only the first is used.
+    if (knowledgeRepos.length > 1) {
+      console.error(`⚠ multiple knowledge repos configured — using the first:`);
+      knowledgeRepos.forEach((r, i) => console.error(`  ${i === 0 ? '→' : ' '} ${r}`));
+      console.error(`  To target a different one, edit .trail/knowledge-repos.json`);
+    }
+    const knowledgeName = knowledgeUrl.replace(/\.git$/, '').split('/').pop() ?? '';
+    const knowledgeDir = join(wsRoot, knowledgeName);
+    if (!existsSync(join(knowledgeDir, '.git'))) {
+      console.error(`✗ knowledge repo not found at ${knowledgeDir} — run: trail init`);
+      process.exitCode = 1;
+      return;
+    }
+    // Save the note to the knowledge repo instead of the current repo.
+    repo = knowledgeDir;
   }
   const wholeNumber = (raw: string | undefined, flag: string): number | undefined => {
     if (raw === undefined) return undefined;
@@ -1381,7 +1537,7 @@ async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
     // Always follow is a mark on the learning: written as kind guardrail (what older files and the cloud read), and
     // standing, so every session starts with it. Only on the person's word (always-follow-gate.ts).
     const mark = always.ok ? { kind: "guardrail" as const, standing: true } : {};
-    saved.push(writeNote(t.dir, { title: opts.title, body, author, date, branch: currentBranch(t.dir), cost, touches: t.touches, replaces, src: "agent", ...mark }, scope));
+    saved.push(writeNote(t.dir, { title: opts.title, body, author, date, branch: currentBranch(t.dir), cost, touches: t.touches, replaces, src: "agent", ...mark, ...(opts.issue ? { issue: opts.issue } : {}) }, scope));
   }
   const touches = targets.flatMap((t) => t.touches);
   track(
@@ -1437,6 +1593,24 @@ async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
   for (const t of targets) {
     rememberRepo(t.dir);
     maybeSyncInBackground(t.dir);
+  }
+  // --team: auto-commit + push to the knowledge repo.
+  if (opts.team && TRAIL && saved.length > 0) {
+    const { spawnSync: _ss } = await import('node:child_process');
+    const commitMsg = `learning: ${opts.title}${opts.issue ? ` (${opts.issue})` : ''}`;
+    // Use relative path for git add to avoid Windows absolute-path issues.
+    _ss('git', ['-C', repo, 'add', '.trail/learnings/'], { windowsHide: true, stdio: 'ignore' });
+    const commitR = _ss('git', ['-C', repo, 'commit', '-m', commitMsg], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (commitR.status === 0) {
+      const pushR = _ss('git', ['-C', repo, 'push'], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      if (pushR.status === 0) {
+        console.log(`✓ pushed to knowledge repo — teammates get it on their next session`);
+      } else {
+        console.log(`⚠ committed but push failed — run: git -C ${repo} push`);
+      }
+    } else {
+      console.log(`⚠ could not auto-commit — run: git -C ${repo} add .trail/learnings/ && git commit -m "${commitMsg}"`);
+    }
   }
   printLines(cloudLines(repo, { command: "note" }));
 }
@@ -1611,6 +1785,30 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
     // opens at a repo root, not at the parent, and reads `.claude/` from there —
     // wiring only the parent leaves each child with no skill, hooks, or MCP.
     // The parent's own wiring stays (queries there federate across children).
+
+    // Clone any knowledge repos declared in workspace.json before discovering
+    // children — so they are included in the workspace on this very run.
+    if (TRAIL && isWorkspaceBuildRoot(repo, program.opts<GlobalOpts>().dir)) {
+      const ws = readWorkspace(repo);
+      for (const url of ws?.knowledgeRepos ?? []) {
+        const name = url.replace(/\.git$/, "").split("/").pop() ?? "";
+        const dest = join(repo, name);
+        if (name && !existsSync(dest)) {
+          console.error(`· knowledge repo: cloning ${name} from ${url}`);
+          try {
+            spawnSync("git", ["clone", "--depth", "1", url, dest], {
+              ...WINHIDE,
+              stdio: ["ignore", "ignore", "pipe"],
+              timeout: 60_000,
+            });
+            console.error(`✓ knowledge repo: ${name} cloned`);
+          } catch {
+            console.error(`⚠ knowledge repo: failed to clone ${url}`);
+          }
+        }
+      }
+    }
+
     const children = isWorkspaceBuildRoot(repo, program.opts<GlobalOpts>().dir)
       ? discoverWorkspaceChildren(repo)
       : [];
@@ -1877,10 +2075,11 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
         if (!tops.includes(top)) tops.push(top);
       }
       console.error(`· restart your agents so a new session picks up ${brand()}`);
+      if (TRAIL) console.error(`· run \`trail build\` from this folder to update the code graph and semantic index`);
       if (TRAIL && !tops.includes(".trail/")) tops.push(".trail/");
       // Only what git sees as new or changed: a teammate's init over committed files has nothing to commit.
       const changedTops = tops.filter((t) => {
-        const r = spawnSync("git", ["status", "--porcelain", "--", t], { cwd: repo, encoding: "utf8" });
+        const r = spawnSync("git", ["status", "--porcelain", "--", t], { ...WINHIDE, cwd: repo, encoding: "utf8" });
         return r.status !== 0 || r.stdout.trim().length > 0;
       });
       tops.splice(0, tops.length, ...changedTops);

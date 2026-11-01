@@ -2,6 +2,8 @@
  * Asking the person's own Claude Code, headless, for `trail init`: finding a
  * copy to run and making the one call.
  */
+
+import { WINHIDE } from "../util/child-process.js";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -10,7 +12,7 @@ import { flatLine } from "../notes/flatten.js";
 
 /** Whether `claude` (Claude Code) is on PATH. */
 function claudeOnPath(): boolean {
-  const r = spawnSync("claude", ["--version"], { stdio: "ignore", timeout: 10_000 });
+  const r = spawnSync("claude", ["--version"], { ...WINHIDE, stdio: "ignore", timeout: 10_000 });
   return r.status === 0;
 }
 
@@ -192,7 +194,7 @@ export function callClaude<T>(
     let timer: ReturnType<typeof setTimeout> | undefined;
     let child;
     try {
-      child = spawn(bin, args, { cwd: tmpdir(), env: { ...process.env, TRAIL_NO_HOOKS: "1" }, stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(bin, args, { cwd: tmpdir(), env: { ...process.env, TRAIL_NO_HOOKS: "1" }, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     } catch (e) {
       finish({ ok: false, why: (e as NodeJS.ErrnoException)?.code === "ENOENT" ? "not_installed" : "failed" });
       return;

@@ -22,7 +22,7 @@
  * `workspace-cli.ts`; `mcp/tools.ts` calls the federate* functions directly.
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import { contextDirFor } from "../context/node-file.js";
 import { checkGraph } from "./check.js";
 import { loadGraphCached } from "./load.js";
@@ -66,9 +66,41 @@ export interface WorkspaceV1 {
    * Paths are relative to the workspace root (e.g. `"Trail-Code"`, `"SDK"`).
    */
   excludeFromDiscovery?: string[];
+  /**
+   * Git remote URLs of shared knowledge repos (team docs, rules, glossaries).
+   * `trail init` clones each one into the workspace root if it isn't already
+   * present, wires it, and runs `trail build --include-md` on it automatically.
+   * Committed to version control so every team member gets the same repos.
+   *
+   * Example: ["https://gitlab.com/detacoop/equipo-desarrolladores/detacoop-knowledge"]
+   */
+  knowledgeRepos?: string[];
 }
 
 const WORKSPACE_FILE = "workspace.json";
+/** Committed file that stores shared workspace settings (knowledgeRepos).
+ * Lives in .trail/ (committed) separate from .trail/cache/workspace.json (git-ignored). */
+const KNOWLEDGE_REPOS_FILE = "knowledge-repos.json";
+
+/** Absolute path to the knowledge-repos config for a workspace root. Always committed. */
+export function knowledgeReposPath(root: string): string {
+  return join(root, ".trail", KNOWLEDGE_REPOS_FILE);
+}
+
+/** Read the list of knowledge repo URLs for a workspace root. */
+export function readKnowledgeRepos(root: string): string[] {
+  try {
+    const parsed = JSON.parse(readFileSync(knowledgeReposPath(root), "utf8"));
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch { return []; }
+}
+
+/** Write the list of knowledge repo URLs. Ensures .trail/ exists. */
+export function writeKnowledgeRepos(root: string, urls: string[]): void {
+  const dir = join(root, ".trail");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(knowledgeReposPath(root), JSON.stringify(urls, null, 2) + "\n");
+}
 
 /** Absolute path to the workspace index for a parent root (`<dir>/graft/workspace.json`). */
 export function workspacePath(root: string, override?: string): string {
@@ -82,12 +114,18 @@ export function readWorkspace(root: string, override?: string): WorkspaceV1 | nu
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<WorkspaceV1>;
     if (parsed.version !== 1 || !Array.isArray(parsed.children)) return null;
+    // knowledgeRepos: read from committed .trail/knowledge-repos.json first,
+    // fall back to workspace.json for backward compatibility.
+    const knowledgeRepos = readKnowledgeRepos(root).length > 0
+      ? readKnowledgeRepos(root)
+      : Array.isArray(parsed.knowledgeRepos) ? parsed.knowledgeRepos.map(String) : undefined;
     return {
       version: 1,
       children: parsed.children.map(String),
       excludeFromDiscovery: Array.isArray(parsed.excludeFromDiscovery)
         ? parsed.excludeFromDiscovery.map(String)
         : undefined,
+      knowledgeRepos,
     };
   } catch {
     return null;
@@ -103,6 +141,8 @@ export function writeWorkspace(root: string, ws: WorkspaceV1, override?: string)
   const sorted: WorkspaceV1 = { version: 1, children: [...ws.children].sort() };
   if (ws.excludeFromDiscovery && ws.excludeFromDiscovery.length > 0)
     sorted.excludeFromDiscovery = [...ws.excludeFromDiscovery].sort();
+  if (ws.knowledgeRepos && ws.knowledgeRepos.length > 0)
+    sorted.knowledgeRepos = [...ws.knowledgeRepos];
   writeFileSync(path, JSON.stringify(sorted, null, 2) + "\n");
   return path;
 }
@@ -111,6 +151,29 @@ export function writeWorkspace(root: string, ws: WorkspaceV1, override?: string)
  * children — or it was already split (a `workspace.json` is present). The
  * no-own-`.git` guard keeps a normal repo with git submodules from being
  * mistaken for a workspace. */
+/**
+ * Walk up from `dir` to find the nearest directory with knowledgeRepos configured
+ * (.trail/knowledge-repos.json). Works for repos, workspaces, and plain folders.
+ * Falls back to the first workspace found if none has knowledgeRepos.
+ */
+export function findWorkspaceRoot(dir: string): string | null {
+  let current = resolve(dir);
+  let firstWorkspace: string | null = null;
+  for (let i = 0; i < 8; i++) {
+    // Check for committed knowledge-repos.json first (works in any git repo).
+    if (readKnowledgeRepos(current).length > 0) return current;
+    const ws = readWorkspace(current);
+    if (ws) {
+      if (!firstWorkspace) firstWorkspace = current;
+      if (ws.knowledgeRepos && ws.knowledgeRepos.length > 0) return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return firstWorkspace;
+}
+
 export function isWorkspaceBuildRoot(root: string, override?: string): boolean {
   if (readWorkspace(root, override)) return true;
   if (existsSync(join(root, ".git"))) return false;
@@ -264,19 +327,26 @@ export function federateAsk(
   const limit = opts.limit ?? 8;
   const fileTopLock = opts.fileTopLock ?? true;
 
-  // `--in` scopes to a single child (and, past the first segment, a sub-scope
+  // `--in` scopes to a single child (and, past the child path, a sub-scope
   // within it). A prefix naming no known child at all is a caller mistake.
+  // Children may be compound paths (e.g. "default-core/frontend"), so we
+  // find the longest child path that is a prefix of (or equal to) the --in
+  // value, rather than splitting on the first "/" only.
   let onlyChild: string | undefined;
   let childIn: string | undefined;
   if (opts.in) {
     const prefix = opts.in.replace(/\/+$/, "");
-    const [name, ...rest] = prefix.split("/");
     const allChildren = [...wg.loaded.map((l) => l.child), ...wg.missing].sort();
-    if (!allChildren.includes(name)) {
-      throw new Error(`no workspace repo "${name}" - repos: ${allChildren.join(", ")}`);
+    // Longest matching child path wins (e.g. "default-core/frontend" over "default-core").
+    const match = allChildren
+      .filter((c) => prefix === c || prefix.startsWith(c + "/"))
+      .sort((a, b) => b.length - a.length)[0];
+    if (!match) {
+      throw new Error(`no workspace repo matching "${prefix}" — repos: ${allChildren.join(", ")}`);
     }
-    onlyChild = name;
-    childIn = rest.length ? rest.join("/") : undefined;
+    onlyChild = match;
+    const remaining = prefix.slice(match.length).replace(/^\//, "");
+    childIn = remaining || undefined;
   }
 
   // Pass 1: run each child's ask; keep its hits + RAW top-hit coverage.

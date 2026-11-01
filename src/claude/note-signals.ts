@@ -95,7 +95,7 @@ const FAILED_OUTPUT =
 const ZERO_FAILED = /\b0 (?:failed|failing)\b|^# fail 0\b/m;
 
 const UNDO = /\bgit\s+(?:restore|revert|reset\s+--hard|checkout\s+(?:\S+\s+)?--\s)/;
-const SHIP = /\b(git\s+commit|git\s+push|gh\s+pr\s+create)\b/;
+const SHIP = /\b(git\s+commit|git\s+push|gh\s+pr\s+create|glab\s+mr\s+create|glab\s+mr\s+merge)\b/;
 /** `trail check` saying the change goes against a learning: its own exit 1, or the reason pre-bash-check.ts stops a commit with. */
 const TRAIL_CHECK = /(?:^|[\s;&|])(?:trail|graft)\s+check\b/;
 const CHECK_STOP = /^trail check found \d+ conflicts?\b/m;
@@ -341,7 +341,7 @@ export function noteSignals(jsonl: string, repo: string): NoteSignal[] {
       const c = bash(t);
       const m = c ? SHIP.exec(c) : null;
       if (!m || results.get(t.id)?.error) continue;
-      const verb = m[1]!.startsWith('gh') ? 'opened a PR for' : m[1]!.endsWith('push') ? 'pushed' : 'committed';
+      const verb = m[1]!.startsWith('glab') ? 'abrió un MR para' : m[1]!.startsWith('gh') ? 'opened a PR for' : m[1]!.endsWith('push') ? 'pushed' : 'committed';
       out.push({ kind: 'shipped', key: `shipped:${t.uuid}`, what: `You ${verb} this work, and no learning went with it.` });
       break;
     }

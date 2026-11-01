@@ -116,7 +116,8 @@ function initSchema(db: any): void {
       node_id   TEXT NOT NULL,
       file_path TEXT NOT NULL,
       symbol    TEXT NOT NULL,
-      snippet   TEXT NOT NULL
+      snippet   TEXT NOT NULL,
+      body_hash TEXT
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS vss_nodes
     USING vec0(embedding float[384]);
@@ -125,6 +126,8 @@ function initSchema(db: any): void {
       value TEXT NOT NULL
     );
   `);
+  // Migrate older DBs that lack body_hash column (ALTER TABLE is safe if column exists).
+  try { db.exec(`ALTER TABLE embed_nodes ADD COLUMN body_hash TEXT`); } catch { /* already exists */ }
 }
 
 /** Compute a stable SHA-256 hash over all node IDs (sorted). */
@@ -145,21 +148,27 @@ function graphHash(nodes: NodeV1[]): string {
  * Called from the `graft_search_semantic` MCP tool handler (and optionally
  * from the build pipeline) to pre-populate the vector store.
  */
+/**
+ * Embed nodes and store them in the sqlite-vec database at `dbPath`.
+ *
+ * Incremental: compares each node's `body_hash` against what is already stored.
+ * Only new or changed nodes are re-embedded; deleted nodes are removed.
+ * Unchanged nodes are left untouched, making repeated calls cheap.
+ */
 export async function embedNodes(nodes: NodeV1[], dbPath: string): Promise<void> {
   const db = openDb(dbPath);
   initSchema(db);
 
-  // Guard: nothing to embed — close and surface a clear message.
+  // Guard: nothing to embed — skip silently (0 nodes is valid for .md-only repos
+  // that haven't enabled --include-md, or empty workspace children like openspec/).
   if (nodes.length === 0) {
     db.close();
-    throw new Error(
-      '[semantic] No indexable nodes — ensure `trail build` has parsed source files '
-      + '(check .gitignore is not excluding your source directory)'
-    );
+    return;
   }
 
   const currentHash = graphHash(nodes);
 
+  // Fast path: graph hash unchanged → index is fresh.
   const stored = db.prepare(
     "SELECT value FROM embed_meta WHERE key = 'graph_hash'"
   ).get() as { value: string } | undefined;
@@ -171,49 +180,96 @@ export async function embedNodes(nodes: NodeV1[], dbPath: string): Promise<void>
     return;
   }
 
-  // Hash changed (or first run) → wipe existing data and re-embed.
-  if (stored !== undefined) {
-    process.stderr.write(`[semantic] graph changed (hash changed), re-embedding ${nodes.length} nodes…\n`);
-  } else {
-    process.stderr.write(`[semantic] Embedding ${nodes.length} nodes (all-MiniLM-L6-v2)…\n`);
+  // Incremental path: compute per-node diff using body_hash.
+  const existingRows = db.prepare(
+    'SELECT node_id, body_hash FROM embed_nodes'
+  ).all() as Array<{ node_id: string; body_hash: string | null }>;
+
+  const existingMap = new Map(existingRows.map(r => [r.node_id, r.body_hash ?? '']));
+  const incomingSet = new Set(nodes.map(n => n.id));
+
+  // Nodes to remove: in DB but not in the new graph.
+  const toDelete = existingRows.filter(r => !incomingSet.has(r.node_id)).map(r => r.node_id);
+
+  // Nodes to add or update: new or body_hash changed.
+  const toEmbed = nodes.filter(n => {
+    const nodeHash = n.body_hash ?? n.id;
+    return existingMap.get(n.id) !== nodeHash;
+  });
+
+  const added = toEmbed.filter(n => !existingMap.has(n.id)).length;
+  const updated = toEmbed.length - added;
+
+  process.stderr.write(
+    `[semantic] incremental update — +${added} new, ~${updated} changed, -${toDelete.length} removed` +
+    ` of ${nodes.length} total\n`
+  );
+
+  // Delete removed nodes.
+  if (toDelete.length > 0) {
+    const delMeta = db.prepare('DELETE FROM embed_nodes WHERE node_id = ?');
+    const delVec = db.prepare('DELETE FROM vss_nodes WHERE rowid = (SELECT rowid FROM embed_nodes WHERE node_id = ?)');
+    const delBatch = db.transaction(() => {
+      for (const id of toDelete) {
+        delVec.run(id);
+        delMeta.run(id);
+      }
+    });
+    delBatch();
   }
 
-  db.exec('DELETE FROM embed_nodes');
-  db.exec('DELETE FROM vss_nodes');
+  // Embed and insert/update changed nodes.
+  if (toEmbed.length > 0) {
+    const texts = toEmbed.map(n =>
+      [n.id, n.signature ?? '', n.body_text ?? ''].filter(Boolean).join(' ')
+    );
+    const vecs = await embedTexts(texts);
 
-  // Build one text per node: id + signature + body_text (space-joined, nulls skipped).
-  const texts = nodes.map(n =>
-    [n.id, n.signature ?? '', n.body_text ?? ''].filter(Boolean).join(' ')
-  );
+    const { maxId } = db.prepare('SELECT COALESCE(MAX(rowid), 0) AS maxId FROM embed_nodes').get() as { maxId: number };
+    let nextRowid = maxId + 1;
 
-  const vecs = await embedTexts(texts);
+    // Regular table: UPSERT ok.
+    const upsertMeta = db.prepare(`
+      INSERT INTO embed_nodes (rowid, node_id, file_path, symbol, snippet, body_hash)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(rowid) DO UPDATE SET
+        node_id = excluded.node_id,
+        file_path = excluded.file_path,
+        symbol = excluded.symbol,
+        snippet = excluded.snippet,
+        body_hash = excluded.body_hash
+    `);
+    // Virtual table (sqlite-vec): no UPSERT support → DELETE then INSERT.
+    const deleteVec = db.prepare('DELETE FROM vss_nodes WHERE rowid = ?');
+    const insertVec = db.prepare('INSERT INTO vss_nodes (rowid, embedding) VALUES (?, ?)');
+    const getRowid = db.prepare('SELECT rowid FROM embed_nodes WHERE node_id = ?');
 
-  const insertMeta = db.prepare(
-    'INSERT INTO embed_nodes (rowid, node_id, file_path, symbol, snippet) VALUES (?, ?, ?, ?, ?)'
-  );
-  const insertVec = db.prepare(
-    'INSERT INTO vss_nodes (rowid, embedding) VALUES (?, ?)'
-  );
+    const upsertBatch = db.transaction(() => {
+      for (let i = 0; i < toEmbed.length; i++) {
+        const n = toEmbed[i]!;
+        const v = vecs[i]!;
+        const nodeHash = n.body_hash ?? n.id;
+        const snippet = n.summary ?? n.signature ?? n.id;
 
-  const batch = db.transaction(() => {
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i]!;
-      const v = vecs[i]!;
-      // Spike 002: rowid MUST be BigInt, Float32Array MUST be Buffer.
-      const rowid = BigInt(i + 1);
-      const snippet = n.summary ?? n.signature ?? n.id;
-      insertMeta.run(Number(rowid), n.id, n.path, n.name, snippet ?? '');
-      insertVec.run(rowid, vecToBuffer(v));
-    }
-  });
-  batch();
+        const existing = getRowid.get(n.id) as { rowid: number } | undefined;
+        const rowid = existing ? BigInt(existing.rowid) : BigInt(nextRowid++);
 
-  // Upsert the new hash.
+        // For updated nodes: remove old vector before inserting new one.
+        if (existing) deleteVec.run(rowid);
+
+        upsertMeta.run(Number(rowid), n.id, n.path, n.name, snippet ?? '', nodeHash);
+        insertVec.run(rowid, vecToBuffer(v));
+      }
+    });
+    upsertBatch();
+  }
+
+  // Update the graph hash.
   db.prepare(
     "INSERT INTO embed_meta (key, value) VALUES ('graph_hash', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
   ).run(currentHash);
 
-  process.stderr.write(`[semantic] Done — ${nodes.length} nodes stored at ${dbPath}\n`);
+  process.stderr.write(`[semantic] Done — ${nodes.length} nodes indexed at ${dbPath}\n`);
   db.close();
 }
 

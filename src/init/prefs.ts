@@ -11,6 +11,7 @@
  * "publish"); a cluster counts on 2+ local days that are not one 8 h
  * sitting (phase 0's rule, D46).
  */
+import { WINHIDE } from "../util/child-process.js";
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readdirSync } from 'node:fs';
@@ -209,7 +210,7 @@ function tokens(text: string): string[] {
  * never makes a line "this repo", whichever source (a folder, a target, a session's command) put the word in.
  */
 export const COMMON_PROGRAMS: ReadonlySet<string> = new Set([
-  'git', 'gh', 'hub', 'npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'bun', 'bunx', 'deno', 'node', 'nvm', 'volta', 'corepack', 'tsx', 'ts-node', 'tsc',
+  'git', 'gh', 'glab', 'hub', 'npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'bun', 'bunx', 'deno', 'node', 'nvm', 'volta', 'corepack', 'tsx', 'ts-node', 'tsc',
   'python', 'python3', 'pip', 'pip3', 'pipx', 'uv', 'uvx', 'poetry', 'pyenv', 'conda', 'pytest', 'ruff', 'black', 'mypy',
   'go', 'gofmt', 'cargo', 'rustc', 'rustup', 'make', 'cmake', 'ninja', 'bazel', 'docker', 'docker-compose', 'compose', 'podman', 'colima',
   'kubectl', 'helm', 'terraform', 'java', 'javac', 'mvn', 'gradle', 'ruby', 'gem', 'bundle', 'bundler', 'rake', 'rails', 'php', 'composer',
@@ -268,7 +269,7 @@ export function repoWordsOf(checkout: string, programs: Iterable<string> = []): 
       for (const m of (readPlain(join(checkout, file), REPO_FILE_MAX) ?? '').matchAll(/^([A-Za-z0-9][\w.-]*)\s*:(?!=)/gm)) add(m[1]);
     } catch { /* none */ }
   }
-  const r = spawnSync('git', ['-C', checkout, 'for-each-ref', '--format=%(refname:short)', '--count=200', 'refs/heads'], { encoding: 'utf8', timeout: 5000 });
+  const r = spawnSync('git', ['-C', checkout, 'for-each-ref', '--format=%(refname:short)', '--count=200', 'refs/heads'], { ...WINHIDE, encoding: 'utf8', timeout: 5000 });
   if (r.status === 0) for (const b of r.stdout.split('\n')) add(b);
   // A program the sessions ran names the repo only when it is a script file of its own (`seed.sh`), never a program
   // every machine has (D102).

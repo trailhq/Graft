@@ -70,19 +70,22 @@ trail map                           # orientación del workspace
 
 ## Guardar un learning
 
-Guardar cuando la sesión encuentre algo que el código no puede decirle al próximo:
-- causa real de un bug, después de intentos fallidos
-- enfoque descartado y por qué
-- decisión entre opciones y el motivo
-- corrección del usuario sobre cómo se hace algo acá
+Guardar cuando la sesion encuentre algo que el codigo no puede decirle al proximo.
 
 \`\`\`bash
-trail note --title "<decisión en palabras simples>" \\
+trail note --title "decision en palabras simples" \\
   --touches "src/archivo.ts#Funcion" \\
+  --issue "MTD-287"   # ticket Jira, GitLab (#134), GitHub o URL completa
   -m "## Decided\\n..."
 \`\`\`
 
-Commitear el learning junto con el cambio.
+## Indexar .md (cartas de sistema, glosario)
+
+\`\`\`bash
+trail build --include-md    # activa indexacion .md persistida
+trail ask "tasa efectiva"   # ahora encuentra cartas de sistema
+trail build --no-include-md # revertir
+\`\`\`
 
 ## Antes de publicar el trabajo
 

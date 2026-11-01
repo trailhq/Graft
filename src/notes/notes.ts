@@ -271,6 +271,7 @@ export interface WriteNoteInput {
   replaces?: string;
   src?: LearningFields["src"];
   evidence?: string;
+  issue?: string;
   /** Personal only: defaults to this repo. */
   applies?: string;
 }

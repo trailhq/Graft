@@ -44,19 +44,24 @@ export function parseProgress(chunk: string): { index: number; total: number } |
  */
 export async function buildGraphWithProgress(
   dir: string,
-  opts: { build?: boolean; cliPath?: string },
+  opts: { build?: boolean; cliPath?: string; childCount?: number },
 ): Promise<{ built: boolean; graph?: BuiltGraph; failed?: boolean; messages: string[] }> {
   if (opts.build === false || !opts.cliPath || hasGraftIndex(dir)) return { built: false, messages: [] };
   const spinner = startSpinner("building the graph");
   let stdout = "";
   let stderr = "";
   const fmt = (x: number) => x.toLocaleString("en-US");
+  // Base: 10 min per repo for semantic embedding, minimum 10 min, maximum 120 min.
+  const perRepo = 10 * 60_000;
+  const repos = Math.max(1, opts.childCount ?? 1);
+  const timeoutMs = Math.min(Math.max(repos * perRepo, 10 * 60_000), 120 * 60_000);
   const code = await new Promise<number | null>((resolve) => {
     const child = spawn(process.execPath, [...process.execArgv, opts.cliPath!, "build", "."], {
       cwd: dir,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
-    const timer = setTimeout(() => child.kill(), 300_000);
+    const timer = setTimeout(() => child.kill(), timeoutMs);
     timer.unref?.();
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
