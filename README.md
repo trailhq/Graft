@@ -69,9 +69,10 @@ npm install -g trail-code-detacoop --ignore-scripts && trail init
 
 | Funcionalidad | Upstream | Fork DETACOOP |
 |---|---|---|
-| Búsqueda semántica | `trail build --deep` (opt-in) | Por defecto en `trail build` |
+| Búsqueda semántica | `trail build --deep` (opt-in) | Por defecto en `trail build`. Modelo: `all-mpnet-base-v2` (768-dim) |
 | Embedding incremental | Re-embeds todo al cambiar | Solo re-embeds nodos modificados (`body_hash`) |
-| `trail_search_semantic` en workspace | Un solo repo | Federa sobre todos los children |
+| `trail_search_semantic` en workspace | Un solo repo | Federa sobre todos los children. Parámetro `in=` para acotar |
+| `trail_search_semantic` para código | ❌ (modelo lenguaje natural) | ❌ Usar `trail_find_code` para código. Semántico solo para `.md` |
 | `trail ask --semantic` CLI | ❌ | ✅ Fallback cuando MCP no está activo |
 | `trail_build` MCP tool | ❌ | ✅ Rebuild desde el agente |
 | Indexar `.md` | ❌ | ✅ `trail build --include-md` |
