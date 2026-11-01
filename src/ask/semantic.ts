@@ -114,7 +114,7 @@ function openDb(dbPath: string): any {
 
 /** Idempotent schema setup (IF NOT EXISTS on every statement). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function initSchema(db: any): void {
+function initSchema(db: any): boolean {
   db.exec(`
     CREATE TABLE IF NOT EXISTS embed_nodes (
       rowid  INTEGER PRIMARY KEY,
@@ -139,16 +139,12 @@ function initSchema(db: any): void {
   const { c: existingCount } = db.prepare('SELECT COUNT(*) AS c FROM embed_nodes').get() as { c: number };
   if (storedModel !== EMBED_MODEL && existingCount > 0) {
     const reason = storedModel ? `${storedModel} → ${EMBED_MODEL}` : `migrating to ${EMBED_MODEL}`;
-    process.stderr.write(`[semantic] model changed (${reason}) — rebuilding DB\n`);
-    db.exec('DELETE FROM embed_nodes');
-    db.exec('DELETE FROM vss_nodes');
-    db.exec('DELETE FROM embed_meta');
-    // Recreate vss_nodes with correct dimensions for new model.
-    try { db.exec('DROP TABLE IF EXISTS vss_nodes'); } catch { /* ignore */ }
-    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vss_nodes USING vec0(embedding float[${EMBED_DIM}])`);
+    process.stderr.write(`[semantic] model changed (${reason}) — will rebuild\n`);
+    return true; // signal caller to delete and reopen
   }
   // Always store current model name.
   db.prepare("INSERT INTO embed_meta (key, value) VALUES ('embed_model', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(EMBED_MODEL);
+  return false;
 }
 
 /** Compute a stable SHA-256 hash over all node IDs (sorted). */
@@ -177,8 +173,16 @@ function graphHash(nodes: NodeV1[]): string {
  * Unchanged nodes are left untouched, making repeated calls cheap.
  */
 export async function embedNodes(nodes: NodeV1[], dbPath: string): Promise<void> {
-  const db = openDb(dbPath);
-  initSchema(db);
+  let db = openDb(dbPath);
+  const needsRebuild = initSchema(db);
+  if (needsRebuild) {
+    // Model changed — delete DB file and recreate fresh (safest way to change vss_nodes dimensions).
+    db.close();
+    const { unlinkSync } = await import('node:fs');
+    unlinkSync(dbPath);
+    db = openDb(dbPath);
+    initSchema(db);
+  }
 
   // Guard: nothing to embed — skip silently (0 nodes is valid for .md-only repos
   // that haven't enabled --include-md, or empty workspace children like openspec/).
