@@ -1451,8 +1451,59 @@ async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
       process.exitCode = 1;
       return;
     }
+
+    // 1. CHECK DUPLICATES — search knowledge repo for similar learnings before saving.
+    if (!opts.anyway) {
+      const { readKnowledgeRepos: _rk, ..._ } = await import('./graph/workspace.js');
+      const { contextDirFor } = await import('./context/node-file.js');
+      const { join: pj } = await import('node:path');
+      const { existsSync: pex } = await import('node:fs');
+      const knowledgeCtx = contextDirFor(knowledgeDir);
+      const knowledgeDb = pj(knowledgeCtx, '.cache', 'embeddings.db');
+      if (pex(knowledgeDb)) {
+        try {
+          const { searchSemantic } = await import('./ask/semantic.js');
+          const similar = await searchSemantic(opts.title, knowledgeDb, 3);
+          const strongMatch = similar.filter(h => h.score > 0.75);
+          if (strongMatch.length > 0) {
+            console.error(`⚠ similar learning already exists in knowledge repo:`);
+            strongMatch.forEach(h => console.error(`  · "${h.symbol}" (score: ${h.score.toFixed(2)}) — ${h.file_path}`));
+            console.error(`  Use --replaces <id> to update it, or --anyway to save a new one`);
+            process.exitCode = 1;
+            return;
+          }
+        } catch { /* semantic index not ready — skip check */ }
+      }
+    }
+
+    // 2. AUTO-DETECT related .md files in knowledge repo to add to touches.
+    const knowledgeMdTouches: string[] = [];
+    try {
+      const { contextDirFor: ctxDir2 } = await import('./context/node-file.js');
+      const { join: pj2 } = await import('node:path');
+      const { existsSync: pex2 } = await import('node:fs');
+      const knowledgeDb2 = pj2(ctxDir2(knowledgeDir), '.cache', 'embeddings.db');
+      if (pex2(knowledgeDb2)) {
+        const { searchSemantic: sem2 } = await import('./ask/semantic.js');
+        const relatedMd = await sem2(opts.title, knowledgeDb2, 5);
+        const mdFiles = relatedMd
+          .filter(h => h.score > 0.5 && h.file_path.endsWith('.md'))
+          .map(h => h.file_path.replace(/^.*?sistemas\//, 'sistemas/'));
+        if (mdFiles.length > 0) {
+          // Dedupe
+          const unique = [...new Set(mdFiles)].slice(0, 2);
+          knowledgeMdTouches.push(...unique);
+          console.error(`· auto-linked to knowledge docs: ${unique.join(', ')}`);
+        }
+      }
+    } catch { /* skip */ }
+
     // Save the note to the knowledge repo instead of the current repo.
     repo = knowledgeDir;
+    // Merge auto-detected md touches with any explicitly provided touches.
+    if (knowledgeMdTouches.length > 0) {
+      opts = { ...opts, touches: [opts.touches, ...knowledgeMdTouches].filter(Boolean).join(',') };
+    }
   }
   const wholeNumber = (raw: string | undefined, flag: string): number | undefined => {
     if (raw === undefined) return undefined;
