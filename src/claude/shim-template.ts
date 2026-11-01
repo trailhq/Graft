@@ -64,7 +64,7 @@ const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 // The same code ships as @trailhq/trail-code and as @nanonets/graft, its old name;
 // either one answers, and the newer wins. @trailhq/trail is what builds from
 // source were called before the package was published.
-const PKGS = ['@detacoop/trail-code', '@trailhq/trail-code', '@nanonets/graft', '@trailhq/trail'];
+const PKGS = ['trail-code-detacoop', '@trailhq/trail-code', '@nanonets/graft', '@trailhq/trail'];
 const BINS = process.platform === 'win32' ? ['trail.cmd', 'graft.cmd'] : ['trail', 'graft'];
 
 // The dist/claude dir this machine's last init ran from, kept in the trail home

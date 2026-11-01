@@ -1,7 +1,7 @@
 {
-  "name": "@detacoop/trail-code",
+  "name": "detacoop-trail-code",
   "version": "0.28.0-semantic.2",
-  "description": "Build a repo's context graph as a folder of linked markdown files: a local, regenerable cache that every query keeps in sync with your code. (fork with semantic search)",
+  "description": "Build a repo's context graph as a folder of linked markdown files: a local, regenerable cache that every query keeps in sync with your code. (fork DETACOOP con semántico, --include-md, knowledge repos)",
   "keywords": [
     "ai",
     "agents",

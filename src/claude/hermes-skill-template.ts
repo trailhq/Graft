@@ -124,6 +124,6 @@ mcp_servers:
       PYTHONUTF8: "1"
 \`\`\`
 
-Si \`trail\` no está instalado: \`npm install -g @detacoop/trail-code --ignore-scripts\`
+Si \`trail\` no está instalado: \`npm install -g trail-code-detacoop --ignore-scripts\`
 `, brand);
 }
