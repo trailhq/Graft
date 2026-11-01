@@ -57,6 +57,93 @@ npm install -g @trailhq/trail-code && trail init
 
 ---
 
+## @detacoop/trail-code — Fork DETACOOP
+
+Este fork extiende `@trailhq/trail-code` con mejoras específicas para equipos que usan **Windows**, **GitLab** y flujos de trabajo multi-repo. Publicado como `@detacoop/trail-code`.
+
+```bash
+npm install -g @detacoop/trail-code --ignore-scripts && trail init
+```
+
+### Diferencias con el upstream
+
+| Funcionalidad | Upstream | Fork DETACOOP |
+|---|---|---|
+| Búsqueda semántica | `trail build --deep` (opt-in) | Por defecto en `trail build` |
+| Embedding incremental | Re-embeds todo al cambiar | Solo re-embeds nodos modificados (`body_hash`) |
+| `trail_search_semantic` en workspace | Un solo repo | Federa sobre todos los children |
+| `trail ask --semantic` CLI | ❌ | ✅ Fallback cuando MCP no está activo |
+| `trail_build` MCP tool | ❌ | ✅ Rebuild desde el agente |
+| Indexar `.md` | ❌ | ✅ `trail build --include-md` |
+| Filtrar `.md` por directorio | ❌ | ✅ `trail build --md-only-dir specs` |
+| Knowledge repo compartido | ❌ | ✅ `trail config knowledge-repo add <url>` |
+| `trail note --team` | ❌ | ✅ Guarda en knowledge repo + commit + push |
+| `trail note --issue` | ❌ | ✅ Vincula al ticket (Jira, GitLab, GitHub, URL) |
+| Auto-pull knowledge repo | ❌ | ✅ En cada SessionStart |
+| Forge adapter GitLab | ❌ (solo GitHub) | ✅ `glab` detectado automáticamente |
+| Windows spawns | Abre ventanas CMD | ✅ `windowsHide: true` en todos |
+| Config local | `.graft/config.json` | ✅ `.trail/config.json` (junto a learnings) |
+| Skill de Hermes | Manual | ✅ Generada en `trail init` |
+| Skill: MCP vs CLI | CLI mencionado igual | ✅ MCP primero, CLI solo como fallback |
+
+### Comandos nuevos del fork
+
+```bash
+# Indexar archivos .md (cartas de sistema, specs, glosario)
+trail build --include-md
+trail build --include-md --md-only-dir specs   # solo un subdirectorio
+
+# Búsqueda semántica vía CLI (fallback del MCP trail_search_semantic)
+trail ask "cuota mínima envío" --semantic
+
+# Knowledge repo compartido (learnings del equipo en un repo git)
+trail config knowledge-repo add https://gitlab.com/org/team-knowledge
+trail config knowledge-repo list
+trail config knowledge-repo remove <url>
+
+# Guardar un learning en el knowledge repo del equipo (commit + push automático)
+trail note --title "decisión sobre X" --team --issue "MTD-287" -m "## Decided..."
+```
+
+### MCP tools nuevos
+
+| Tool | Para qué |
+|---|---|
+| `trail_build()` | Rebuild grafo + semántico desde el agente |
+| `trail_search_semantic(query)` | Ahora federa sobre todos los repos del workspace |
+
+### Flujo de conocimiento compartido
+
+```
+Desarrollador A trabaja en default-core/frontend/:
+  trail note --title "regla sobre X" --team --issue "MTD-287" -m "..."
+  → guarda en detacoop-knowledge/.trail/learnings/
+  → git commit + push automático
+
+Desarrollador B inicia sesión:
+  SessionStart → git pull detacoop-knowledge (automático)
+  → el learning de A ya está disponible para trail ask
+```
+
+### Instalación (Windows)
+
+```bash
+# Instalar (sin --ignore-scripts falla en Windows por scripts de compilación)
+npm install -g @detacoop/trail-code --ignore-scripts
+
+# Inicializar workspace o repo
+cd C:/ruta/al/workspace
+trail init
+
+# Configurar knowledge repo compartido (una vez por máquina)
+trail config knowledge-repo add https://gitlab.com/detacoop/equipo-desarrolladores/detacoop-knowledge
+
+# Buildear grafo + semántico
+trail build
+```
+
+---
+
 ## What changes in your agent
 
 | Without Trail-code | With Trail-code |
