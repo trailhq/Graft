@@ -142,12 +142,13 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'trail_search_semantic',
-    description: 'Semantic (embedding-based) search over the code graph — finds nodes by meaning, not just keywords.',
+    description: 'Semantic (embedding-based) search over the code graph — finds nodes by meaning, not just keywords. Best for specs, docs and .md knowledge files. For code symbols use trail_find_code instead.',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'plain-language description of what you are looking for' },
         limit: { type: 'number', description: 'max results (default 5)' },
+        in: { type: 'string', description: 'narrow to a specific repo or path prefix, e.g. "default-core/frontend" or "default-core" — searches only children whose path starts with this prefix' },
       },
       required: ['query'],
     },
@@ -388,22 +389,29 @@ async function callSingleTool(
         const query = String(args.query ?? '');
         if (!query) return { text: 'graft_search_semantic requires a query', isError: true };
         const limit = typeof args.limit === 'number' ? args.limit : 5;
+        const inPrefix = typeof args.in === 'string' && args.in ? args.in.replace(/\/$/, '') : null;
         const contextDir = contextDirFor(root, dirOverride);
 
-        // Workspace: federate semantic search across all children's embedding DBs.
+        // Workspace: federate semantic search across children's embedding DBs.
+        // When `in` is specified, only search children whose path starts with the prefix.
         const ws = readWorkspace(root, dirOverride);
         if (ws && ws.children.length > 0) {
           const { join: pjoin } = await import('node:path');
           const { existsSync: pExists } = await import('node:fs');
           const allHits: Awaited<ReturnType<typeof searchSemantic>> = [];
-          for (const child of ws.children) {
+          const children = inPrefix
+            ? ws.children.filter(c => c === inPrefix || c.startsWith(inPrefix + '/'))
+            : ws.children;
+          if (inPrefix && children.length === 0) {
+            return { text: `no workspace repos match "in=${inPrefix}" — available: ${ws.children.slice(0, 5).join(', ')}`, isError: true };
+          }
+          for (const child of children) {
             const childRoot = pjoin(root, child);
             const childCtx = contextDirFor(childRoot);
             const childDb = pjoin(childCtx, '.cache', 'embeddings.db');
             if (!pExists(childDb)) continue;
             try {
               const childHits = await searchSemantic(query, childDb, limit);
-              // Prefix file_path with child name so results are unambiguous.
               for (const h of childHits) {
                 allHits.push({ ...h, file_path: h.file_path.startsWith(child) ? h.file_path : `${child}/${h.file_path}` });
               }
@@ -411,10 +419,10 @@ async function callSingleTool(
           }
           if (allHits.length === 0) return { text: 'no semantic matches found', isError: false };
           const sorted = allHits.sort((a, b) => b.score - a.score).slice(0, limit);
-          const filtered = sorted.filter(h => h.score > 0.05);
-          if (filtered.length === 0) return { text: 'no semantic matches found above threshold', isError: false };
+          const filtered = sorted.filter(h => h.score > 0.01);
+          if (filtered.length === 0) return { text: 'no semantic matches found — try trail_find_code for lexical search', isError: false };
           const lines = filtered.map((h, i) =>
-            `${i + 1}. ${h.file_path} · ${h.symbol}  (score: ${h.score})\n   ${h.snippet}`
+            `${i + 1}. ${h.file_path} · ${h.symbol}  (score: ${h.score.toFixed(3)})\n   ${h.snippet}`
           );
           return { text: lines.join('\n\n'), isError: false };
         }

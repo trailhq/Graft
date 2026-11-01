@@ -42,21 +42,29 @@ triggers:
   guardalo con \`trail note\`, commitealo con el cambio.
 - **Antes de commitear/pushear/abrir un MR**, corré \`trail check\`.
 
-## Herramientas MCP disponibles (cuando el servidor trail está conectado)
+## Herramientas MCP — cuál usar según el caso
 
-| Tool | Usar para |
-|---|---|
-| \`trail_find_code\` | Búsqueda léxica por símbolo/keyword |
-| \`trail_search_semantic\` | Búsqueda semántica por concepto en lenguaje natural |
-| \`trail_find_all\` | Grep exhaustivo — TODAS las ocurrencias, agrupadas por símbolo |
-| \`trail_trace_calls\` | Grafo de llamadas: \`direction:"in"\` = quién llama, \`direction:"out"\` = qué llama |
-| \`trail_file_api\` | Firmas de funciones de un archivo, ~10x más barato que leerlo |
-| \`trail_repo_map\` | Mapa del workspace: directorios, hubs, hotspots |
-| \`trail_check_freshness\` | ¿El índice está actualizado? |
+| Tool | Para qué | Cuándo |
+|---|---|---|
+| \`trail_find_code\` | Búsqueda léxica | **Código**: funciones, símbolos, variables, clases |
+| \`trail_find_all\` | Grep exhaustivo | Todas las ocurrencias de un literal |
+| \`trail_trace_calls\` | Grafo de llamadas | Blast radius antes de cambiar algo |
+| \`trail_file_api\` | Firmas del archivo | Ver API sin leer el archivo completo |
+| \`trail_search_semantic\` | Búsqueda conceptual | **Solo specs/docs/knowledge** en lenguaje natural |
+| \`trail_repo_map\` | Mapa del workspace | Orientarse en un repo desconocido |
+| \`trail_check_freshness\` | Estado del índice | Antes de buscar si no se ha buildeado |
+| \`trail_build\` | Rebuild índice | Cuando freshness reporta stale |
 
-En workspaces con repos de paths compuestos (ej. \`default-core/frontend\`), usar
-el path completo: \`trail_find_code(query="...", in="default-core/frontend")\` —
-un segmento parcial (\`in="default-core"\`) no es válido.
+> **Regla clave sobre semántico**: \`trail_search_semantic\` SOLO aporta valor en archivos \`.md\`
+> (specs OpenSpec, cartas de sistema, knowledge repos). Para código TypeScript/C#/Python
+> **usar siempre \`trail_find_code\`** — el modelo de embeddings no entiende tokens de código.
+>
+> ✅ \`trail_search_semantic("cómo funciona la cuota mínima")\` → encuentra specs
+> ❌ \`trail_search_semantic("retomarCopiaEnProceso")\` → no matchea código
+> ✅ \`trail_find_code("retomarCopiaEnProceso")\` → encuentra el símbolo exacto
+
+En workspaces con repos compound (ej. \`default-core/frontend\`), usar path completo:
+\`trail_find_code(query="...", in="default-core/frontend")\` — \`in="default-core"\` no es válido.
 
 ## CLI equivalente (cuando el servidor MCP no está activo)
 

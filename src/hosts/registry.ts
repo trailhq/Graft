@@ -64,7 +64,7 @@ export const HOSTS: HostTarget[] = [
     kind: 'section',
     relPath: 'GEMINI.md',
     content: instructionBody,
-    detect: (p) => p.dirExists(join(p.home, '.gemini')),
+    detect: (p) => p.dirExists(join(p.home, '.gemini', 'config')),
   },
   {
     id: 'grok',
