@@ -54,6 +54,11 @@ let _extractor: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _testEmbedder: ((text: string) => Float32Array) | null = null;
 
+/** The embedding model used. Changing this invalidates all existing DBs (different dimensions). */
+export const EMBED_MODEL = 'Xenova/all-mpnet-base-v2';
+/** Vector dimensions for the current model. MiniLM-L6=384, mpnet-base=768. */
+export const EMBED_DIM = 768;
+
 /**
  * Inject a fake embedder for tests — bypasses the 87 MB model download.
  * Call with `null` to restore the real pipeline.
@@ -74,11 +79,11 @@ async function getExtractor() {
   // survives npm ci / reinstalls (matches Spike 001 recommendation).
   const home = process.env['USERPROFILE'] ?? process.env['HOME'] ?? '.';
   env.cacheDir = `${home}/.cache/huggingface/transformers`;
-  _extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'fp32' });
+  _extractor = await pipeline('feature-extraction', EMBED_MODEL, { dtype: 'fp32' });
   return _extractor;
 }
 
-/** Embed a batch of texts → unit-normalised 384-dim float32 vectors. */
+/** Embed a batch of texts → unit-normalised float32 vectors (EMBED_DIM dimensions). */
 async function embedTexts(texts: string[]): Promise<Float32Array[]> {
   const extractor = await getExtractor();
   const results: Float32Array[] = [];
@@ -120,7 +125,7 @@ function initSchema(db: any): void {
       body_hash TEXT
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS vss_nodes
-    USING vec0(embedding float[384]);
+    USING vec0(embedding float[${EMBED_DIM}]);
     CREATE TABLE IF NOT EXISTS embed_meta (
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -128,6 +133,22 @@ function initSchema(db: any): void {
   `);
   // Migrate older DBs that lack body_hash column (ALTER TABLE is safe if column exists).
   try { db.exec(`ALTER TABLE embed_nodes ADD COLUMN body_hash TEXT`); } catch { /* already exists */ }
+
+  // Detect model change: if stored model differs OR is absent with existing embeddings, wipe and rebuild.
+  const storedModel = (db.prepare("SELECT value FROM embed_meta WHERE key = 'embed_model'").get() as { value: string } | undefined)?.value;
+  const { c: existingCount } = db.prepare('SELECT COUNT(*) AS c FROM embed_nodes').get() as { c: number };
+  if (storedModel !== EMBED_MODEL && existingCount > 0) {
+    const reason = storedModel ? `${storedModel} → ${EMBED_MODEL}` : `migrating to ${EMBED_MODEL}`;
+    process.stderr.write(`[semantic] model changed (${reason}) — rebuilding DB\n`);
+    db.exec('DELETE FROM embed_nodes');
+    db.exec('DELETE FROM vss_nodes');
+    db.exec('DELETE FROM embed_meta');
+    // Recreate vss_nodes with correct dimensions for new model.
+    try { db.exec('DROP TABLE IF EXISTS vss_nodes'); } catch { /* ignore */ }
+    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vss_nodes USING vec0(embedding float[${EMBED_DIM}])`);
+  }
+  // Always store current model name.
+  db.prepare("INSERT INTO embed_meta (key, value) VALUES ('embed_model', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(EMBED_MODEL);
 }
 
 /** Compute a stable SHA-256 hash over all node IDs (sorted). */

@@ -15,7 +15,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { embedNodes, searchSemantic, _setEmbedderForTest } from '../src/ask/semantic.js';
+import { embedNodes, searchSemantic, _setEmbedderForTest, EMBED_DIM } from '../src/ask/semantic.js';
 import type { NodeV1 } from '../src/graph/types.js';
 
 // ---------------------------------------------------------------------------
@@ -48,8 +48,8 @@ function makeNode(id: string, extra: Partial<NodeV1> = {}): NodeV1 {
  */
 function fakeEmbed(text: string): Float32Array {
   const hash = createHash('sha256').update(text).digest();
-  const vec = new Float32Array(384);
-  for (let i = 0; i < 384; i++) {
+  const vec = new Float32Array(EMBED_DIM);
+  for (let i = 0; i < EMBED_DIM; i++) {
     // Mix two hash bytes per dimension for variety.
     vec[i] = ((hash[i % 32]! ^ (hash[(i + 1) % 32]! << 4)) / 255) * 2 - 1;
   }
