@@ -10,15 +10,16 @@ import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { relPosix } from "../util/paths.js";
-import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs } from "../util/state.js";
+import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs, readIncludeMd, readMdOnlyDirs } from "../util/state.js";
 import { languageOf, depthExtensions } from "./extract.js";
 import { genericLangOf, genericExtensions } from "./generic.js";
 import { containerLangOf, containerExtensions } from "./container.js";
+import { isMdFile, MD_EXT } from "./markdown.js";
 
 /** Every extension graft has a parser for (depth + breadth + container), sorted
  * and de-duped — the authoritative answer to "what does `-e` actually support". */
 export function supportedExtensions(): string[] {
-  return [...new Set([...depthExtensions(), ...genericExtensions(), ...containerExtensions()])].sort();
+  return [...new Set([...depthExtensions(), ...genericExtensions(), ...containerExtensions(), MD_EXT])].sort();
 }
 
 /** Normalize a user-supplied extension: ensure a leading dot, lower-case. */
@@ -73,11 +74,18 @@ export function listSourceFiles(
   // A file is a source file if a depth-tier grammar (languageOf), a breadth-tier
   // grammar (genericLangOf) or a container (containerLangOf) claims its extension.
   // All three must agree here or `build` and `check` would enumerate different sets.
+  const mdOnlyDirs = readMdOnlyDirs(root);
   return filterByOnlyDirs(
     repoFiles.filter(
-      (f) =>
-        !f.startsWith(outDir) &&
-        (languageOf(f) !== null || genericLangOf(f) !== null || containerLangOf(f) !== null),
+      (f) => {
+        if (f.startsWith(outDir)) return false;
+        if (languageOf(f) !== null || genericLangOf(f) !== null || containerLangOf(f) !== null) return true;
+        if (!readIncludeMd(root) || !isMdFile(f)) return false;
+        // If mdOnlyDirs is set, only include .md files under those dirs.
+        if (mdOnlyDirs.length === 0) return true;
+        const rel = relPosix(root, f);
+        return mdOnlyDirs.some((d) => rel === d || rel.startsWith(`${d}/`));
+      }
     ),
     root,
     onlyDirs,

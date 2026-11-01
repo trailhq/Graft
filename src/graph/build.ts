@@ -20,6 +20,7 @@ import { contextDirFor, ensureGitignored, ensureSearchable } from "../context/no
 import { extractFile, languageLabelOf, languageOf, type Language, type RawEdge } from "./extract.js";
 import { extractGeneric, fallbackLangOf, genericLangOf, warmGenericGrammars, type GenericLang } from "./generic.js";
 import { containerLangOf, extractContainer, warmContainerGrammars, type ContainerLang } from "./container.js";
+import { extractMd, isMdFile } from "./markdown.js";
 import { depthReady, missingDepthPackages, warmDepthGrammars } from "./depth-parser.js";
 import type { NativeFallback } from "./native.js";
 import { contentHash } from "../util/id.js";
@@ -264,7 +265,7 @@ export async function buildGraph(
     const rel = f.rel;
     opts.onProgress?.({ phase: "parse", index: i, total: files.length, file: rel });
     const { lang, container, generic, fellBack: standIn } = tierOf(f.abs);
-    const label = languageLabelOf(f.abs) ?? container?.name ?? generic?.name ?? "unknown";
+    const label = isMdFile(f.abs) ? "markdown" : languageLabelOf(f.abs) ?? container?.name ?? generic?.name ?? "unknown";
     // A .vue file's embedded script falls back the same way its language does.
     const inner = container && !depthReady(container.inner) ? container.inner : null;
     if (standIn) {
@@ -326,11 +327,14 @@ export async function buildGraph(
 
     parsed++;
     try {
-      const { nodes: fileNodes, rawEdges: fileEdges } = lang
-        ? extractFile(rel, source, lang)
-        : container
-          ? extractContainer(rel, source, container)
-          : extractGeneric(rel, source, generic!.name);
+      const mdNodes = isMdFile(f.abs) ? extractMd(f.abs, rel) : null;
+      const { nodes: fileNodes, rawEdges: fileEdges } = mdNodes
+        ? { nodes: mdNodes, rawEdges: [] }
+        : lang
+          ? extractFile(rel, source, lang)
+          : container
+            ? extractContainer(rel, source, container)
+            : extractGeneric(rel, source, generic!.name);
       nodes.push(...fileNodes);
       rawEdges.push(...fileEdges);
       sources.set(rel, source);

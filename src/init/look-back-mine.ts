@@ -15,6 +15,7 @@
  * or a how-to's text. The typed lines it read go when it returns: the
  * candidates hold pointers, and a preference's lead words in memory only.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { spawnSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -84,7 +85,7 @@ function decisionsOf(repoKey: string, env: NodeJS.ProcessEnv): NonNullable<LookB
 
 /** An https origin with no credential helper: git-https-auth is still true here (4.5). */
 function httpsNoHelper(checkout: string): boolean {
-  const git = (...args: string[]) => spawnSync('git', ['-C', checkout, ...args], { encoding: 'utf8', timeout: 5000 });
+  const git = (...args: string[]) => spawnSync('git', ['-C', checkout, ...args], { ...WINHIDE, encoding: 'utf8', timeout: 5000 });
   const url = git('remote', 'get-url', 'origin');
   if (url.status !== 0 || !/^https:\/\//.test(url.stdout.trim())) return false;
   const helper = git('config', '--get-all', 'credential.helper');

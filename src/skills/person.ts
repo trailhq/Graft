@@ -16,6 +16,7 @@
  * When the process table can't be read, the answer is no: a person can run
  * the command again, an agent must not get through on an error.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
@@ -68,8 +69,7 @@ const PS = ['/bin/ps', '/usr/bin/ps'];
 export function readProcessTable(): PsRow[] | null {
   const ps = PS.find((p) => existsSync(p));
   if (!ps || process.platform === 'win32') return null;
-  const run = (fields: string) => execFileSync(ps, ['-A', '-o', fields], {
-    encoding: 'utf8', timeout: 3000, maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'], env: { LC_ALL: 'C', PATH: '/usr/bin:/bin' },
+  const run = (fields: string) => execFileSync(ps, ['-A', '-o', fields], { ...WINHIDE, encoding: 'utf8', timeout: 3000, maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'], env: { LC_ALL: 'C', PATH: '/usr/bin:/bin' },
   });
   try {
     const rows = new Map<number, PsRow>();

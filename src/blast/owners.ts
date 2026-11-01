@@ -22,6 +22,7 @@
  * checkout or a shallow clone leaves the report exactly as it was and the comment
  * simply says nothing about people.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import type { BlastReport } from "./blast.js";
@@ -113,8 +114,7 @@ function isBot(name: string, email: string): boolean {
 
 /** Run git in `root`, or null when git fails — not a repo, no git, no history. */
 function git(root: string, args: string[]): string | null {
-  const res = spawnSync("git", ["-c", "core.quotePath=false", ...args], {
-    cwd: root,
+  const res = spawnSync("git", ["-c", "core.quotePath=false", ...args], { ...WINHIDE, cwd: root,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 64 * 1024 * 1024,

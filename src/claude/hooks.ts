@@ -530,6 +530,41 @@ export async function main(event: string): Promise<void> {
     // Once per repo: older versions kept the prompt in each session file.
     try { dropStoredPrompts(dir); } catch { /* tried again next session */ }
     trailAtStart(dir);
+    // Background semantic refresh: spawn detached trail build at session start
+    // so the graph and semantic index are fresh for this session's project.
+    // Runs from the session directory — only this project's repos get updated.
+    if (brand() === 'trail') {
+      const { graftCliPath } = await import('./paths.js');
+      const cliPath = graftCliPath();
+      if (cliPath && existsSync(cliPath)) {
+        const { spawn: _spawn } = await import('node:child_process');
+        const child = _spawn(process.execPath, [cliPath, 'build', dir], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        child.unref();
+      }
+      // Auto-pull knowledge repos so team learnings are always fresh.
+      const { findWorkspaceRoot } = await import('../graph/workspace.js');
+      const { readWorkspace: _readWs } = await import('../graph/workspace.js');
+      const wsRoot = findWorkspaceRoot(dir);
+      if (wsRoot) {
+        const ws = _readWs(wsRoot);
+        for (const url of ws?.knowledgeRepos ?? []) {
+          const name = url.replace(/\.git$/, '').split('/').pop() ?? '';
+          const repoDir = join(wsRoot, name);
+          if (name && existsSync(join(repoDir, '.git'))) {
+            const { spawnSync: _spawnSync } = await import('node:child_process');
+            _spawnSync('git', ['-C', repoDir, 'pull', '--ff-only', '--quiet'], {
+              windowsHide: true,
+              timeout: 15_000,
+              stdio: 'ignore',
+            });
+          }
+        }
+      }
+    }
     // A repo on trail, opened on a machine that has graft but not the trail command.
     // Only while its .mcp.json still names a trail server: once it doesn't, trail: true takes back the stand-in.
     if (repoWiredForTrail(dir)) fitTrailServerToMachine(homedir(), resolve(dir), { trail: trailOnPath() || !repoNamesTrailServer(dir), graft: commandOnPath('graft') });

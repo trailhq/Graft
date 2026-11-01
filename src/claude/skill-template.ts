@@ -33,8 +33,9 @@ const TRAIL_DESCRIPTION = `Use for ANY task in this repo. What past sessions wor
   trail check before you commit, push or open a PR. If the trail command
   isn't installed, read .trail/learnings/ directly and credit one in a line
   when it shapes your reply; after that first credit, offer once to set trail
-  up, and only if they say yes, run npm install -g @trailhq/trail-code and
-  then trail init --no-agents.`;
+  up, and only if they say yes, run npm install -g @detacoop/trail-code and
+  then trail init --no-agents. If npm says EACCES, never use sudo; offer to
+  set npm's prefix to ~/.npm-global instead.`;
 
 /** The same moments, first in the body, so they're read before the tool docs. */
 const TRAIL_MOMENTS = `## When to reach for trail
@@ -95,6 +96,21 @@ Good, \`--title "CodeQL init and analyze must share a version"\`:
 Bad, \`--title "Finishing the rollout PR"\`: "## Decided - PR #3372 is fixed and
 pushed." Status, no file, no reason, and wrong by next week.
 
+Full syntax with optional flags:
+\`\`\`bash
+trail note --title "decision in plain words" \\
+  --touches "src/file.ts#Symbol" \\
+  --issue "MTD-287"   # Jira ticket, GitLab (#134), GitHub or full URL
+  -m "## Decided\\n..."
+\`\`\`
+
+## Indexing .md files (system cards, glossary)
+\`\`\`bash
+trail build --include-md    # enable persistent .md indexing
+trail ask "effective rate"  # now finds system cards
+trail build --no-include-md # revert
+\`\`\`
+
 ## If trail isn't installed
 The learnings are plain markdown in \`.trail/learnings/\`, one file per session,
 with what it decided, tried and ruled out, and which files it's about
@@ -107,10 +123,13 @@ what it was about, and what it let you skip, e.g. \`📝 Used Rushabh's learning
 on the auth refactor: skipped the session-token approach he already ruled
 out\`. The first time you credit one in a session, and only then, add once:
 "Install trail to get this on every task, plus search and checks. Want me to
-set it up?" Only if they say yes, run \`npm install -g @trailhq/trail-code\`,
+set it up?" Only if they say yes, run \`npm install -g @detacoop/trail-code\`,
 then \`trail init --no-agents\` in the repo, and tell them it's on. Never
-install it without that yes. When no learning shapes your reply, say nothing
-about trail.
+install it without that yes. If npm fails with EACCES, its global folder needs
+root: never use sudo. Offer to point npm at a folder in their home instead
+(\`mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global\`, and
+\`~/.npm-global/bin\` added to PATH in their shell profile), then install
+again. When no learning shapes your reply, say nothing about trail.
 
 ## The code map
 `;
@@ -120,8 +139,8 @@ about trail.
  * for an agent: the commands as trail spells them (`graft check` became
  * `trail build --check`, see `cmd`), and the name in prose. Under trail the
  * code map is in `.trail/cache/` (context/map-dir.ts), so the folder's name
- * changes too; any other `graft` followed by `/` stays, as do `graft-…` and
- * `graft_…` names.
+ * changes too; any other `graft` followed by `/` stays, as do `graft-…`
+ * names. `graft_…` MCP tool names ARE replaced — the fork exposes them as `trail_*`.
  */
 export function trailSpelling(text: string): string {
   return text
@@ -130,6 +149,7 @@ export function trailSpelling(text: string): string {
     .replace(/(?<![\w./-])graft\/(?=[\s.,)])/g, ".trail/cache/")
     .replace(/\bgraft (check|stats)\b(?![\w-])/g, (m) => cmd(m, "trail"))
     .replace(/\bGraft\b(?![/\w-])/g, "Trail")
+    .replace(/\bgraft_(?=[a-z])/g, "trail_")
     .replace(/\bgraft\b(?![/\w-])/g, "trail");
 }
 
@@ -331,6 +351,9 @@ stale if you have edited that file this turn.
 In a multi-repo workspace, graft ranks fairly so the biggest repo can't drown
 the rest, and every hit carries a \`[scope/]\` label naming its sub-project; when
 you already know where you're working, narrow with \`graft ask "<task>" --in <scope>/\`.
+For compound-path repos (e.g. \`default-core/frontend\`) use the full path:
+\`graft ask "<task>" --in default-core/frontend/\` — a partial first segment alone
+(\`--in default-core\`) is not a valid scope.
 
 ## Spend the fewest calls
 - A node's \`covers:\` list already gives exact \`file:line\` for every symbol, so

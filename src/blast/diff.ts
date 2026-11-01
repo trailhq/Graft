@@ -7,6 +7,7 @@
  * this feeds already has git — and `--unified=0` gives exactly the post-image
  * line ranges we need, with no context lines to subtract back out.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
@@ -66,8 +67,7 @@ const MAX_FILE_LINES = 200;
 
 /** Run git in `root`, or return null when git fails (not a repo, unknown ref). */
 function git(root: string, args: string[]): string | null {
-  const res = spawnSync("git", ["-c", "core.quotePath=false", ...args], {
-    cwd: root,
+  const res = spawnSync("git", ["-c", "core.quotePath=false", ...args], { ...WINHIDE, cwd: root,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 64 * 1024 * 1024,

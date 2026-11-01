@@ -19,7 +19,10 @@
  * in what was sent. The learnings are about the repo, so they're the team's,
  * in `.trail/learnings/`.
  */
+
+import { WINHIDE } from "../util/child-process.js";
 import { spawn, spawnSync } from "node:child_process";
+import { makeAdapter, type ForgeAdapter } from "./forge.js";
 import { join } from "node:path";
 import { countBucket, durationBucket } from "../telemetry/contract.js";
 import { track } from "../telemetry/track.js";
@@ -125,43 +128,26 @@ const QUERY = `query($owner: String!, $name: String!, $merged: Int!, $closed: In
   }
 }`;
 
-/** Whether the repo has a GitHub remote and `gh` is installed and signed in. Nothing leaves the machine. */
-export function ghReady(repo: string, gh = "gh"): boolean {
-  const remotes = spawnSync("git", ["-C", repo, "remote", "-v"], { encoding: "utf8", timeout: 5000 });
-  if (remotes.status !== 0 || !/github/i.test(remotes.stdout)) return false;
-  // The token never reaches trail: it's printed to nowhere, and only the exit code is read.
-  const auth = spawnSync(gh, ["auth", "token"], { cwd: repo, stdio: "ignore", timeout: 10_000, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
-  return auth.status === 0;
+/** Whether the repo's forge CLI is installed and authenticated. Replaces ghReady(). */
+export function forgeReady(repo: string, adapter?: ForgeAdapter): boolean {
+  return (adapter ?? makeAdapter(repo)).isReady(repo);
 }
 
-/** The repo's last merged and closed PRs with what was said on them, as GitHub's GraphQL answers; null when `gh` fails. */
-function fetchMergedPRs(repo: string, gh: string, timeoutMs: number): Promise<unknown> {
-  return new Promise((done) => {
-    const args = ["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-F", `merged=${MERGED_PRS}`, "-F", `closed=${CLOSED_PRS}`, "-f", `query=${QUERY}`];
-    let child;
-    try {
-      child = spawn(gh, args, { cwd: repo, env: { ...process.env, GH_PROMPT_DISABLED: "1" }, stdio: ["ignore", "pipe", "ignore"] });
-    } catch {
-      done(null);
-      return;
-    }
-    let out = "";
-    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
-    child.stdout.on("data", (b: Buffer) => (out += b.toString("utf8")));
-    child.on("error", () => {
-      clearTimeout(timer);
-      done(null);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) return done(null);
-      try {
-        done(JSON.parse(out));
-      } catch {
-        done(null);
-      }
-    });
-  });
+/** @deprecated Use forgeReady() instead. Kept for backward compatibility. */
+export function ghReady(repo: string, gh = "gh"): boolean {
+  // For backward compat: if gh is overridden, use the old logic; otherwise delegate.
+  if (gh !== "gh") {
+    const remotes = spawnSync("git", ["-C", repo, "remote", "-v"], { ...WINHIDE, encoding: "utf8", timeout: 5000 });
+    if (remotes.status !== 0 || !/github/i.test(remotes.stdout)) return false;
+    const auth = spawnSync(gh, ["auth", "token"], { ...WINHIDE, cwd: repo, stdio: "ignore", timeout: 10_000, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+    return auth.status === 0;
+  }
+  return forgeReady(repo);
+}
+
+/** Fetches MRs/PRs via the forge adapter. Returns null on any failure. */
+function fetchMergedPRs(repo: string, adapter: ForgeAdapter, timeoutMs: number): Promise<unknown> {
+  return adapter.fetchReviews(repo, timeoutMs);
 }
 
 interface Actor {
@@ -336,7 +322,7 @@ export function repoDocs(repo: string): { id: string; text: string }[] {
 
 /** The repo's revert commits, newest first: what was tried and backed out. */
 export function revertCommits(repo: string): string {
-  const r = spawnSync("git", ["-C", repo, "log", "-n", "400", "--grep=^Revert", "--format=%h %ad %s%n%b%n---", "--date=short"], { encoding: "utf8", timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
+  const r = spawnSync("git", ["-C", repo, "log", "-n", "400", "--grep=^Revert", "--format=%h %ad %s%n%b%n---", "--date=short"], { ...WINHIDE, encoding: "utf8", timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
   return r.status === 0 ? scrub(r.stdout.trim()).slice(0, DOC_CHARS) : "";
 }
 
@@ -385,7 +371,7 @@ export async function findReviewLearnings(
   // `capMs`: the whole read, gh and the model call, ends by then (an agent's tool call has a time limit).
   const left = () => (opts.capMs === undefined ? Infinity : opts.capMs - (Date.now() - started));
   const base = { prs: 0, reviewed: 0, read: 0, model, findings: [] as ReviewFinding[] };
-  const data = await fetchMergedPRs(repo, opts.gh ?? "gh", Math.min(60_000, left()));
+  const data = await fetchMergedPRs(repo, makeAdapter(repo), Math.min(60_000, left()));
   if (!data) return { ...base, durationMs: Date.now() - started, reason: "no_gh" };
   const { merged, prs: all } = reviewedPRs(data);
   const prs = opts.since ? all.filter((pr) => pr.at > opts.since!) : all;
@@ -438,16 +424,30 @@ export interface ReviewRead {
  * committed what it found, TRAIL_NO_FETCH is set, or there's no `gh` to read
  * them with.
  */
+/**
+ * Start reading the repo's MR/PR reviews via the detected forge adapter,
+ * for `trail init` to collect at its end; null when it was read on this
+ * machine before, a teammate already committed what it found, TRAIL_NO_FETCH
+ * is set, or there's no forge CLI to read them with.
+ *
+ * The `gh` parameter is kept for backward compatibility but ignored when the
+ * forge is not GitHub — the adapter is detected automatically from the remote.
+ */
 export function beginReviewRead(repo: string, env: NodeJS.ProcessEnv = process.env, gh = "gh", capMs?: number, onLearning?: (f: ReviewFinding) => void): ReviewRead | null {
   try {
     if (env.TRAIL_NO_FETCH === "1" || readJson<{ at?: number }>(readMark(repo))?.at) return null;
     // The same reviews give a teammate the same findings: once is enough for the repo.
     if (listNotes(repo, { branches: false }).some((n) => n.scope === "repo" && FLAGGED.test(n.body))) return null;
-    if (!ghReady(repo, gh)) {
+    const adapter = makeAdapter(repo);
+    if (!forgeReady(repo, adapter)) {
       track("cold_start", { source: "reviews", outcome: "no_gh" }, { repo });
       return null;
     }
-    const read: ReviewRead = { started: Date.now(), done: false, result: findReviewLearnings(repo, { gh, ...(capMs === undefined ? {} : { capMs }), ...(onLearning ? { onLearning } : {}) }) };
+    const read: ReviewRead = {
+      started: Date.now(),
+      done: false,
+      result: findReviewLearnings(repo, { gh, ...(capMs === undefined ? {} : { capMs }), ...(onLearning ? { onLearning } : {}) }),
+    };
     void read.result.then(() => (read.done = true));
     return read;
   } catch {
@@ -491,7 +491,7 @@ function onItsFiles(touches: string[], f: ReviewFinding): string[] {
 /** How many commits touched each file in the last 60 days: what the team is working on now. */
 function recentEdits(repo: string): Map<string, number> {
   const counts = new Map<string, number>();
-  const r = spawnSync("git", ["-C", repo, "log", "--since=60.days", "--name-only", "--format="], { encoding: "utf8", timeout: 15_000, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync("git", ["-C", repo, "log", "--since=60.days", "--name-only", "--format="], { ...WINHIDE, encoding: "utf8", timeout: 15_000, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) return counts;
   for (const f of r.stdout.split("\n")) if (f) counts.set(f, (counts.get(f) ?? 0) + 1);
   return counts;

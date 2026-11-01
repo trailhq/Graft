@@ -4,6 +4,7 @@
  * Kept out of cli.ts (argument wiring only) so the diff → seeds → walk → render
  * chain stays unit-testable without shelling out, matching `graph/traverse-cli.ts`.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { execFileSync } from "node:child_process";
 import { basename, resolve } from "node:path";
 import { contextDirFor } from "../context/node-file.js";
@@ -146,8 +147,7 @@ async function nameClusters(graph: GraphV1, report: BlastReport, contextDir: str
  */
 export function repoLabel(root: string): string {
   try {
-    const url = execFileSync("git", ["-C", root, "remote", "get-url", "origin"], {
-      encoding: "utf8",
+    const url = execFileSync("git", ["-C", root, "remote", "get-url", "origin"], { ...WINHIDE, encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     const name = url.replace(/\.git$/, "").split(/[/:]/).pop();

@@ -49,6 +49,8 @@ hotspots), no LLM, no key.
 - Monorepos and folders of multiple repos rank fairly across sub-projects —
   hits carry \`[scope/]\` labels naming which one they're from. Narrow with
   \`graft ask "<task>" --in <scope>/\` once you know where you're working.
+  For compound-path repos (e.g. \`default-core/frontend\`) use the full path —
+  a partial first segment (\`--in default-core\`) is not a valid scope.
 
 If a returned span is truncated ("+N more lines"), open the file at that exact
 range before finalizing. Only open source files when a node genuinely lacks a
@@ -56,7 +58,24 @@ needed detail, and then at the exact file:line the node points to — never
 re-read whole files.
 
 After big code changes, refresh the graph with \`graft build\` (deterministic,
-no API key, $0).`;
+no API key, $0).
+
+## Checklist before committing / pushing / opening a PR
+
+Run **in this order** before the first push on any branch:
+
+\`\`\`bash
+tsc -b                                   # types (includes test files — do NOT use --noEmit)
+<lint>                                   # e.g. bun run lint / npm run lint
+<tests>                                  # e.g. npx vitest run <module>
+graft check --base origin/<base-branch>  # blast radius: conflicts with other branches + learnings
+\`\`\`
+
+> **\`tsc -b\` vs \`--noEmit\`**: CI uses \`tsc -b\`, which compiles test files too.
+> \`--noEmit\` locally can pass clean even when CI fails (test fixtures not checked).
+
+\`graft check\` goes **last**, before the push — not after opening the PR.
+If it surfaces overlap with another active branch, mention it in the MR/PR description.`;
 }
 
 export function cursorRule(name: Brand = 'graft'): string {

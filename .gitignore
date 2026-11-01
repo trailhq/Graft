@@ -33,3 +33,4 @@ transcripts/
 
 # The @trailhq/trail package, laid out by scripts/pack-trail.mjs.
 /build/
+spikes/

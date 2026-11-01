@@ -67,10 +67,12 @@ export interface LearningFields {
   wall?: WallClass;
   /** Counts only, on one line: "failed 56 of 57 times · 5 repos". */
   evidence?: string;
+  /** Issue or ticket reference this learning came from (any tracker: MTD-287, #134, or a URL). */
+  issue?: string;
 }
 
 /** The front-matter keys, in the order they're written. */
-export const LEARNING_KEYS = ["id", "kind", "scope", "applies", "status", "replaces", "src", "skill", "check", "enforce", "wall", "evidence"] as const;
+export const LEARNING_KEYS = ["id", "kind", "scope", "applies", "status", "replaces", "src", "skill", "check", "enforce", "wall", "evidence", "issue"] as const;
 
 /** `l-` and 6 to 16 lowercase hex digits. */
 export const LEARNING_ID = /^l-[0-9a-f]{6,16}$/;
@@ -143,6 +145,7 @@ export function readLearningFields(d: Record<string, unknown>, fileName: string)
   const wall = oneOf(d.wall, WALL_CLASSES);
   // One line, the way every field an agent reads is (flatten.ts).
   const evidence = flatLine(d.evidence, EVIDENCE_MAX) || undefined;
+  const issue = typeof d.issue === "string" && d.issue.trim() ? d.issue.trim() : undefined;
   if (kind) out.kind = kind;
   if (scope) out.scope = scope;
   if (applies) out.applies = applies;
@@ -153,6 +156,7 @@ export function readLearningFields(d: Record<string, unknown>, fileName: string)
   if (enforce) out.enforce = enforce;
   if (wall) out.wall = wall;
   if (evidence) out.evidence = evidence;
+  if (issue) out.issue = issue;
   return out;
 }
 

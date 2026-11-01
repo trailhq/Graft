@@ -1,0 +1,37 @@
+schema: spec-driven
+
+context: |
+  Este es el fork @detacoop/trail-code de @trailhq/trail-code (MIT).
+  Lenguaje: TypeScript/Node.js, target Node >=22.3 o >=20.16.
+  Plataforma primaria: Windows 11 (DETACOOP corre en Windows).
+  Todos los artifacts se escriben en español.
+  El fork agrega: búsqueda semántica ONNX local, windowsHide en todos los spawns,
+  timeout dinámico en buildGraphWithProgress, semántico por defecto en trail build.
+  Trail upstream solo soporta GitHub (gh CLI + GraphQL). El fork debe soportar
+  GitLab (glab CLI) y GitHub de forma transparente, detectando el forge desde
+  la URL del remote git sin configuración manual.
+  Archivos clave: src/notes/pr-reviews.ts (ghReady, fetchMergedPRs),
+  src/notes/branches.ts, src/claude/note-signals.ts, src/claude/pre-bash-check.ts,
+  src/init/prefs.ts. La abstracción debe ser backward-compatible con repos GitHub.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

@@ -23,9 +23,12 @@ import {
   federateCheck,
   federateGrep,
   federateMap,
+  federateSemantic,
   readWorkspace,
 } from '../graph/workspace.js';
 import type { NodeV1 } from '../graph/types.js';
+import { join } from 'node:path';
+import { embedNodes, searchSemantic } from '../ask/semantic.js';
 import { recordLookup } from '../cloud/lookup-activity.js';
 import { canonicalToolName } from './tool-names.js';
 import { cmd } from '../brand.js';
@@ -44,7 +47,7 @@ function unknownSymbolText(query: string): string {
 
 export const TOOLS: ToolDef[] = [
   {
-    name: 'graft_find_code',
+    name: 'trail_find_code',
     description:
       'Query the repo context graph in plain words. Returns ranked nodes with exact file:line spans and the relevant source inlined — usually the full answer, no file reads needed.',
     inputSchema: {
@@ -65,7 +68,7 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'graft_file_api',
+    name: 'trail_file_api',
     description:
       "Signatures-only view of one file — every definition's signature + line span, ~10× cheaper than reading the file ($0, no LLM).",
     inputSchema: {
@@ -77,12 +80,23 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'graft_check_freshness',
+    name: 'trail_check_freshness',
     description: 'Report whether the committed graph is in sync with the code (drift check).',
     inputSchema: { type: 'object', properties: {} },
   },
   {
-    name: 'graft_trace_calls',
+    name: 'trail_build',
+    description: 'Rebuild the code graph and semantic index for this workspace. Use when trail_check_freshness reports the graph is stale, after adding new files, or when semantic search returns no results. Runs in the background — returns immediately; the index is ready within a few minutes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        include_md: { type: 'boolean', description: 'Index .md files as nodes (headings → symbols). Persists for future builds.' },
+        semantic: { type: 'boolean', description: 'Rebuild the semantic (embedding) index. Default true.' },
+      },
+    },
+  },
+  {
+    name: 'trail_trace_calls',
     description:
       'Structural edges for a symbol, over call/reference/import/implements/extends ($0, no LLM). Defaults to direct callers (who depends on it). Set direction:"out" for callees (what it calls); set depth>1 (or depth:"all" for the full closure) to walk transitively for the full blast radius — every source that breaks if it changes. Run before a multi-file refactor to find ALL affected files.',
     inputSchema: {
@@ -101,7 +115,7 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'graft_find_all',
+    name: 'trail_find_all',
     description:
       'Regex search over the graph\'s indexed files, hits grouped by innermost enclosing symbol and ranked by incoming-edge count (coupling) — which hit matters, not just where it is.',
     inputSchema: {
@@ -116,7 +130,7 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'graft_repo_map',
+    name: 'trail_repo_map',
     description:
       'Token-budgeted repo orientation — directory clusters, per-directory hubs, and global hotspots computed purely from the wiring graph ($0, no LLM). Use this to get oriented in an unfamiliar repo before diving into files.',
     inputSchema: {
@@ -124,6 +138,18 @@ export const TOOLS: ToolDef[] = [
       properties: {
         max_dirs: { type: 'number', description: 'max directory entries shown, rest counted into dropped (default 16)' },
       },
+    },
+  },
+  {
+    name: 'trail_search_semantic',
+    description: 'Semantic (embedding-based) search over the code graph — finds nodes by meaning, not just keywords.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'plain-language description of what you are looking for' },
+        limit: { type: 'number', description: 'max results (default 5)' },
+      },
+      required: ['query'],
     },
   },
 ];
@@ -195,6 +221,13 @@ async function callWorkspaceTool(
     case 'graft_check_freshness': {
       const { text } = await federateCheck(root, dirOverride);
       return { text, isError: false };
+    }
+    case 'graft_search_semantic': {
+      const query = String(args.query ?? '');
+      if (!query) return { text: 'graft_search_semantic requires a query', isError: true };
+      const limit = typeof args.limit === 'number' ? args.limit : 5;
+      const { text, isError } = await federateSemantic(root, dirOverride, query, limit);
+      return { text, isError };
     }
     default:
       return null;
@@ -281,6 +314,26 @@ async function callSingleTool(
         if (!g.missing) parts.push(formatGraphCheckReport(g));
         return { text: parts.join('\n\n'), isError: false };
       }
+      case 'trail_build': {
+        // Spawn trail build as a detached background process.
+        const { spawn: _spawn } = await import('node:child_process');
+        const { graftCliPath } = await import('../claude/paths.js');
+        const cliPath = graftCliPath();
+        if (!cliPath) return { text: 'trail CLI not found — is @detacoop/trail-code installed?', isError: true };
+        const extraArgs: string[] = [];
+        if (args.include_md === true) extraArgs.push('--include-md');
+        if (args.semantic === false) extraArgs.push('--no-semantic');
+        const child = _spawn(process.execPath, [cliPath, 'build', root, ...extraArgs], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        child.unref();
+        return {
+          text: `trail build started in background for ${root}${extraArgs.length ? ` (${extraArgs.join(' ')})` : ''}.\nThe index will be ready in a few minutes. Use trail_check_freshness to verify when done.`,
+          isError: false,
+        };
+      }
       case 'graft_trace_calls': {
         // One tool covers callers (direction:in, the default), callees
         // (direction:out), and blast radius (depth>1). edgeWalk handles the
@@ -329,6 +382,65 @@ async function callSingleTool(
         const maxDirs = typeof args.max_dirs === 'number' && Number.isFinite(args.max_dirs) && args.max_dirs > 0 ? args.max_dirs : undefined;
         const map = buildRepoMap(w, { maxDirs });
         return { text: formatRepoMap(map), isError: false };
+      }
+      case 'trail_search_semantic':
+      case 'graft_search_semantic': {
+        const query = String(args.query ?? '');
+        if (!query) return { text: 'graft_search_semantic requires a query', isError: true };
+        const limit = typeof args.limit === 'number' ? args.limit : 5;
+        const contextDir = contextDirFor(root, dirOverride);
+
+        // Workspace: federate semantic search across all children's embedding DBs.
+        const ws = readWorkspace(root, dirOverride);
+        if (ws && ws.children.length > 0) {
+          const { join: pjoin } = await import('node:path');
+          const { existsSync: pExists } = await import('node:fs');
+          const allHits: Awaited<ReturnType<typeof searchSemantic>> = [];
+          for (const child of ws.children) {
+            const childRoot = pjoin(root, child);
+            const childCtx = contextDirFor(childRoot);
+            const childDb = pjoin(childCtx, '.cache', 'embeddings.db');
+            if (!pExists(childDb)) continue;
+            try {
+              const childHits = await searchSemantic(query, childDb, limit);
+              // Prefix file_path with child name so results are unambiguous.
+              for (const h of childHits) {
+                allHits.push({ ...h, file_path: h.file_path.startsWith(child) ? h.file_path : `${child}/${h.file_path}` });
+              }
+            } catch { /* child DB not ready — skip */ }
+          }
+          if (allHits.length === 0) return { text: 'no semantic matches found', isError: false };
+          const sorted = allHits.sort((a, b) => b.score - a.score).slice(0, limit);
+          const filtered = sorted.filter(h => h.score > 0.05);
+          if (filtered.length === 0) return { text: 'no semantic matches found above threshold', isError: false };
+          const lines = filtered.map((h, i) =>
+            `${i + 1}. ${h.file_path} · ${h.symbol}  (score: ${h.score})\n   ${h.snippet}`
+          );
+          return { text: lines.join('\n\n'), isError: false };
+        }
+
+        // Single repo: search directly.
+        const w = loadGraphCached(contextDir);
+        if (!w) return { text: noGraph(), isError: true };
+        const embeddableNodes = w.nodes.filter(n => n.kind !== 'file');
+        if (embeddableNodes.length === 0) {
+          return {
+            text: 'No indexable symbols found — ensure `trail build --semantic` parsed source files'
+               + ' (verify .gitignore is not excluding your source directory)',
+            isError: true,
+          };
+        }
+        const dbPath = join(contextDir, '.cache', 'embeddings.db');
+        // Idempotent: skips re-embed if DB already populated.
+        await embedNodes(embeddableNodes, dbPath);
+        const hits = await searchSemantic(query, dbPath, limit);
+        if (hits.length === 0) return { text: 'no semantic matches found', isError: false };
+        const filtered = hits.filter(h => h.score > 0.05);
+        if (filtered.length === 0) return { text: 'no semantic matches found above threshold', isError: false };
+        const lines = filtered.map((h, i) =>
+          `${i + 1}. ${h.file_path} · ${h.symbol}  (score: ${h.score})\n   ${h.snippet}`
+        );
+        return { text: lines.join('\n\n'), isError: false };
       }
     default:
       return { text: `unknown tool: ${name}`, isError: true };

@@ -7,6 +7,7 @@
  * init --dry-run` and the picker can report paths without writing;
  * `registerMcpConfigs()` walks that same list to do the writing.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -54,7 +55,7 @@ const TRAIL_NPX_LAUNCH = { command: 'npx', args: ['-y', '@trailhq/trail-code', '
 const TRAIL_BIN_LAUNCH = { command: 'trail', args: ['mcp'] };
 
 function graftOnPath(): boolean {
-  const r = spawnSync('graft', ['--version'], { stdio: 'ignore', timeout: 5000 });
+  const r = spawnSync('graft', ['--version'], { ...WINHIDE, stdio: 'ignore', timeout: 5000 });
   return r.status === 0;
 }
 

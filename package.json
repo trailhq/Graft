@@ -1,7 +1,7 @@
 {
-  "name": "@nanonets/graft",
-  "version": "0.28.0",
-  "description": "Build a repo's context graph as a folder of linked markdown files: a local, regenerable cache that every query keeps in sync with your code.",
+  "name": "@detacoop/trail-code",
+  "version": "0.28.0-semantic.2",
+  "description": "Build a repo's context graph as a folder of linked markdown files: a local, regenerable cache that every query keeps in sync with your code. (fork with semantic search)",
   "keywords": [
     "ai",
     "agents",
@@ -34,7 +34,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "graft": "dist/bin/graft.js"
+    "graft": "dist/bin/graft.js",
+    "trail": "dist/bin/trail.js"
   },
   "files": [
     "dist",
@@ -52,10 +53,13 @@
     "postinstall": "node scripts/postinstall.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^20.16.0 || >=22.3.0"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.133.0",
+    "@huggingface/transformers": "^3.0.0",
+    "better-sqlite3": "^13.0.3",
+    "sqlite-vec": "^0.1.9",
     "commander": "^15.0.0",
     "dotenv": "^18.0.7",
     "gray-matter": "^4.0.3",
@@ -67,6 +71,7 @@
     "web-tree-sitter-depth": "npm:web-tree-sitter@0.22.2"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/d3-force": "^3.0.10",
     "@types/node": "^26.1.0",
     "d3-force": "^3.0.0",
@@ -96,7 +101,10 @@
     "tree-sitter-kotlin@0.3.8": true,
     "tree-sitter-php@0.23.12": true,
     "@davisvaughan/tree-sitter-r@1.3.0": true,
-    "tree-sitter-swift@0.7.1": true
+    "tree-sitter-swift@0.7.1": true,
+    "onnxruntime-node": true,
+    "protobufjs": true,
+    "better-sqlite3": true
   },
   "overrides": {
     "tree-sitter-swift": {

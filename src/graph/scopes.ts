@@ -324,8 +324,11 @@ export function assertPrefixIndexed(graph: GraphV1, prefix: string): void {
   );
 }
 
-/** Immediate subdirs of `root` that are themselves git repos (have `.git`).
- * Used by workspace federation (Task 5). */
+/** Immediate subdirs of `root` that are themselves git repos (have `.git`),
+ * plus git repos one level deeper inside non-git subdirs (workspace-of-workspaces
+ * pattern: e.g. `Desarrollo/default-core/frontend`, `Desarrollo/scandes/backend`).
+ * Returned paths are relative to `root` (e.g. `"frontend"`, `"default-core/frontend"`).
+ * Used by workspace federation. */
 export function discoverWorkspaceChildren(root: string): string[] {
   const absRoot = resolve(root);
   const includes = readIncludeDirs(absRoot);
@@ -335,9 +338,28 @@ export function discoverWorkspaceChildren(root: string): string[] {
   } catch {
     return [];
   }
-  return entries
-    .filter((e) => e.isDirectory() && !shouldSkipDir(e.name, includes) && existsSync(join(absRoot, e.name, ".git")))
-    .map((e) => e.name);
+  const children: string[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || shouldSkipDir(e.name, includes)) continue;
+    if (existsSync(join(absRoot, e.name, ".git"))) {
+      // Direct git repo child
+      children.push(e.name);
+    } else {
+      // Non-git subdir — check one level deeper (e.g. default-core/, scandes/)
+      let nested: Dirent[];
+      try {
+        nested = readdirSync(join(absRoot, e.name), { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const n of nested) {
+        if (n.isDirectory() && !shouldSkipDir(n.name, includes) && existsSync(join(absRoot, e.name, n.name, ".git"))) {
+          children.push(`${e.name}/${n.name}`);
+        }
+      }
+    }
+  }
+  return children;
 }
 
 /** Every consumer's entry point to a graph's scopes: absent `meta.scopes` (old

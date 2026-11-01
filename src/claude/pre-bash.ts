@@ -40,7 +40,7 @@ const DECISIONS = new Set(['allow', 'ask', 'deny']);
  */
 /** A commit, a push or a PR: the commands `trail check` runs before (pre-bash-check.ts). One regex for every other command. */
 // git's own options may come first: `git -C app push`, `git -c user.name="A B" commit`, `git --no-pager commit`.
-export const SHIP_COMMAND = /\b(?:git(?:\s+(?:-[cC]\s*(?:[^\s"']|"[^"]*"|'[^']*')+|--[\w-]+(?:=\S+)?))*\s+(?:commit|push)|gh\s+pr\s+create)\b/;
+export const SHIP_COMMAND = /\b(?:git(?:\s+(?:-[cC]\s*(?:[^\s"']|"[^"]*"|'[^']*')+|--[\w-]+(?:=\S+)?))*\s+(?:commit|push)|gh\s+pr\s+create|glab\s+mr\s+(?:create|merge))\b/;
 
 export function preBash(_input: unknown, _dir: string): PreBashDecision | null {
   return null;

@@ -19,6 +19,7 @@
  * failed. Results are cached 10 minutes in `state/probes.json`, keyed by a
  * hash of checkout and probe.
  */
+import { WINHIDE } from "../util/child-process.js";
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, constants, statSync, type Stats } from 'node:fs';
@@ -102,6 +103,7 @@ const defaultGit: ProbeGit = (args, cwd, timeoutMs) => {
   try {
     const out = execFileSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', ...args], {
       cwd, timeout: timeoutMs, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 20,
+      ...WINHIDE,
       env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
     });
     return { code: 0, out, timedOut: false };
