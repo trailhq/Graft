@@ -166,7 +166,8 @@ test("previewLines: says what goes, how big, how many secrets came out and where
   assert.match(out, /5a1e0c2d · .* · 6 messages · 1 subagent$/m);
   assert.match(out, /^Secrets {3}4 redacted: \.env value ×2, API key ×2$/m);
   assert.match(out, /^Left out  2 images/m);
-  assert.match(out, /^Goes to   Trail - Brand on team\.trailhq\.com, read only by the Trail team$/m);
+  assert.match(out, /^You {7}nothing that names you found$/m);
+  assert.match(out, /^Goes to   Trail - Brand on team\.trailhq\.com, read only by the Trail team, without your name$/m);
 });
 
 const CLOUD: Cloud = {
