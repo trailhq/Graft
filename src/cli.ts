@@ -1094,10 +1094,11 @@ program
   .option("--no-open", "don't open the browser")
   .option("--only <repos>", "workspace: show only these child repos (comma-separated, e.g. frontend,backend)")
   .option("--exclude <repos>", "workspace: exclude these child repos (comma-separated)")
+  .option("--include-tests", "include test files in the graph (excluded by default)")
   .option("--export <dir>", "write one self-contained index.html instead of serving (for CI, GitHub Pages, or a build artifact)")
   .option("--title <text>", "subtitle shown beside the repo name in an exported page (e.g. \"PR #151\")")
   .option("--tabs <list>", "tabs the exported page offers, comma separated: context,code,outline (default: all three)")
-  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; only?: string; exclude?: string; export?: string; title?: string; tabs?: string }) => {
+  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; only?: string; exclude?: string; includeTests?: boolean; export?: string; title?: string; tabs?: string }) => {
     // Flags are checked before the repository is: a typo'd `--tabs` is a mistake
     // in the command the caller just typed, and telling them to go build an index
     // first sends them off to fix the wrong thing.
@@ -1142,9 +1143,16 @@ program
         try {
           const w = JSON.parse(rfs(wiringPath, 'utf8'));
           if (w?.meta?.version !== 1) continue;
+          const isTestPath = (p: string) => /\.(test|spec)\.[jt]sx?$|[\\/](__tests__|tests?|specs?)[\\/]|\.Tests\.cs$/i.test(p);
+          const filterNode = (n: any) => opts.includeTests || !isTestPath(n.path ?? n.id ?? '');
+          const filteredNodes = (w.nodes ?? []).filter(filterNode);
+          const filteredIds = new Set(filteredNodes.map((n: any) => `${child}/${n.id}`));
           // Prefix node ids and paths with child name to avoid collisions.
-          for (const n of (w.nodes ?? [])) allNodes.push({ ...n, id: `${child}/${n.id}`, path: n.path ? `${child}/${n.path}` : n.path });
-          for (const e of (w.edges ?? [])) allEdges.push({ ...e, source: `${child}/${e.source}`, target: `${child}/${e.target}` });
+          for (const n of filteredNodes) allNodes.push({ ...n, id: `${child}/${n.id}`, path: n.path ? `${child}/${n.path}` : n.path });
+          for (const e of (w.edges ?? [])) {
+            const src = `${child}/${e.source}`, tgt = `${child}/${e.target}`;
+            if (filteredIds.has(src) && filteredIds.has(tgt)) allEdges.push({ ...e, source: src, target: tgt });
+          }
           for (const l of (w.meta?.languages ?? [])) allLangs.add(l);
           childrenWithGraph++;
         } catch { /* skip broken child */ }
