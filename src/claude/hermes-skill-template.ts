@@ -87,6 +87,31 @@ trail note --title "decision en palabras simples" \\
   -m "## Decided\\n..."
 \`\`\`
 
+## Scope en workspace grande
+
+**Siempre usar \`--in\` o el parametro \`in=\` para acotar al repo correcto.**
+Sin el, las busquedas federan sobre todos los repos del workspace (~20+), trayendo
+hits de repos de otros clientes o proyectos no relacionados.
+
+\`\`\`
+# MCP — siempre con in=
+trail_find_code(query="EvaluacionDetalle", in="default-core/frontend")
+trail_search_semantic(query="cuota minima envio", in="default-core")
+
+# CLI fallback
+trail ask "EvaluacionDetalle" --in default-core/frontend/
+\`\`\`
+
+## Visualizacion del grafo
+
+\`\`\`bash
+trail viz                              # abre el browser en localhost:4400
+trail viz --repos frontend backend     # solo esos repos del workspace
+trail viz --skip detafull openspec     # todos menos esos
+trail viz --include-tests              # tests visibles (ocultos por defecto)
+trail viz --export out/                # HTML estatico para CI o GitHub Pages
+\`\`\`
+
 ## Indexar .md (cartas de sistema, glosario)
 
 \`\`\`bash
