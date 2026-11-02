@@ -59,7 +59,7 @@ npm install -g trail-code-detacoop --ignore-scripts && trail init
 
 ## Fork DETACOOP — trail-code
 
-Este fork extiende `@trailhq/trail-code` con mejoras específicas para equipos que usan **Windows**, **GitLab** y flujos de trabajo multi-repo.
+Este fork extiende [`@trailhq/trail-code`](https://github.com/trailhq/Trail-Code) con mejoras específicas para equipos que usan **Windows**, **GitLab** y flujos de trabajo multi-repo.
 
 ```bash
 npm install -g trail-code-detacoop --ignore-scripts && trail init
