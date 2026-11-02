@@ -128,15 +128,12 @@ Desarrollador B inicia sesión:
 
 ### Instalación
 
-**Windows / Linux / WSL / macOS** — el comando es el mismo:
-
 ```bash
-# Instalar desde GitHub (--ignore-scripts evita compilación de binarios nativos)
+# Instalar (--ignore-scripts evita compilación de binarios nativos)
 npm install -g trail-code-detacoop --ignore-scripts
 
 # Inicializar workspace o repo
-cd /ruta/al/workspace       # Linux/WSL/macOS
-# cd C:/ruta/al/workspace   # Windows
+cd /ruta/al/workspace
 trail init --agents claude hermes   # solo los agentes que usás
 
 # Configurar knowledge repo compartido (una vez por máquina)
@@ -146,39 +143,15 @@ trail config knowledge-repo add https://gitlab.com/detacoop/equipo-desarrollador
 trail build
 ```
 
-**MCP server en Hermes — Windows:**
+**MCP server en Hermes:**
 ```yaml
 mcp_servers:
   trail:
-    command: C:/Users/<user>/AppData/Roaming/npm/trail.cmd
-    args: [mcp, "C:/ruta/al/workspace"]
-    env: { PYTHONUTF8: "1" }
-```
-
-**MCP server en Hermes — Linux/WSL/macOS:**
-```yaml
-mcp_servers:
-  trail:
-    command: trail
+    command: trail          # Windows: trail.cmd (ruta completa si falla)
     args: [mcp, /ruta/al/workspace]
 ```
 
 **MCP server en Claude Code** — agregar en `.claude/settings.json` (local) o `~/.claude/settings.json` (global):
-
-*Windows:*
-```json
-{
-  "mcpServers": {
-    "trail": {
-      "command": "C:\\Users\\<user>\\AppData\\Roaming\\npm\\trail.cmd",
-      "args": ["mcp", "C:\\ruta\\al\\workspace"],
-      "env": { "PYTHONUTF8": "1" }
-    }
-  }
-}
-```
-
-*Linux / WSL / macOS:*
 ```json
 {
   "mcpServers": {
