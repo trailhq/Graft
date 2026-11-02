@@ -73,11 +73,13 @@ function fakeSession(): { home: string; repo: string; id: string } {
   const folder = claudeProjectDir(repo, home);
   mkdirSync(join(folder, id, "subagents"), { recursive: true });
   mkdirSync(join(folder, id, "tool-results"), { recursive: true });
+  // Inside the session, a fixed folder: a temp folder's random name (`/tmp/…-wRSnEe/…-aB3cD9`) can look like a key and change the counts.
+  const cwd = "/work/web";
   const at = (m: number) => `2026-10-29T10:${String(m).padStart(2, "0")}:00.000Z`;
   const lines = [
-    { type: "user", timestamp: at(0), sessionId: id, cwd: repo, message: { role: "user", content: "<system-reminder>\nctx\n</system-reminder>\n\n\nwhy does the stop hook skip my corrections?" } },
+    { type: "user", timestamp: at(0), sessionId: id, cwd, message: { role: "user", content: "<system-reminder>\nctx\n</system-reminder>\n\n\nwhy does the stop hook skip my corrections?" } },
     { type: "assistant", timestamp: at(1), message: { id: "msg_01", role: "assistant", content: [{ type: "thinking", thinking: "look at note-signals", signature: "EpYBCkYIBhgCKkB" + "x".repeat(300) }] } },
-    { type: "assistant", timestamp: at(1), message: { id: "msg_01", role: "assistant", content: [{ type: "tool_use", id: "toolu_env", name: "Read", input: { file_path: `${repo}/.env.local` } }] } },
+    { type: "assistant", timestamp: at(1), message: { id: "msg_01", role: "assistant", content: [{ type: "tool_use", id: "toolu_env", name: "Read", input: { file_path: `${cwd}/.env.local` } }] } },
     { type: "user", timestamp: at(2), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_env", content: "     1→DB_HOST=prod.db.internal\n     2→STRIPE_KEY=whatever-it-is\n     3→# a comment\n     4→EMPTY=" }] }, toolUseResult: { file: { content: "DB_HOST=prod.db.internal\nSTRIPE_KEY=whatever-it-is" } } },
     { type: "assistant", timestamp: at(3), message: { id: "msg_02", role: "assistant", content: [{ type: "text", text: `Your key ${OPENAI} is in the log; rotate it.` }] } },
     { type: "user", timestamp: at(4), message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo" + "A".repeat(2000) } }, { type: "text", text: "here's the screen" }] } },
