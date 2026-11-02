@@ -1110,7 +1110,44 @@ program
 
     const root = resolve(dir);
     const globalOpts = program.opts<{ dir?: string }>();
-    const contextDir = contextDirFor(root, globalOpts.dir);
+    let contextDir = contextDirFor(root, globalOpts.dir);
+    let federatedWiringPath: string | null = null;
+
+    // Workspace: federate all children's wiring.json into a single in-memory file for viz.
+    const { readWorkspace: readWs } = await import('./graph/workspace.js');
+    const ws = readWs(root);
+    if (ws && ws.children.length > 0 && !existsSync(join(contextDir, '.graph', 'wiring.json'))) {
+      const { join: pj } = await import('node:path');
+      const { writeFileSync, mkdirSync } = await import('node:fs');
+      const allNodes: unknown[] = [];
+      const allEdges: unknown[] = [];
+      const allLangs = new Set<string>();
+      let childrenWithGraph = 0;
+      for (const child of ws.children) {
+        const childCtx = contextDirFor(pj(root, child));
+        const wiringPath = pj(childCtx, '.graph', 'wiring.json');
+        if (!existsSync(wiringPath)) continue;
+        try {
+          const w = JSON.parse(readFileSync(wiringPath, 'utf8'));
+          if (w?.meta?.version !== 1) continue;
+          // Prefix node ids and paths with child name to avoid collisions.
+          for (const n of (w.nodes ?? [])) allNodes.push({ ...n, id: `${child}/${n.id}`, path: n.path ? `${child}/${n.path}` : n.path });
+          for (const e of (w.edges ?? [])) allEdges.push({ ...e, source: `${child}/${e.source}`, target: `${child}/${e.target}` });
+          for (const l of (w.meta?.languages ?? [])) allLangs.add(l);
+          childrenWithGraph++;
+        } catch { /* skip broken child */ }
+      }
+      if (childrenWithGraph > 0) {
+        const federated = { meta: { version: 1, nodeCount: allNodes.length, edgeCount: allEdges.length, languages: [...allLangs] }, nodes: allNodes, edges: allEdges };
+        const tmpDir = pj(contextDir, '.graph');
+        mkdirSync(tmpDir, { recursive: true });
+        // Write as wiring.json so startVizServer finds it at the expected path.
+        const tmpPath = pj(tmpDir, 'wiring.json');
+        writeFileSync(tmpPath, JSON.stringify(federated));
+        federatedWiringPath = tmpPath;
+        console.error(`· workspace viz: federating ${childrenWithGraph} repos (${allNodes.length} nodes, ${allEdges.length} edges)`);
+      }
+    }
     if (!existsSync(contextDir)) {
       console.error(`✗ no context graph at ${contextDir}: run \`${cmd("graft build --deep")}\` first`);
       process.exit(1);
