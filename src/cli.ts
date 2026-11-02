@@ -1653,11 +1653,19 @@ async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
     _ss('git', ['-C', repo, 'add', '.trail/learnings/'], { windowsHide: true, stdio: 'ignore' });
     const commitR = _ss('git', ['-C', repo, 'commit', '-m', commitMsg], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     if (commitR.status === 0) {
-      const pushR = _ss('git', ['-C', repo, 'push'], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      let pushR = _ss('git', ['-C', repo, 'push'], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      if (pushR.status !== 0) {
+        // Non-fast-forward: pull --rebase and retry once.
+        const rebaseR = _ss('git', ['-C', repo, 'pull', '--rebase', '--quiet'], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        if (rebaseR.status === 0) {
+          pushR = _ss('git', ['-C', repo, 'push'], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        }
+      }
       if (pushR.status === 0) {
         console.log(`✓ pushed to knowledge repo — teammates get it on their next session`);
       } else {
-        console.log(`⚠ committed but push failed — run: git -C ${repo} push`);
+        console.log(`⚠ committed but push failed — run: git -C ${repo} pull --rebase && git -C ${repo} push`);
+      }
       }
     } else {
       console.log(`⚠ could not auto-commit — run: git -C ${repo} add .trail/learnings/ && git commit -m "${commitMsg}"`);
