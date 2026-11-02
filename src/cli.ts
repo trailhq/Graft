@@ -1461,20 +1461,46 @@ async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
       const knowledgeCtx = contextDirFor(knowledgeDir);
       const knowledgeDb = pj(knowledgeCtx, '.cache', 'embeddings.db');
       if (pex(knowledgeDb)) {
-        try {
-          const { searchSemantic } = await import('./ask/semantic.js');
-          const similar = await searchSemantic(opts.title, knowledgeDb, 3);
-          const strongMatch = similar.filter(h => h.score > 0.75);
-          if (strongMatch.length > 0) {
-            console.error(`⚠ similar learning already exists in knowledge repo:`);
-            strongMatch.forEach(h => console.error(`  · "${h.symbol}" (score: ${h.score.toFixed(2)}) — ${h.file_path}`));
-            console.error(`  Use --replaces <id> to update it, or --anyway to save a new one`);
-            process.exitCode = 1;
-            return;
-          }
-        } catch { /* semantic index not ready — skip check */ }
+      try {
+        const { searchSemantic } = await import('./ask/semantic.js');
+        const similar = await searchSemantic(opts.title, knowledgeDb, 3);
+        const strongMatch = similar.filter(h => h.score > 0.55);
+        if (strongMatch.length > 0 && !opts.anyway) {
+          const best = strongMatch[0]!;
+          const { readFileSync: rfs, writeFileSync: wfs } = await import('node:fs');
+          const { join: pjid } = await import('node:path');
+          const existingPath = pjid(knowledgeDir, best.file_path);
+          try {
+            const existingContent = rfs(existingPath, 'utf8');
+            // Update: keep frontmatter (id, title, author, date, touches) — replace body with new content.
+            const fmEnd = existingContent.indexOf('\n---\n', 4);
+            if (fmEnd !== -1) {
+              const frontmatter = existingContent.slice(0, fmEnd + 5);
+              const newBody = body;
+              const updatedContent = `${frontmatter}\n<!-- Updated by ${noteAuthor(knowledgeDir)} on ${new Date().toISOString().slice(0, 10)} -->\n${newBody}\n`;
+              wfs(existingPath, updatedContent);
+              console.error(`✓ updated existing learning (score: ${best.score.toFixed(2)}): ${best.file_path}`);
+              // Commit + push the updated file directly.
+              const { spawnSync: _ssu } = await import('node:child_process');
+              const { WINHIDE: WH } = await import('./util/child-process.js');
+              _ssu('git', ['-C', knowledgeDir, 'add', best.file_path], { ...WH, stdio: 'ignore' });
+              const commitU = _ssu('git', ['-C', knowledgeDir, 'commit', '-m', `update: ${opts.title}`], { ...WH, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+              if (commitU.status === 0) {
+                let pushU = _ssu('git', ['-C', knowledgeDir, 'push'], { ...WH, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+                if (pushU.status !== 0) {
+                  _ssu('git', ['-C', knowledgeDir, 'pull', '--rebase', '--quiet'], { ...WH, stdio: 'ignore' });
+                  pushU = _ssu('git', ['-C', knowledgeDir, 'push'], { ...WH, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+                }
+                if (pushU.status === 0) console.error(`✓ pushed update to knowledge repo`);
+                else console.error(`⚠ update committed but push failed — run: git -C ${knowledgeDir} push`);
+              }
+              return; // Done — skip the normal save flow.
+            }
+          } catch { /* file not readable — fall through to normal save */ }
+        }
+      } catch { /* semantic index not ready — skip check */ }
       }
-    }
+      }
 
     // 2. AUTO-DETECT related .md files in knowledge repo to add to touches.
     const knowledgeMdTouches: string[] = [];
