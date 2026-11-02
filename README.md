@@ -62,7 +62,7 @@ npm install -g @trailhq/trail-code && trail init
 Este fork extiende `@trailhq/trail-code` con mejoras específicas para equipos que usan **Windows**, **GitLab** y flujos de trabajo multi-repo.
 
 ```bash
-npm install -g github:jastorgaexterno/Trail-Code --ignore-scripts && trail init
+npm install -g trail-code-detacoop --ignore-scripts && trail init
 ```
 
 ### Diferencias con el upstream
@@ -132,7 +132,7 @@ Desarrollador B inicia sesión:
 
 ```bash
 # Instalar desde GitHub (--ignore-scripts evita compilación de binarios nativos)
-npm install -g github:jastorgaexterno/Trail-Code --ignore-scripts
+npm install -g trail-code-detacoop --ignore-scripts
 
 # Inicializar workspace o repo
 cd /ruta/al/workspace       # Linux/WSL/macOS

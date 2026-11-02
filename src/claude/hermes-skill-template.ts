@@ -143,6 +143,6 @@ mcp_servers:
       - /ruta/al/workspace
 \`\`\`
 
-Si \`trail\` no está instalado: \`npm install -g github:jastorgaexterno/Trail-Code --ignore-scripts\`
+Si \`trail\` no está instalado: \`npm install -g trail-code-detacoop --ignore-scripts\`
 `, brand);
 }
