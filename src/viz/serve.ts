@@ -19,6 +19,7 @@ export interface VizServerOptions {
   viewerDir: string;
   port: number;
   repoName: string;
+  wiringOverride?: string; // pre-filtered wiring.json path
 }
 
 export interface VizServer {
@@ -82,12 +83,13 @@ export async function startVizServer(opts: VizServerOptions): Promise<VizServer>
 
     if (path === "/api/code-graph") {
       const file = join(opts.contextDir, ".graph", "wiring.json");
+      const wiringFile = opts.wiringOverride ?? file;
       if (!existsSync(file)) {
         sendJson(res, 404, { error: `no wiring graph in this context dir — run \`${cmd("graft build")}\` first` });
         return;
       }
       try {
-        const parsed = JSON.parse(readFileSync(file, "utf8"));
+        const parsed = JSON.parse(readFileSync(wiringFile, "utf8"));
         if (parsed?.meta?.version !== 1) {
           sendJson(res, 404, { error: `wiring.json has an unsupported version — regenerate with \`${cmd("graft build")}\`` });
           return;

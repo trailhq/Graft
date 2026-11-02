@@ -1186,6 +1186,32 @@ program
     }
     const viewerDir = fileURLToPath(new URL("./viewer/", import.meta.url)); // prebuilt
 
+    // Filter tests from wiring.json unless --include-tests (applies to single repo and workspace).
+    const isTestPath = (p: string) => /\.(test|spec)\.[jt]sx?$|[\\/](__tests__|tests?|specs?)[\\/]|\.Tests\.cs$/i.test(p ?? '');
+    let wiringOverride: string | undefined;
+    if (!opts.includeTests) {
+      const { readFileSync: rfs2, writeFileSync: wfs2, mkdirSync: mks2 } = await import('node:fs');
+      const { join: pj2 } = await import('node:path');
+      const srcWiring = pj2(contextDir, '.graph', 'wiring.json');
+      if (existsSync(srcWiring)) {
+        try {
+          const w = JSON.parse(rfs2(srcWiring, 'utf8'));
+          if (w?.meta?.version === 1) {
+            const filteredNodes = (w.nodes ?? []).filter((n: any) => !isTestPath(n.path ?? n.id ?? ''));
+            const filteredIds = new Set(filteredNodes.map((n: any) => n.id));
+            const filteredEdges = (w.edges ?? []).filter((e: any) => filteredIds.has(e.source) && filteredIds.has(e.target));
+            const filtered = { ...w, meta: { ...w.meta, nodeCount: filteredNodes.length, edgeCount: filteredEdges.length }, nodes: filteredNodes, edges: filteredEdges };
+            const tmpPath = pj2(contextDir, '.graph', 'wiring-viz.json');
+            mks2(pj2(contextDir, '.graph'), { recursive: true });
+            wfs2(tmpPath, JSON.stringify(filtered));
+            wiringOverride = tmpPath;
+            const removed = (w.nodes ?? []).length - filteredNodes.length;
+            if (removed > 0) console.error(`· viz: ${removed} test nodes hidden (use --include-tests to show)`);
+          }
+        } catch { /* skip — serve original */ }
+      }
+    }
+
     if (opts.export) {
       const { exportViz } = await import("./viz/export.js");
       const out = exportViz({
@@ -1208,6 +1234,7 @@ program
       viewerDir,
       port: Number(opts.port),
       repoName: basename(root),
+      wiringOverride,
     });
     console.log(`${cmd("graft viz")} → ${srv.url}  (ctrl-c to stop)`);
     if (opts.open) {
