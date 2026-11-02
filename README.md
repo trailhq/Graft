@@ -57,12 +57,12 @@ npm install -g @trailhq/trail-code && trail init
 
 ---
 
-## @detacoop/trail-code — Fork DETACOOP
+## Fork DETACOOP — trail-code
 
 Este fork extiende `@trailhq/trail-code` con mejoras específicas para equipos que usan **Windows**, **GitLab** y flujos de trabajo multi-repo.
 
 ```bash
-npm install -g trail-code-detacoop --ignore-scripts && trail init
+npm install -g github:jastorgaexterno/Trail-Code --ignore-scripts && trail init
 ```
 
 ### Diferencias con el upstream
@@ -126,21 +126,41 @@ Desarrollador B inicia sesión:
   → el learning de A ya está disponible para trail ask
 ```
 
-### Instalación (Windows)
+### Instalación
+
+**Windows / Linux / WSL / macOS** — el comando es el mismo:
 
 ```bash
-# Instalar (sin --ignore-scripts falla en Windows por scripts de compilación)
-npm install -g @detacoop/trail-code --ignore-scripts
+# Instalar desde GitHub (--ignore-scripts evita compilación de binarios nativos)
+npm install -g github:jastorgaexterno/Trail-Code --ignore-scripts
 
 # Inicializar workspace o repo
-cd C:/ruta/al/workspace
-trail init
+cd /ruta/al/workspace       # Linux/WSL/macOS
+# cd C:/ruta/al/workspace   # Windows
+trail init --agents claude hermes   # solo los agentes que usás
 
 # Configurar knowledge repo compartido (una vez por máquina)
 trail config knowledge-repo add https://gitlab.com/detacoop/equipo-desarrolladores/detacoop-knowledge
 
 # Buildear grafo + semántico
 trail build
+```
+
+**MCP server en Hermes — Windows:**
+```yaml
+mcp_servers:
+  trail:
+    command: C:/Users/<user>/AppData/Roaming/npm/trail.cmd
+    args: [mcp, "C:/ruta/al/workspace"]
+    env: { PYTHONUTF8: "1" }
+```
+
+**MCP server en Hermes — Linux/WSL/macOS:**
+```yaml
+mcp_servers:
+  trail:
+    command: trail
+    args: [mcp, /ruta/al/workspace]
 ```
 
 ---

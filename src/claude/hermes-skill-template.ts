@@ -121,6 +121,7 @@ trail check --base origin/develop   # contra otro branch
 
 El servidor trail debe estar registrado en la config de Hermes:
 
+**Windows:**
 \`\`\`yaml
 mcp_servers:
   trail:
@@ -132,6 +133,16 @@ mcp_servers:
       PYTHONUTF8: "1"
 \`\`\`
 
-Si \`trail\` no está instalado: \`npm install -g trail-code-detacoop --ignore-scripts\`
+**Linux / WSL / macOS:**
+\`\`\`yaml
+mcp_servers:
+  trail:
+    command: trail
+    args:
+      - mcp
+      - /ruta/al/workspace
+\`\`\`
+
+Si \`trail\` no está instalado: \`npm install -g github:jastorgaexterno/Trail-Code --ignore-scripts\`
 `, brand);
 }
