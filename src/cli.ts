@@ -1116,9 +1116,9 @@ program
     // Workspace: federate all children's wiring.json into a single in-memory file for viz.
     const { readWorkspace: readWs } = await import('./graph/workspace.js');
     const ws = readWs(root);
-    if (ws && ws.children.length > 0 && !existsSync(join(contextDir, '.graph', 'wiring.json'))) {
+    if (ws && ws.children.length > 0) {
       const { join: pj } = await import('node:path');
-      const { writeFileSync, mkdirSync } = await import('node:fs');
+      const { writeFileSync, mkdirSync, readFileSync: rfs } = await import('node:fs');
       const allNodes: unknown[] = [];
       const allEdges: unknown[] = [];
       const allLangs = new Set<string>();
@@ -1128,7 +1128,7 @@ program
         const wiringPath = pj(childCtx, '.graph', 'wiring.json');
         if (!existsSync(wiringPath)) continue;
         try {
-          const w = JSON.parse(readFileSync(wiringPath, 'utf8'));
+          const w = JSON.parse(rfs(wiringPath, 'utf8'));
           if (w?.meta?.version !== 1) continue;
           // Prefix node ids and paths with child name to avoid collisions.
           for (const n of (w.nodes ?? [])) allNodes.push({ ...n, id: `${child}/${n.id}`, path: n.path ? `${child}/${n.path}` : n.path });
@@ -1141,10 +1141,22 @@ program
         const federated = { meta: { version: 1, nodeCount: allNodes.length, edgeCount: allEdges.length, languages: [...allLangs] }, nodes: allNodes, edges: allEdges };
         const tmpDir = pj(contextDir, '.graph');
         mkdirSync(tmpDir, { recursive: true });
-        // Write as wiring.json so startVizServer finds it at the expected path.
+        // Write as wiring.json so startVizServer finds it at the expected path (Code tab).
         const tmpPath = pj(tmpDir, 'wiring.json');
         writeFileSync(tmpPath, JSON.stringify(federated));
         federatedWiringPath = tmpPath;
+        // Federation of context cards (.md) for the Context tab.
+        const { readdirSync, copyFileSync } = await import('node:fs');
+        for (const child of ws.children) {
+          const childCtx = contextDirFor(pj(root, child));
+          if (!existsSync(childCtx)) continue;
+          try {
+            for (const f of readdirSync(childCtx)) {
+              if (!f.endsWith('.md')) continue;
+              copyFileSync(pj(childCtx, f), pj(contextDir, `${child.replace(/\//g, '__')}__${f}`));
+            }
+          } catch { /* skip */ }
+        }
         console.error(`· workspace viz: federating ${childrenWithGraph} repos (${allNodes.length} nodes, ${allEdges.length} edges)`);
       }
     }
