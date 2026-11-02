@@ -3,6 +3,7 @@
  * stdout carries protocol messages ONLY; diagnostics go to stderr.
  */
 import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 import { TOOLS, callTool } from './tools.js';
 import { mcpInstructions } from './instructions.js';
 import { hasGraftIndex } from '../graph/root.js';
@@ -140,6 +141,9 @@ export function startMcpServer(root: string, dirOverride?: string, version = '0'
     (brainsOnly ? [] : advertised(root, dirOverride)).map((t) => ({ name: inBrand(t.name), description: inBrand(t.description), inputSchema: t.inputSchema }));
 
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  // Client workspace root — captured from MCP initialize.roots[0].uri.
+  // Used as default --in scope so queries auto-narrow to the client's project.
+  let clientRoot: string | null = null;
   rl.on('line', (line) => {
     const text = line.trim();
     if (!text) return;
@@ -155,6 +159,14 @@ export function startMcpServer(root: string, dirOverride?: string, version = '0'
     const paired = workspace.connected();
     switch (method) {
       case 'initialize': {
+        // Capture the client's workspace root from roots[0].uri (MCP spec 2024-11-05+).
+        // Hermes and Claude Code both send roots on initialize.
+        const roots = params?.roots as Array<{ uri?: string }> | undefined;
+        if (roots?.[0]?.uri) {
+          try {
+            clientRoot = fileURLToPath(roots[0].uri);
+          } catch { /* non-file URI — ignore */ }
+        }
         const local = [upkeep.length ? upkeep.join('\n') : '', brainsOnly ? '' : mcpInstructions()];
         const answer = (remote: string[]) =>
           reply(id, {
@@ -230,7 +242,9 @@ export function startMcpServer(root: string, dirOverride?: string, version = '0'
         // graph/refresh.ts). `callTool` absorbs its own errors, so the only thing
         // that can reject here is a bug — surface it as a JSON-RPC error rather
         // than an unhandled rejection that kills the server.
-        callTool(root, name, args, dirOverride).then(
+        // Auto-inject --in from clientRoot when not provided by the agent.
+        const argsWithScope = injectClientScope(args, root, clientRoot);
+        callTool(root, name, argsWithScope, dirOverride).then(
           (r) => {
             // No `hit`: `isError` means the tool failed, which is not the same
             // question as "did the graph have an answer". Absent beats wrong.
@@ -251,4 +265,22 @@ export function startMcpServer(root: string, dirOverride?: string, version = '0'
     }
   });
   process.stdin.on('end', () => process.exit(0));
+}
+
+/**
+ * If the agent didn't supply an `in` param, derive it from the client's workspace root.
+ * Example: serverRoot = C:/Dev, clientRoot = C:/Dev/default-core/frontend → in = "default-core/frontend"
+ * Only injects for tools that accept an `in` param (find_code, search_semantic, trace_calls, find_all).
+ */
+function injectClientScope(
+  args: Record<string, unknown>,
+  serverRoot: string,
+  clientRoot: string | null,
+): Record<string, unknown> {
+  if (args['in'] != null || !clientRoot) return args;
+  const server = serverRoot.replace(/\\/g, '/').replace(/\/$/, '');
+  const client = clientRoot.replace(/\\/g, '/').replace(/\/$/, '');
+  if (!client.startsWith(server + '/') || client === server) return args;
+  const rel = client.slice(server.length + 1);
+  return { ...args, in: rel };
 }
