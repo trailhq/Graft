@@ -1092,10 +1092,12 @@ program
   .argument(...DIR_ARG)
   .option("-p, --port <port>", "port to serve on", "4400")
   .option("--no-open", "don't open the browser")
+  .option("--only <repos>", "workspace: show only these child repos (comma-separated, e.g. frontend,backend)")
+  .option("--exclude <repos>", "workspace: exclude these child repos (comma-separated)")
   .option("--export <dir>", "write one self-contained index.html instead of serving (for CI, GitHub Pages, or a build artifact)")
   .option("--title <text>", "subtitle shown beside the repo name in an exported page (e.g. \"PR #151\")")
   .option("--tabs <list>", "tabs the exported page offers, comma separated: context,code,outline (default: all three)")
-  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; export?: string; title?: string; tabs?: string }) => {
+  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; only?: string; exclude?: string; export?: string; title?: string; tabs?: string }) => {
     // Flags are checked before the repository is: a typo'd `--tabs` is a mistake
     // in the command the caller just typed, and telling them to go build an index
     // first sends them off to fix the wrong thing.
@@ -1119,11 +1121,21 @@ program
     if (ws && ws.children.length > 0) {
       const { join: pj } = await import('node:path');
       const { writeFileSync, mkdirSync, readFileSync: rfs } = await import('node:fs');
+      // Apply --only / --exclude filters.
+      const onlySet = opts.only ? new Set(opts.only.split(',').map(s => s.trim())) : null;
+      const excludeSet = opts.exclude ? new Set(opts.exclude.split(',').map(s => s.trim())) : null;
+      const children = ws.children.filter(c => {
+        const name = c.replace(/\//g, '/'); // keep as-is for matching
+        if (onlySet && !onlySet.has(c) && !onlySet.has(c.split('/').pop()!)) return false;
+        if (excludeSet && (excludeSet.has(c) || excludeSet.has(c.split('/').pop()!))) return false;
+        return true;
+      });
+      if (onlySet || excludeSet) console.error(`· workspace viz: showing ${children.length}/${ws.children.length} repos: ${children.join(', ')}`);
       const allNodes: unknown[] = [];
       const allEdges: unknown[] = [];
       const allLangs = new Set<string>();
       let childrenWithGraph = 0;
-      for (const child of ws.children) {
+      for (const child of children) {
         const childCtx = contextDirFor(pj(root, child));
         const wiringPath = pj(childCtx, '.graph', 'wiring.json');
         if (!existsSync(wiringPath)) continue;
@@ -1147,7 +1159,7 @@ program
         federatedWiringPath = tmpPath;
         // Federation of context cards (.md) for the Context tab.
         const { readdirSync, copyFileSync } = await import('node:fs');
-        for (const child of ws.children) {
+        for (const child of children) {
           const childCtx = contextDirFor(pj(root, child));
           if (!existsSync(childCtx)) continue;
           try {
