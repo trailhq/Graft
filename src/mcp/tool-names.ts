@@ -14,6 +14,8 @@ export const GRAFT_MCP_TOOL_CANONICAL = [
   'graft_repo_map',
   'graft_check_freshness',
   'graft_search_semantic',
+  'graft_build',
+  'graft_set_scope',
 ] as const;
 
 /**

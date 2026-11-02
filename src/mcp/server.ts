@@ -165,6 +165,7 @@ export function startMcpServer(root: string, dirOverride?: string, version = '0'
         if (roots?.[0]?.uri) {
           try {
             clientRoot = fileURLToPath(roots[0].uri);
+            process.stderr.write(`[trail-scope] clientRoot from roots: ${clientRoot}\n`);
           } catch { /* non-file URI — ignore */ }
         }
         const local = [upkeep.length ? upkeep.join('\n') : '', brainsOnly ? '' : mcpInstructions()];
@@ -236,6 +237,20 @@ export function startMcpServer(root: string, dirOverride?: string, version = '0'
         }
         if (brainsOnly) {
           reply(id, { content: [{ type: 'text', text: `this server answers your Trail workspace's tools only; ${name} isn't one` }], isError: true });
+          return;
+        }
+        // trail_set_scope: update clientRoot for this session without going to callTool.
+        if (canonicalToolName(name) === 'trail_set_scope') {
+          const p = String(args['path'] ?? '').replace(/\\/g, '/').replace(/\/$/, '');
+          const srv = root.replace(/\\/g, '/').replace(/\/$/, '');
+          if (p.startsWith(srv + '/')) {
+            clientRoot = p.replace(/\//g, process.platform === 'win32' ? '\\' : '/').replace(/\\/g, '/');
+            // Store native path
+            clientRoot = String(args['path'] ?? '');
+            reply(id, { content: [{ type: 'text', text: `scope set to: ${p.slice(srv.length + 1)} — all queries will narrow to this path automatically` }], isError: false });
+          } else {
+            reply(id, { content: [{ type: 'text', text: `path "${p}" is not under the server workspace "${srv}" — scope unchanged` }], isError: true });
+          }
           return;
         }
         // Async because a tool call may rebuild the graph first (see

@@ -47,6 +47,17 @@ function unknownSymbolText(query: string): string {
 
 export const TOOLS: ToolDef[] = [
   {
+    name: 'trail_set_scope',
+    description: 'Set the default scope for all subsequent trail queries in this session. Call once at session start with the current working directory. All trail_find_code, trail_search_semantic, trail_trace_calls and trail_find_all calls will automatically narrow to this path without needing an explicit `in` parameter.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path of the current project/workspace (e.g. C:/Users/user/Desarrollo/default-core/frontend). The server computes the relative scope automatically.' },
+      },
+      required: ['path'],
+    },
+  },
+  {
     name: 'trail_find_code',
     description:
       'Query the repo context graph in plain words. Returns ranked nodes with exact file:line spans and the relevant source inlined — usually the full answer, no file reads needed.',
