@@ -60,10 +60,15 @@ function kumarChangesBackoff(kumar: string, branch = "kumar/backoff"): void {
   git(kumar, "push", "-q", "origin", branch);
 }
 
-/** Anirudh edits one function the way Claude Code's Edit tool would, and returns its tool input. */
+/**
+ * Anirudh edits one function the way Claude Code's Edit tool would, and returns its tool input.
+ * Like Edit, it keeps the file's line endings: CRLF where git checks out with core.autocrlf, as on Windows.
+ */
 function anirudhEdits(anirudh: string, oldText: string, newText: string): { file_path: string; old_string: string; new_string: string } {
   const file = join(anirudh, "src", "retry.ts");
-  writeFileSync(file, readFileSync(file, "utf8").replace(oldText, newText));
+  const before = readFileSync(file, "utf8");
+  const eol = (s: string) => (before.includes("\r\n") ? s.replace(/\n/g, "\r\n") : s);
+  writeFileSync(file, before.replace(eol(oldText), eol(newText)));
   return { file_path: file, old_string: oldText, new_string: newText };
 }
 
@@ -267,4 +272,5 @@ test("edited lines leave out the lines an edit kept from the old text to anchor 
   const source = "}\n\n// What f returns.\nfunc f() {\n\treturn 1\n}\n";
   assert.deepEqual(editedLines({ old_string: "}\n\nfunc f() {", new_string: "}\n\n// What f returns.\nfunc f() {" }, source), [{ start: 3, end: 3 }]);
   assert.deepEqual(editedLines({ old_string: "func f() {\n\tx := 2\n\treturn 1", new_string: "func f() {\n\treturn 1" }, source), [{ start: 4, end: 5 }], "a deletion between kept lines marks the two");
+  assert.deepEqual(editedLines({ old_string: "}\n\nfunc f() {", new_string: "}\n\n// What f returns.\nfunc f() {" }, source.replace(/\n/g, "\r\n")), [{ start: 3, end: 3 }], "a CRLF file, as Windows checks out");
 });

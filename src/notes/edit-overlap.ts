@@ -233,17 +233,20 @@ function anchors(oldText: unknown, newText: string): [number, number] {
  * that made it: Claude Code's Write (the whole file), Edit and MultiEdit (where
  * each new text now sits, less the lines it kept from the old text). An edit
  * that only deletes leaves nothing to find, unless it kept lines around the
- * deletion: then it marks those two, as `changedLines` does.
+ * deletion: then it marks those two, as `changedLines` does. A CRLF file is
+ * searched as LF: Edit's text has `\n` and is written in the file's own line endings.
  */
-export function editedLines(toolInput: any, source: string): Lines[] {
+export function editedLines(toolInput: any, file: string): Lines[] {
+  const lf = (t: string) => t.replace(/\r\n/g, "\n");
+  const source = lf(file);
   if (typeof toolInput?.content === "string") return [{ start: 1, end: lineAt(source, source.length) }];
   const edits: any[] = Array.isArray(toolInput?.edits) ? toolInput.edits : [toolInput];
   const out: Lines[] = [];
   for (const e of edits) {
-    const text = e?.new_string;
-    if (typeof text !== "string" || !text) continue;
+    if (typeof e?.new_string !== "string" || !e.new_string) continue;
+    const text = lf(e.new_string);
     const span = text.split("\n").length - 1;
-    const [head, tail] = anchors(e.old_string, text);
+    const [head, tail] = anchors(typeof e.old_string === "string" ? lf(e.old_string) : null, text);
     for (let i = source.indexOf(text); i !== -1; i = e.replace_all ? source.indexOf(text, i + text.length) : -1) {
       const start = lineAt(source, i);
       out.push(head + tail > span ? { start: Math.max(1, start + head - 1), end: start + head } : { start: start + head, end: start + span - tail });

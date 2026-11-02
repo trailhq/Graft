@@ -115,7 +115,8 @@ function mainCheckout(checkout: string, dirs: GitDirs | null): string {
  * a Claude Desktop worktree session has the main checkout as its project while
  * Claude works on the worktree's copy. Null for a file in `checkout` itself,
  * outside git, or in another repo (a submodule included). The shared git dirs
- * are compared by real path, since git records a worktree's by its real path.
+ * are compared by real path, since git records a worktree's by its real path:
+ * the OS's (`.native`), which on Windows also expands an 8.3 short name.
  */
 export function otherCheckout(checkout: string, file: string): string | null {
   const top = checkoutRoot(dirname(file));
@@ -124,7 +125,7 @@ export function otherCheckout(checkout: string, file: string): string | null {
   const mine = gitDirs(root);
   const theirs = gitDirs(top);
   try {
-    return mine && theirs && realpathSync(mine.commonDir) === realpathSync(theirs.commonDir) ? top : null;
+    return mine && theirs && realpathSync.native(mine.commonDir) === realpathSync.native(theirs.commonDir) ? top : null;
   } catch {
     return null;
   }
