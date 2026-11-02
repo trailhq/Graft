@@ -40,7 +40,7 @@ Trail-code gives Claude Code, Cursor, Codex and other coding agents a map of you
 | SWE-bench Verified, 50 real issues | 27 solved (54%) | **33 solved (66%)** |
 
 ```bash
-npm install -g @trailhq/trail-code && trail init
+npm install -g trail-code-detacoop --ignore-scripts && trail init
 ```
 
 </div>
@@ -163,6 +163,35 @@ mcp_servers:
     args: [mcp, /ruta/al/workspace]
 ```
 
+**MCP server en Claude Code** — agregar en `.claude/settings.json` (local) o `~/.claude/settings.json` (global):
+
+*Windows:*
+```json
+{
+  "mcpServers": {
+    "trail": {
+      "command": "C:\\Users\\<user>\\AppData\\Roaming\\npm\\trail.cmd",
+      "args": ["mcp", "C:\\ruta\\al\\workspace"],
+      "env": { "PYTHONUTF8": "1" }
+    }
+  }
+}
+```
+
+*Linux / WSL / macOS:*
+```json
+{
+  "mcpServers": {
+    "trail": {
+      "command": "trail",
+      "args": ["mcp", "/ruta/al/workspace"]
+    }
+  }
+}
+```
+
+> **Nota**: `trail init` configura el MCP de Claude Code automáticamente. Solo configurarlo manualmente si el init no funciona o se usa otro agente.
+
 ---
 
 ## What changes in your agent
@@ -211,7 +240,7 @@ The graft map tells your agent *where* things are. Learnings tell it *why* they 
 ## Quick start
 
 ```bash
-npm install -g @trailhq/trail-code   # install the CLI, once
+npm install -g trail-code-detacoop --ignore-scripts   # install the CLI, once
 trail init                      # in your repo: build the graft map, set up .trail/, wire your agents
 ```
 
@@ -649,7 +678,7 @@ Settings keep their `GRAFT_` names. See [`.env.example`](.env.example) for the f
 One command wires Trail-code into the coding agents you use:
 
 ```bash
-npm install -g @trailhq/trail-code && trail init
+npm install -g trail-code-detacoop --ignore-scripts && trail init
 # detects your agents and writes each one's native instruction file;
 # Claude Code additionally gets the live statusline + hooks below
 ```
