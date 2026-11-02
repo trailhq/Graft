@@ -1666,7 +1666,6 @@ async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
       } else {
         console.log(`⚠ committed but push failed — run: git -C ${repo} pull --rebase && git -C ${repo} push`);
       }
-      }
     } else {
       console.log(`⚠ could not auto-commit — run: git -C ${repo} add .trail/learnings/ && git commit -m "${commitMsg}"`);
     }
