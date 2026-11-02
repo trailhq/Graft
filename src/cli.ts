@@ -1464,7 +1464,7 @@ async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
       try {
         const { searchSemantic } = await import('./ask/semantic.js');
         const similar = await searchSemantic(opts.title, knowledgeDb, 3);
-        const strongMatch = similar.filter(h => h.score > 0.55);
+        const strongMatch = similar.filter(h => h.score > 0.55 && h.file_path.includes('.trail/learnings/'));
         if (strongMatch.length > 0 && !opts.anyway) {
           const best = strongMatch[0]!;
           const { readFileSync: rfs, writeFileSync: wfs } = await import('node:fs');
