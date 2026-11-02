@@ -1092,13 +1092,13 @@ program
   .argument(...DIR_ARG)
   .option("-p, --port <port>", "port to serve on", "4400")
   .option("--no-open", "don't open the browser")
-  .option("--only <repos>", "workspace: show only these child repos (comma-separated, e.g. frontend,backend)")
-  .option("--exclude <repos>", "workspace: exclude these child repos (comma-separated)")
+  .option("--repos <list>", "workspace: show only these child repos (comma-separated, e.g. frontend,backend)")
+  .option("--skip <list>", "workspace: exclude these child repos (comma-separated)")
   .option("--include-tests", "include test files in the graph (excluded by default)")
   .option("--export <dir>", "write one self-contained index.html instead of serving (for CI, GitHub Pages, or a build artifact)")
   .option("--title <text>", "subtitle shown beside the repo name in an exported page (e.g. \"PR #151\")")
   .option("--tabs <list>", "tabs the exported page offers, comma separated: context,code,outline (default: all three)")
-  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; only?: string; exclude?: string; includeTests?: boolean; export?: string; title?: string; tabs?: string }) => {
+  .action(async (dirArg: string | undefined, opts: { port: string; open: boolean; repos?: string; skip?: string; includeTests?: boolean; export?: string; title?: string; tabs?: string }) => {
     // Flags are checked before the repository is: a typo'd `--tabs` is a mistake
     // in the command the caller just typed, and telling them to go build an index
     // first sends them off to fix the wrong thing.
@@ -1123,8 +1123,8 @@ program
       const { join: pj } = await import('node:path');
       const { writeFileSync, mkdirSync, readFileSync: rfs } = await import('node:fs');
       // Apply --only / --exclude filters.
-      const onlySet = opts.only ? new Set(opts.only.split(',').map(s => s.trim())) : null;
-      const excludeSet = opts.exclude ? new Set(opts.exclude.split(',').map(s => s.trim())) : null;
+      const onlySet = opts.repos ? new Set(String(opts.repos).split(',').map((s: string) => s.trim())) : null;
+      const excludeSet = opts.skip ? new Set(String(opts.skip).split(',').map((s: string) => s.trim())) : null;
       const children = ws.children.filter(c => {
         const name = c.replace(/\//g, '/'); // keep as-is for matching
         if (onlySet && !onlySet.has(c) && !onlySet.has(c.split('/').pop()!)) return false;
