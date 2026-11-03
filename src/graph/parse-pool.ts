@@ -24,7 +24,7 @@
  * one respawn credit each. A child that exits because the pool told it to stop
  * costs nothing.
  */
-import { fork, type ChildProcess, type ForkOptions } from "node:child_process";
+import { execFileSync, fork, type ChildProcess, type ForkOptions } from "node:child_process";
 import { existsSync } from "node:fs";
 import { availableParallelism, freemem } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -63,14 +63,50 @@ export function parseWorkerEntry(): string {
   return existsSync(ts) ? ts : js;
 }
 
+/** Bytes in `vm_stat` output that the kernel can hand a new process without
+ * swapping: free, speculative and inactive pages, the measure psutil and Zabbix
+ * use for "available" on macOS. Null when the page size or the free or inactive
+ * count is missing, so the caller falls back instead of trusting a partial read. */
+export function parseVmStatAvailable(text: string): number | null {
+  const page = /page size of (\d+) bytes/.exec(text);
+  const count = (label: string): number | null => {
+    const m = new RegExp(`^Pages ${label}:\\s+(\\d+)\\.`, "m").exec(text);
+    return m ? Number(m[1]) : null;
+  };
+  const free = count("free");
+  const inactive = count("inactive");
+  if (!page || free === null || inactive === null) return null;
+  return (free + (count("speculative") ?? 0) + inactive) * Number(page[1]);
+}
+
+/** Memory a parser child could have. `os.freemem()` is right on Linux (libuv
+ * reads MemAvailable) and Windows, but on macOS it counts only free pages, never
+ * the inactive file cache the kernel reclaims on demand: on a busy 8-core Mac it
+ * said 0.59 GB with about 3 GB to spare, so `auto` never forked. There, read
+ * `vm_stat` instead, and keep `freemem` for when that read fails. */
+export function availableMemory(
+  platform: NodeJS.Platform = process.platform,
+  readVmStat: () => string = () => execFileSync("/usr/bin/vm_stat", { encoding: "utf8", timeout: 2000 }),
+  fallback: () => number = freemem,
+): number {
+  if (platform === "darwin") {
+    try {
+      const bytes = parseVmStatAvailable(readVmStat());
+      if (bytes !== null) return bytes;
+    } catch { /* no vm_stat: freemem below */ }
+  }
+  return fallback();
+}
+
 /** Children to fork for `files` files. 0 means in-thread, and 0 is the answer
  * unless `GRAFT_PARSE_WORKERS` says otherwise: `N` forces N, `auto` picks
- * `min(cores - 1, freemem / 300 MB, files / 200)`, anything else is in-thread. */
+ * `min(cores - 1, available memory / 300 MB, files / 200)` (see
+ * {@link availableMemory}), anything else is in-thread. */
 export function poolSize(
   files: number,
   env: NodeJS.ProcessEnv = process.env,
   cores = availableParallelism(),
-  freeBytes = freemem(),
+  freeBytes?: number,
 ): number {
   const v = (env.GRAFT_PARSE_WORKERS ?? "").trim();
   if (v === "") return 0;
@@ -80,7 +116,9 @@ export function poolSize(
   }
   if (files < PARSE_POOL_MIN_FILES) return 0;
   const byCores = cores - 1;
-  const byMemory = Math.floor(freeBytes / BYTES_PER_CHILD);
+  // Read only now: `auto` is the one answer that depends on it, and on macOS the
+  // read is a `vm_stat` process.
+  const byMemory = Math.floor((freeBytes ?? availableMemory()) / BYTES_PER_CHILD);
   const byWork = Math.ceil(files / FILES_PER_CHILD);
   const n = Math.min(byCores, byMemory, byWork);
   return n >= 2 ? n : 0;

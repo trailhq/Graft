@@ -119,7 +119,47 @@ test("a file edited between parse and summary is left pending, not summarized ag
 
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { PARSE_POOL_MIN_FILES, parseWorkerEntry, poolSize, runParsePool } from "../src/graph/parse-pool.js";
+import { PARSE_POOL_MIN_FILES, availableMemory, parseVmStatAvailable, parseWorkerEntry, poolSize, runParsePool } from "../src/graph/parse-pool.js";
+
+/** Real `vm_stat` output from an 8-core Mac, cut after the lines that matter.
+ * `os.freemem()` on that machine said 0.59 GB, which capped `auto` at one child
+ * (so, below the two-worker floor, none); about 3 GB was actually reclaimable. */
+const VM_STAT = [
+  "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
+  "Pages free:                                3884.",
+  "Pages active:                            184092.",
+  "Pages inactive:                          178214.",
+  "Pages speculative:                         4961.",
+  "Pages throttled:                              0.",
+  "Pages wired down:                        279244.",
+  "Pages purgeable:                              0.",
+  '"Translation faults":               57168973946.',
+].join("\n");
+
+test("parseVmStatAvailable: free + speculative + inactive pages, times the page size", () => {
+  assert.equal(parseVmStatAvailable(VM_STAT), (3884 + 4961 + 178214) * 16384);
+});
+
+test("parseVmStatAvailable: null when the page size or a needed count is missing", () => {
+  assert.equal(parseVmStatAvailable(""), null);
+  assert.equal(parseVmStatAvailable(VM_STAT.replace(/^Mach.*$/m, "Mach Virtual Memory Statistics:")), null);
+  assert.equal(parseVmStatAvailable(VM_STAT.replace(/^Pages inactive:.*$/m, "")), null);
+});
+
+test("availableMemory: macOS counts reclaimable pages; elsewhere, or when vm_stat fails, it is freemem", () => {
+  const never = (): string => { throw new Error("vm_stat must not run off macOS"); };
+  assert.equal(availableMemory("darwin", () => VM_STAT, () => 1), (3884 + 4961 + 178214) * 16384);
+  assert.equal(availableMemory("darwin", () => { throw new Error("no vm_stat"); }, () => 123), 123);
+  assert.equal(availableMemory("darwin", () => "garbage", () => 123), 123);
+  assert.equal(availableMemory("linux", never, () => 123), 123);
+  assert.equal(availableMemory("win32", never, () => 123), 123);
+});
+
+test("poolSize: the macOS reading above sizes auto by cores, not by the free pages alone", () => {
+  const avail = parseVmStatAvailable(VM_STAT)!;
+  assert.equal(poolSize(7546, { GRAFT_PARSE_WORKERS: "auto" }, 8, 0.59e9), 0, "freemem alone: no pool");
+  assert.equal(poolSize(7546, { GRAFT_PARSE_WORKERS: "auto" }, 8, avail), 7);
+});
 
 test("poolSize: 0 unless GRAFT_PARSE_WORKERS is set or the caller asks; then bounded by cores, memory and work", () => {
   assert.equal(poolSize(100_000, {}, 8, 64e9), 0, "never automatic");

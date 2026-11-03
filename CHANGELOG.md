@@ -22,8 +22,11 @@
   byte-identical to a single-process build, except that a file whose parse
   exceeds the 120 s per-file timeout is recorded as an error. Opt-in; the
   refresh that runs before a query never forks. `GRAFT_PARSE_WORKERS` sets
-  the default; `auto` is min(cores - 1, free memory / 300 MB, files / 200),
-  and stays in-process under 200 files or below 2 workers.
+  the default; `auto` is min(cores - 1, available memory / 300 MB, files / 200),
+  and stays in-process under 200 files or below 2 workers. On macOS, available
+  memory counts the inactive pages the kernel reclaims on demand (from
+  `vm_stat`), not just free ones: free alone left `auto` with no workers on
+  a busy Mac.
 
 ### Fixed
 

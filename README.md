@@ -650,7 +650,7 @@ trail map --max-dirs N               # raise/lower the number of directories sho
 #   GRAFT_NO_REFRESH=1               # same, for every command
 #   GRAFT_REFRESH=hash               # hash every file instead of trusting size+mtime
 #   GRAFT_PARSE_WORKERS=auto         # trail build only: parse in child processes (or a number); default in-process
-#                                    #   auto = min(cores-1, free memory / 300 MB, files / 200); in-process under 200 files or below 2 workers
+#                                    #   auto = min(cores-1, available memory / 300 MB, files / 200); in-process under 200 files or below 2 workers
 
 # learnings
 trail note --title "<about>" [dir]   # save a learning: what this session decided, tried and ruled out (the text on stdin)
