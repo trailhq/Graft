@@ -28,8 +28,18 @@ test("the extract cache is written as ASCII and reads back the same values", (t)
 
   const bytes = readFileSync(path);
   assert.ok(bytes.every((b) => b < 0x80), "every byte is ASCII");
-  assert.deepEqual(JSON.parse(bytes.toString("utf8")), JSON.parse(JSON.stringify(cache)), "the same JSON as before, escapes aside");
-  assert.deepEqual(readExtractCache(out), cache);
+  // NDJSON: a header line, then one `{rel, e}` line per file.
+  const [head, ...rows] = bytes.toString("utf8").split("\n").filter((l) => l !== "").map((l) => JSON.parse(l));
+  assert.deepEqual(head, { version: cache.version, extractor: cache.extractor });
+  assert.deepEqual(
+    Object.fromEntries(rows.map((r: { rel: string; e: unknown }) => [r.rel, r.e])),
+    JSON.parse(JSON.stringify(cache.files)),
+    "the same JSON values, escapes aside",
+  );
+  // `files` comes back prototype-less (a `__proto__` path stays a plain key):
+  // compare its entries, not its prototype.
+  const back = readExtractCache(out);
+  assert.deepEqual({ ...back, files: { ...back.files } }, cache);
 });
 
 test("the graph is written as ASCII and reads back the same values", () => {
