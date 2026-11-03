@@ -62,6 +62,24 @@ test("automatic refresh retains extension scope after an extractor change", asyn
   }
 });
 
+test("a query's rebuild child gets the saved extension selection", async () => {
+  const dir = mixedRepo();
+  const stub = join(dir, "refresh-run-stub.mjs");
+  const log = join(dir, "refresh-runs.log");
+  writeFileSync(stub, `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(log)}, process.argv[2] + "\\n");\n`);
+  try {
+    await buildGraph(dir, { extensions: [".go"] });
+    writeFileSync(join(dir, "main.go"), "package main\nfunc main() {}\nfunc other() {}\n");
+    process.env.GRAFT_TEST_REFRESH_RUN = stub;
+    assert.equal((await ensureFreshGraph(dir)).refreshed, true);
+    const runs = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(runs, [{ dir, extensions: [".go"] }]);
+  } finally {
+    delete process.env.GRAFT_TEST_REFRESH_RUN;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 for (const extension of [".go", "go", ".GO"]) {
   test(`build --extensions ${extension} limits the structural graph`, () => {
     const dir = mixedRepo();
