@@ -258,6 +258,12 @@ function runTrailInit(
       const hPath = hermesSkillPath(home);
       mkdirSync(dirname(hPath), { recursive: true });
       writeFileSync(hPath, hermesSkillTemplate('trail'));
+
+      // Also install the Hermes gateway hook for knowledge injection at session start.
+      // Lazy import — keeps the module out of the hot path for non-Hermes machines.
+      import('../knowledge/hermes-hook.js').then(({ writeHermesKnowledgeHook }) => {
+        writeHermesKnowledgeHook(home);
+      }).catch(() => { /* best-effort */ });
     }
   }
 

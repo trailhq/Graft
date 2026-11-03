@@ -65,14 +65,11 @@ no API key, $0).
 Run **in this order** before the first push on any branch:
 
 \`\`\`bash
-tsc -b                                   # types (includes test files — do NOT use --noEmit)
+<typecheck>                              # e.g. tsc -b (TS), go vet, cargo check, mypy
 <lint>                                   # e.g. bun run lint / npm run lint
 <tests>                                  # e.g. npx vitest run <module>
 graft check --base origin/<base-branch>  # blast radius: conflicts with other branches + learnings
 \`\`\`
-
-> **\`tsc -b\` vs \`--noEmit\`**: CI uses \`tsc -b\`, which compiles test files too.
-> \`--noEmit\` locally can pass clean even when CI fails (test fixtures not checked).
 
 \`graft check\` goes **last**, before the push — not after opening the PR.
 If it surfaces overlap with another active branch, mention it in the MR/PR description.`;

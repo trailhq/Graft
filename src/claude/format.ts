@@ -383,7 +383,13 @@ export const STANDING_CAP = 10;
  */
 export function standingDirective(notes: Note[]): string {
   if (!notes.length) return '';
-  const ordered = [...notes].sort((a, b) => Number(b.scope === 'personal') - Number(a.scope === 'personal') || b.date.localeCompare(a.date));
+  // Guardrails always first (must-hold invariants), then personal, then by date.
+  const ordered = [...notes].sort(
+    (a, b) =>
+      Number(isAlwaysFollow(b)) - Number(isAlwaysFollow(a)) ||
+      Number(b.scope === 'personal') - Number(a.scope === 'personal') ||
+      b.date.localeCompare(a.date),
+  );
   const shown = ordered.slice(0, STANDING_CAP);
   const lines = shown.map((n) => {
     const lead = flatLine(sectionLead(n.body, 'Decided'), 180);

@@ -21,7 +21,7 @@
  *  7. `label` = `prefix` (both "" for root); ordering is prefix-length desc,
  *     then lexicographic.
  */
-import { existsSync, readdirSync, readFileSync, type Dirent } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
 import { join, resolve } from "node:path";
 import { shouldSkipDir, walkDir } from "../ingest/fs.js";
 import { relPosix } from "../util/paths.js";
@@ -329,6 +329,13 @@ export function assertPrefixIndexed(graph: GraphV1, prefix: string): void {
  * pattern: e.g. `Desarrollo/default-core/frontend`, `Desarrollo/scandes/backend`).
  * Returned paths are relative to `root` (e.g. `"frontend"`, `"default-core/frontend"`).
  * Used by workspace federation. */
+/** True when `dir/.git` is a FILE (linked worktree pointer), not a directory.
+ * Worktrees must not appear as independent workspace children — they share the
+ * same repo as their main checkout and would cause duplicate indexing. */
+function isLinkedWorktree(gitPath: string): boolean {
+  try { return statSync(gitPath).isFile(); } catch { return false; }
+}
+
 export function discoverWorkspaceChildren(root: string): string[] {
   const absRoot = resolve(root);
   const includes = readIncludeDirs(absRoot);
@@ -341,9 +348,10 @@ export function discoverWorkspaceChildren(root: string): string[] {
   const children: string[] = [];
   for (const e of entries) {
     if (!e.isDirectory() || shouldSkipDir(e.name, includes)) continue;
-    if (existsSync(join(absRoot, e.name, ".git"))) {
-      // Direct git repo child
-      children.push(e.name);
+    const gitPath = join(absRoot, e.name, ".git");
+    if (existsSync(gitPath)) {
+      // Direct git child — skip if it's a linked worktree (same repo, different dir)
+      if (!isLinkedWorktree(gitPath)) children.push(e.name);
     } else {
       // Non-git subdir — check one level deeper (e.g. default-core/, scandes/)
       let nested: Dirent[];
@@ -353,7 +361,9 @@ export function discoverWorkspaceChildren(root: string): string[] {
         continue;
       }
       for (const n of nested) {
-        if (n.isDirectory() && !shouldSkipDir(n.name, includes) && existsSync(join(absRoot, e.name, n.name, ".git"))) {
+        if (!n.isDirectory() || shouldSkipDir(n.name, includes)) continue;
+        const nestedGit = join(absRoot, e.name, n.name, ".git");
+        if (existsSync(nestedGit) && !isLinkedWorktree(nestedGit)) {
           children.push(`${e.name}/${n.name}`);
         }
       }

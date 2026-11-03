@@ -1393,6 +1393,22 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
     // The pack is truly substitutive only in retriever mode (spans inlined), so
     // the "vs reading whole files" estimate is only honest here.
     result.saved = baselineFor(result.hits, corpus.graph);
+  } else if (opts.full && corpus.graph) {
+    // --full without --source: for section nodes, inline their stored body_text
+    // so the agent sees the full markdown section without opening the file.
+    // Code nodes have no body_text without --deep, so they're unaffected.
+    const bodyByPointer = new Map<string, string>();
+    for (const n of corpus.graph.nodes) {
+      if ((n.kind as string) === 'section' && n.body_text) {
+        bodyByPointer.set(`${n.path}:${n.span}`, n.body_text);
+      }
+    }
+    for (const h of result.hits) {
+      if (!h.code) {
+        const body = bodyByPointer.get(h.pointer);
+        if (body) h.code = body;
+      }
+    }
   }
   return result;
 }

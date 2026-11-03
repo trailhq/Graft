@@ -48,6 +48,8 @@ export interface WorkspaceBuildOptions {
   includeMd?: boolean;
   /** Repo-relative dirs to limit .md indexing to, persisted into each child. */
   mdOnlyDirs?: string[];
+  /** Whether to include openspec/changes/archive/ .md files; persisted into each child. */
+  includeOpenSpecArchive?: boolean;
   /** The npm package this runs from, for the fix in the native-parser notice. */
   packageName?: string;
 }
@@ -77,6 +79,9 @@ export async function runWorkspaceBuild(root: string, opts: WorkspaceBuildOption
     }
     if (opts.mdOnlyDirs && opts.mdOnlyDirs.length > 0) {
       childConfigPatch.mdOnlyDirs = opts.mdOnlyDirs;
+    }
+    if (opts.includeOpenSpecArchive !== undefined) {
+      childConfigPatch.includeOpenSpecArchive = opts.includeOpenSpecArchive;
     }
     if (Object.keys(childConfigPatch).length > 0) {
       patchBuildConfig(childDir, childConfigPatch);

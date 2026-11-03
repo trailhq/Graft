@@ -125,14 +125,11 @@ trail build --no-include-md # revertir
 Ejecutar **en este orden** antes del primer push de cualquier rama:
 
 \`\`\`bash
-tsc -b                                   # tipos (incluye test files — NO usar --noEmit)
+<typecheck>                              # ej. tsc -b (TS), go vet, cargo check, mypy
 <lint>                                   # ej. bun run lint / npm run lint
 <tests>                                  # ej. npx vitest run <módulo>
 trail check --base origin/<base>         # blast radius: conflictos con otras ramas y learnings
 \`\`\`
-
-> **\`tsc -b\` vs \`--noEmit\`**: el CI usa \`tsc -b\`, que sí compila los archivos de test.
-> \`--noEmit\` local puede pasar limpio aunque CI falle — usar \`tsc -b\` siempre.
 
 \`trail check\` va **al final**, antes del push — no después del MR.
 Si detecta solapamiento con otra rama activa, avisarle al reviewer en la descripción del MR.

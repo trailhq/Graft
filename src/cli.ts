@@ -34,7 +34,7 @@ import { committedAtBase, learningsAtBase, teammateEdits, withBaseLearnings } fr
 import { contextDirFor } from "./context/node-file.js";
 import { loadGraphCached } from "./graph/load.js";
 import { ensureFreshChildren, ensureFreshGraph, refreshNote } from "./graph/refresh.js";
-import { isWorkspaceBuildRoot, readWorkspace, writeWorkspace } from "./graph/workspace.js";
+import { isWorkspaceBuildRoot, loadWorkspaceGraphs, readWorkspace, writeWorkspace } from "./graph/workspace.js";
 import { NOT_GIT_LINE, NOT_GIT_PAIR_REFUSAL, homeFolderRefusal, isGitWorkTree } from "./init-guard.js";
 import { hasGraftIndex, nearestGraftRoot } from "./graph/root.js";
 import { unsupportedExtensions, supportedExtensions } from "./graph/source-files.js";
@@ -122,6 +122,26 @@ import {
 
 const program = new Command();
 const currentVersion = readCurrentVersion(import.meta.url);
+
+// When Commander prints an error (unknown option, missing required option, etc.)
+// append a hint so users know how to discover the available flags.
+program.configureOutput({
+  writeErr: (str) => {
+    process.stderr.write(str);
+  },
+  outputError: (str, write) => {
+    write(str);
+    // Append a --help hint when Commander exits with a parse error, so users
+    // know how to discover available flags instead of having to guess.
+    if (str.startsWith('error:')) {
+      const sub = process.argv[2];
+      const hint = sub && !sub.startsWith('-')
+        ? `Run 'trail ${sub} --help' to see available options.\n`
+        : `Run 'trail --help' to see available commands.\n`;
+      process.stderr.write(hint);
+    }
+  },
+});
 
 /**
  * Started as `trail` rather than `graft`. Decided once, before any command is
@@ -446,24 +466,43 @@ grouped(program.command("upgrade"), GROUP.setup)
 
 // `trail config`: workspace-level configuration (knowledge repos, etc.)
 grouped(program.command("config", { hidden: !TRAIL }), GROUP.setup)
-  .description("Read or update workspace configuration (workspace root only)")
+  .description("Read or update workspace or global trail configuration")
   .addCommand(
     (() => {
       const sub = new Command("knowledge-repo");
       sub
         .description("Add or remove a knowledge repo URL from this workspace's trail init auto-clone list")
-        .argument("<action>", "add | remove | list")
-        .argument("[url]", "Git remote URL of the knowledge repo (required for add/remove)")
+        .argument("<action>", "add | remove | list | set-global | get-global")
+        .argument("[url]", "Git remote URL of the knowledge repo (required for add/remove/set-global)")
         .argument("[dir]", "repo or workspace root (default: cwd)", ".")
         .action(async (action: string, url: string | undefined, dir: string) => {
           const root = resolve(dir);
           // Works in any trail-wired directory: repo, workspace, or plain folder.
           // When it's a git repo, .trail/knowledge-repos.json is committeable.
           const { readKnowledgeRepos, writeKnowledgeRepos } = await import('./graph/workspace.js');
+          const { readGlobalConfig: rgcCmd, patchGlobalConfig: pgcCmd } = await import('./util/global-config.js');
+
+          // Global sub-commands — operate on ~/.trail/config.json.
+          if (action === "set-global") {
+            if (!url) { console.error("✗ url is required for set-global"); process.exitCode = 1; return; }
+            pgcCmd({ knowledgeRepo: url });
+            console.error(`✓ global knowledge repo set: ${url}`);
+            console.error(`  Saved to ~/.trail/config.json — applies to all workspaces`);
+            return;
+          }
+          if (action === "get-global") {
+            const g = rgcCmd().knowledgeRepo;
+            if (g) console.error(`  global: ${g}`);
+            else console.error(`· no global knowledge repo configured`);
+            return;
+          }
+
           const repos = readKnowledgeRepos(root);
           if (action === "list") {
-            if (repos.length === 0) console.error("· no knowledge repos configured");
-            else repos.forEach((r) => console.error(`  ${r}`));
+            const global = rgcCmd().knowledgeRepo;
+            if (repos.length === 0 && !global) console.error("· no knowledge repos configured");
+            repos.forEach((r) => console.error(`  workspace: ${r}`));
+            if (global) console.error(`  global:    ${global}`);
             return;
           }
           if (!url) {
@@ -493,7 +532,7 @@ grouped(program.command("config", { hidden: !TRAIL }), GROUP.setup)
             writeKnowledgeRepos(root, next);
             console.error(`✓ removed: ${url}`);
           } else {
-            console.error(`✗ unknown action "${action}" — use add, remove or list`);
+            console.error(`✗ unknown action "${action}" — use add, remove, list, set-global, get-global`);
             process.exitCode = 1;
           }
         });
@@ -592,6 +631,10 @@ grouped(program.command("build"), GROUP.setup)
     (val: string, prev: string[]) => [...prev, val],
     [] as string[],
   )
+  .option(
+    "--include-openspec-archive",
+    "also index openspec/changes/archive/ .md files (excluded by default); persisted",
+  )
   .action(async (
     dir: string,
     opts: {
@@ -610,6 +653,7 @@ grouped(program.command("build"), GROUP.setup)
       followNestedRepos?: boolean;
       includeMd?: boolean;
       mdOnlyDir?: string[];
+      includeOpenSpecArchive?: boolean;
       gitignore?: boolean;
       ignore?: boolean;
       semantic: boolean;
@@ -691,6 +735,10 @@ grouped(program.command("build"), GROUP.setup)
     if (opts.mdOnlyDir && opts.mdOnlyDir.length > 0) {
       buildConfigPatch.mdOnlyDirs = opts.mdOnlyDir;
     }
+    const includeOpenSpecArchiveWasExplicit = command.getOptionValueSource("includeOpenSpecArchive") === "cli";
+    if (includeOpenSpecArchiveWasExplicit && opts.includeOpenSpecArchive !== undefined) {
+      buildConfigPatch.includeOpenSpecArchive = opts.includeOpenSpecArchive;
+    }
     if (Object.keys(buildConfigPatch).length > 0) {
       patchBuildConfig(resolve(dir), buildConfigPatch);
     }
@@ -734,6 +782,7 @@ grouped(program.command("build"), GROUP.setup)
         followNestedRepos: followNestedReposWasExplicit ? opts.followNestedRepos : undefined,
         includeMd: includeMdWasExplicit ? opts.includeMd : undefined,
         mdOnlyDirs: opts.mdOnlyDir && opts.mdOnlyDir.length > 0 ? opts.mdOnlyDir : undefined,
+        includeOpenSpecArchive: includeOpenSpecArchiveWasExplicit ? opts.includeOpenSpecArchive : undefined,
         packageName: readPackageName(import.meta.url),
       });
       // --semantic: embed each child repo after workspace build.
@@ -1527,11 +1576,14 @@ async function runNoteCommand(repo: string, opts: NoteOptions): Promise<void> {
   // --team: redirect to the workspace knowledge repo.
   if (opts.team && TRAIL) {
     const { findWorkspaceRoot, readWorkspace: readWs, readKnowledgeRepos } = await import('./graph/workspace.js');
+    const { readGlobalConfig: rgcNote } = await import('./util/global-config.js');
     const wsRoot = findWorkspaceRoot(resolve(repo));
-    const knowledgeRepos = wsRoot ? readKnowledgeRepos(wsRoot) : (wsRoot ? readWs(wsRoot)?.knowledgeRepos ?? [] : []);
-    const knowledgeUrl = knowledgeRepos[0];
+    const knowledgeRepos = wsRoot ? readKnowledgeRepos(wsRoot) : [];
+    // Fallback chain: workspace-level → global ~/.trail/config.json
+    const knowledgeUrl = knowledgeRepos[0] ?? rgcNote().knowledgeRepo;
     if (!knowledgeUrl || !wsRoot) {
-      console.error('✗ --team requires knowledgeRepos configured — run: trail config knowledge-repo add <url>');
+      console.error('✗ --team requires a knowledge repo — run: trail config knowledge-repo add <url>');
+      console.error('  or set a global default: trail config --global knowledge-repo <url>');
       process.exitCode = 1;
       return;
     }
@@ -1962,6 +2014,40 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
       patchState({ enabled: consent, noticeShownAt: new Date().toISOString() });
     }
 
+    // Prompt for a knowledge repo URL when none is configured yet, running
+    // interactively (same TTY guard as the agent picker), and not skipped with -y.
+    if (
+      TRAIL &&
+      !opts.yes &&
+      !opts.dryRun &&
+      process.stdin.isTTY &&
+      process.stderr.isTTY
+    ) {
+      const { readKnowledgeRepos: rkr, writeKnowledgeRepos: wkr } = await import('./graph/workspace.js');
+      const { findWorkspaceRoot: fwr } = await import('./graph/workspace.js');
+      const { readGlobalConfig, patchGlobalConfig } = await import('./util/global-config.js');
+      // Target: workspace root if we're in one, otherwise this repo itself.
+      const wsTarget = isWorkspaceBuildRoot(repo, program.opts<GlobalOpts>().dir)
+        ? repo
+        : (fwr(resolve(repo)) ?? repo);
+      const existing = rkr(wsTarget);
+      if (existing.length === 0 && !readGlobalConfig().knowledgeRepo) {
+        const { createInterface: ciKnowledge } = await import('node:readline');
+        const rlKnowledge = ciKnowledge({ input: process.stdin, output: process.stderr });
+        const knowledgeUrl = await new Promise<string>((resolve) => {
+          rlKnowledge.question('· knowledge repo URL (optional — Enter to skip): ', (ans) => {
+            rlKnowledge.close();
+            resolve(ans.trim());
+          });
+        });
+        if (knowledgeUrl) {
+          patchGlobalConfig({ knowledgeRepo: knowledgeUrl });
+          process.stderr.write(`✓ knowledge repo configured globally: ${knowledgeUrl}\n`);
+          process.stderr.write(`  Saved to ~/.trail/config.json — applies to all your workspaces\n`);
+        }
+      }
+    }
+
     // Workspace parent: every child repo gets its OWN wiring too. A session
     // opens at a repo root, not at the parent, and reads `.claude/` from there —
     // wiring only the parent leaves each child with no skill, hooks, or MCP.
@@ -1969,9 +2055,15 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
 
     // Clone any knowledge repos declared in workspace.json before discovering
     // children — so they are included in the workspace on this very run.
+    // Falls back to the global ~/.trail/config.json knowledgeRepo when none
+    // is configured at the workspace level.
     if (TRAIL && isWorkspaceBuildRoot(repo, program.opts<GlobalOpts>().dir)) {
+      const { readGlobalConfig: rgc } = await import('./util/global-config.js');
       const ws = readWorkspace(repo);
-      for (const url of ws?.knowledgeRepos ?? []) {
+      const workspaceUrls = ws?.knowledgeRepos ?? [];
+      const globalUrl = workspaceUrls.length === 0 ? (rgc().knowledgeRepo ?? null) : null;
+      const allUrls = globalUrl ? [globalUrl] : workspaceUrls;
+      for (const url of allUrls) {
         const name = url.replace(/\.git$/, "").split("/").pop() ?? "";
         const dest = join(repo, name);
         if (name && !existsSync(dest)) {
@@ -1983,6 +2075,13 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
               timeout: 60_000,
             });
             console.error(`✓ knowledge repo: ${name} cloned`);
+            // Scaffold structure if this is a fresh/empty repo.
+            const { scaffoldKnowledgeRepo } = await import('./knowledge/scaffold.js');
+            scaffoldKnowledgeRepo(dest);
+            // Sync Hermes skills if Hermes is installed on this machine.
+            const { syncHermesKnowledgeSkills } = await import('./knowledge/hermes-sync.js');
+            const synced = syncHermesKnowledgeSkills(dest);
+            if (synced > 0) console.error(`✓ knowledge repo: ${synced} Hermes skill(s) synced to ~/.hermes/skills/team/`);
           } catch {
             console.error(`⚠ knowledge repo: failed to clone ${url}`);
           }
@@ -3155,29 +3254,88 @@ function statusCommand(name = "status"): Command {
     .option("--json", "machine-readable output")
     .action(async (dirArg: string | undefined, opts: { json?: boolean }) => {
       const repo = queryRoot(dirArg);
-      const graph = loadGraphCached(contextDirFor(repo, program.opts<GlobalOpts>().dir));
-      const g = graph ? await engineFrom().checkGraph(repo) : null;
-      const fresh = g && !g.missing ? g.ok : null;
+      const globalDir = program.opts<GlobalOpts>().dir;
+      const ws = readWorkspace(repo, globalDir);
+
+      // ── Code-map: workspace aggregates across children, single-repo reads directly ──
+      let totalNodes = 0;
+      let builtRepos = 0;
+      let totalRepos = 0;
+      let missingRepos: string[] = [];
+      let fresh: boolean | null = null;
+
+      if (ws) {
+        const wg = loadWorkspaceGraphs(repo, globalDir);
+        builtRepos = wg.loaded.length;
+        missingRepos = wg.missing;
+        totalRepos = builtRepos + missingRepos.length;
+        totalNodes = wg.loaded.reduce((s, l) => s + l.graph.meta.nodeCount, 0);
+        // No per-child staleness check in status — treat built children as ok.
+        fresh = builtRepos > 0 ? true : null;
+      } else {
+        const graph = loadGraphCached(contextDirFor(repo, globalDir));
+        const g = graph ? await engineFrom().checkGraph(repo) : null;
+        fresh = g && !g.missing ? g.ok : null;
+        totalRepos = 1;
+        if (graph) { totalNodes = graph.meta.nodeCount; builtRepos = 1; }
+      }
+
+      // ── Learnings ──────────────────────────────────────────────────────────
       const kept = keepsNotes(repo);
       // Only what still holds: a retired, held or replaced learning reaches no agent.
       const all = kept ? liveLearnings(listNotes(repo)) : [];
       const inRepo = all.filter((n) => n.scope === "repo" && !n.ref).length;
       const onBranches = all.filter((n) => n.ref).length;
       const personal = all.filter((n) => n.scope === "personal").length;
+
+      // ── Cloud ──────────────────────────────────────────────────────────────
       const clouds = readClouds();
       // The workspace this repo goes to, else the newest one this machine is in.
       const cloud = cloudIn(clouds, repoPlace(repo).key) ?? clouds[0] ?? null;
       const shared = cloud ? inWorkspace(repo, cloud) : false;
       const saved = savedThisWeek(repo);
 
+      // ── Semantic index: iterate children in workspace mode ─────────────────
+      let semanticSymbols = 0;
+      let semanticRepos = 0;
+      {
+        const { existsSync: fsExists } = await import('node:fs');
+        const { join: pj } = await import('node:path');
+        const { contextDirFor: ctxFor } = await import('./context/node-file.js');
+        const { createRequire } = await import('node:module');
+        const req = createRequire(import.meta.url);
+        let Database: ((path: string, opts?: object) => { prepare: (q: string) => { get: () => unknown }; close: () => void }) | null = null;
+        try { Database = req('better-sqlite3'); } catch { /* sqlite not available */ }
+
+        if (Database) {
+          const ctxDirs = ws
+            ? ws.children.map((c) => ctxFor(join(repo, c)))
+            : [ctxFor(repo, globalDir)];
+
+          for (const ctxDir of ctxDirs) {
+            const dbPath = pj(ctxDir, '.cache', 'embeddings.db');
+            if (!fsExists(dbPath)) continue;
+            try {
+              const db = Database(dbPath, { readonly: true });
+              const { c } = db.prepare('SELECT COUNT(*) AS c FROM embed_nodes').get() as { c: number };
+              db.close();
+              semanticSymbols += c;
+              semanticRepos++;
+            } catch { /* DB not readable — ignore */ }
+          }
+        }
+      }
+
+      // ── Output ─────────────────────────────────────────────────────────────
       if (opts.json) {
         console.log(
           JSON.stringify(
             {
-              codeMap: graph ? { nodes: graph.meta.nodeCount, inSync: fresh } : null,
+              codeMap: builtRepos > 0 ? { nodes: totalNodes, repos: ws ? { built: builtRepos, total: totalRepos } : undefined, inSync: fresh } : null,
               learnings: kept ? { repo: inRepo, branches: onBranches, personal } : null,
               workspace: cloud ? { name: cloud.workspace.name, url: cloud.workspace.url, repos: cloud.repos.length, thisRepo: shared } : null,
               week: { savedTokens: saved },
+              semantic: semanticRepos > 0 ? { symbols: semanticSymbols, repos: semanticRepos, total: totalRepos } : null,
             },
             null,
             2,
@@ -3187,9 +3345,23 @@ function statusCommand(name = "status"): Command {
       }
       const fmt = (x: number) => x.toLocaleString("en-US");
       const row = (k: string, v: string) => console.log(`${k.padEnd(11)} ${v}`);
-      if (!graph) row("code map", `✗ not built · run ${cmd("graft build")}`);
-      else if (fresh === false) row("code map", `⚠ ${fmt(graph.meta.nodeCount)} nodes · behind the code, refreshed on the next query`);
-      else row("code map", `✓ ${fmt(graph.meta.nodeCount)} nodes · in sync with the code`);
+
+      // Code-map row
+      if (builtRepos === 0) {
+        row("code map", `✗ not built · run ${cmd("trail build")}`);
+      } else if (ws) {
+        const repoLabel = `${builtRepos} repo${builtRepos === 1 ? "" : "s"}`;
+        if (missingRepos.length > 0) {
+          row("code map", `⚠ ${repoLabel} of ${totalRepos} built · ${fmt(totalNodes)} nodes · ${cmd("trail build")} to cover ${missingRepos.join(", ")}`);
+        } else {
+          row("code map", `✓ ${repoLabel} · ${fmt(totalNodes)} nodes`);
+        }
+      } else if (fresh === false) {
+        row("code map", `⚠ ${fmt(totalNodes)} nodes · behind the code, refreshed on the next query`);
+      } else {
+        row("code map", `✓ ${fmt(totalNodes)} nodes · in sync with the code`);
+      }
+
       if (kept) {
         const parts = [`${inRepo} added to this repo, in ${LEARNINGS_DIR}/`];
         if (onBranches) parts.push(`${onBranches} on teammates' branches`);
@@ -3206,29 +3378,16 @@ function statusCommand(name = "status"): Command {
           `${cloud.workspace.name} · ${cloud.repos.length} repo${cloud.repos.length === 1 ? "" : "s"}${shared ? ", this one included" : `, not this one (${cmd("graft workspace add")})`} · ${cloud.workspace.url}${clouds.length > 1 ? ` · ${clouds.length - 1} more workspace${clouds.length === 2 ? "" : "s"} (${cmd("graft workspace")})` : ""}`,
         );
       row("this week", saved > 0 ? `~${shortCount(saved)} tokens saved` : "nothing saved yet");
-      // Semantic index status
-      {
-        const { existsSync: fsExists } = await import('node:fs');
-        const { join: pj } = await import('node:path');
-        const { contextDirFor: ctxFor } = await import('./context/node-file.js');
-        const ctxDir = ctxFor(repo, program.opts<GlobalOpts>().dir);
-        const dbPath = pj(ctxDir, '.cache', 'embeddings.db');
-        if (fsExists(dbPath)) {
-          try {
-            const { createRequire } = await import('node:module');
-            const req = createRequire(import.meta.url);
-            const Database = req('better-sqlite3');
-            const db = new Database(dbPath, { readonly: true });
-            const { c } = db.prepare('SELECT COUNT(*) AS c FROM embed_nodes').get() as { c: number };
-            const { value: hash } = (db.prepare("SELECT value FROM embed_meta WHERE key = 'graph_hash'").get() ?? {}) as { value?: string };
-            db.close();
-            row("semantic", `✓ ${c.toLocaleString("en-US")} symbols indexed · run \`trail build\` to refresh`);
-            void hash; // used for future staleness check
-          } catch { /* DB not readable — ignore */ }
-        } else {
-          row("semantic", `✗ not built · run \`trail build\` to enable vector search`);
-        }
+
+      // Semantic row
+      if (semanticRepos === 0) {
+        row("semantic", `✗ not built · run \`trail build\` to enable vector search`);
+      } else if (ws) {
+        row("semantic", `✓ ${fmt(semanticSymbols)} symbols · ${semanticRepos} of ${totalRepos} repos indexed`);
+      } else {
+        row("semantic", `✓ ${fmt(semanticSymbols)} symbols indexed · run \`trail build\` to refresh`);
       }
+
       // Phase 2 (4.17, D137): Codex's trust of Trail's hooks, and why it keeps nothing new there yet.
       for (const l of codexStatusLines()) row("codex", l);
     });

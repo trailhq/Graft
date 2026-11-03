@@ -115,6 +115,9 @@ export interface SeedResult {
 
 const NOT_SEEDED: SeedResult = { seeded: false };
 
+/** Filename of the semantic embeddings database, relative to the cache dir. */
+const EMBEDDINGS_FILE = "embeddings.db";
+
 /**
  * An allowlist, not a skip list: is this repo-relative path (posix) one of the few
  * files a seed may bring across?
@@ -143,6 +146,7 @@ function seedable(rel: string): boolean {
   const name = rel.slice(CACHE_DIR.length + 1);
   return (
     name === ASK_INDEX_FILE ||
+    name === EMBEDDINGS_FILE ||
     name.startsWith(`${EXTRACT_CACHE_PREFIX}.`) ||
     name.startsWith(`${FINGERPRINT_PREFIX}.`)
   );

@@ -318,7 +318,7 @@ export function writeNote(dir: string, input: WriteNoteInput, scope: LearningSco
  * reviewed yet, and only live ones (nothing retired or replaced).
  */
 export function standingLearnings(dir: string): Note[] {
-  return liveLearnings(listNotes(dir, { branches: false })).filter((n) => n.standing && !n.ref);
+  return liveLearnings(listNotes(dir, { branches: false })).filter((n) => (n.standing || isAlwaysFollow(n)) && !n.ref);
 }
 
 /** Where a learning is, as the agent and the person read it: `.trail/learnings/x.md`, `~/.trail/…`, or `origin/b:.trail/…`. */

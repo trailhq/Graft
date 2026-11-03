@@ -10,7 +10,7 @@ import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { relPosix } from "../util/paths.js";
-import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs, readIncludeMd, readMdOnlyDirs } from "../util/state.js";
+import { readFollowNestedRepos, readFollowSubmodules, readIncludeDirs, readIncludeMd, readIncludeOpenSpecArchive, readMdOnlyDirs } from "../util/state.js";
 import { languageOf, depthExtensions } from "./extract.js";
 import { genericLangOf, genericExtensions } from "./generic.js";
 import { containerLangOf, containerExtensions } from "./container.js";
@@ -62,6 +62,18 @@ export function filterByOnlyDirs(
   });
 }
 
+/**
+ * Returns true for OpenSpec `.md` files that should be auto-indexed regardless
+ * of `--include-md`. Covers `openspec/specs/**` and active `openspec/changes/**`,
+ * excluding `openspec/changes/archive/**` unless `includeArchive` is true.
+ */
+export function isOpenSpecMd(rel: string, includeArchive: boolean): boolean {
+  if (rel.startsWith('openspec/specs/')) return true;
+  if (!rel.startsWith('openspec/changes/')) return false;
+  if (rel.startsWith('openspec/changes/archive/')) return includeArchive;
+  return true;
+}
+
 export function listSourceFiles(
   root: string,
   outDir: string,
@@ -75,15 +87,19 @@ export function listSourceFiles(
   // grammar (genericLangOf) or a container (containerLangOf) claims its extension.
   // All three must agree here or `build` and `check` would enumerate different sets.
   const mdOnlyDirs = readMdOnlyDirs(root);
+  const includeArchive = readIncludeOpenSpecArchive(root);
   return filterByOnlyDirs(
     repoFiles.filter(
       (f) => {
         if (f.startsWith(outDir)) return false;
         if (languageOf(f) !== null || genericLangOf(f) !== null || containerLangOf(f) !== null) return true;
-        if (!readIncludeMd(root) || !isMdFile(f)) return false;
-        // If mdOnlyDirs is set, only include .md files under those dirs.
-        if (mdOnlyDirs.length === 0) return true;
+        if (!isMdFile(f)) return false;
+        // Auto-include OpenSpec .md files (specs + active changes, archive opt-in).
         const rel = relPosix(root, f);
+        if (isOpenSpecMd(rel, includeArchive)) return true;
+        // Explicit --include-md behaviour (mdOnlyDirs filter applies).
+        if (!readIncludeMd(root)) return false;
+        if (mdOnlyDirs.length === 0) return true;
         return mdOnlyDirs.some((d) => rel === d || rel.startsWith(`${d}/`));
       }
     ),

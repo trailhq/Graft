@@ -533,6 +533,8 @@ export async function main(event: string): Promise<void> {
     // Background semantic refresh: spawn detached trail build at session start
     // so the graph and semantic index are fresh for this session's project.
     // Runs from the session directory — only this project's repos get updated.
+    // Filled below when the knowledge repo is reachable.
+    let knowledgeContext: string | null = null;
     if (brand() === 'trail') {
       const { graftCliPath } = await import('./paths.js');
       const cliPath = graftCliPath();
@@ -546,11 +548,13 @@ export async function main(event: string): Promise<void> {
         child.unref();
       }
       // Auto-pull knowledge repos so team learnings are always fresh.
-      const { findWorkspaceRoot } = await import('../graph/workspace.js');
-      const { readWorkspace: _readWs } = await import('../graph/workspace.js');
+      const { findWorkspaceRoot, readWorkspace: _readWs } = await import('../graph/workspace.js');
       const wsRoot = findWorkspaceRoot(dir);
       if (wsRoot) {
         const ws = _readWs(wsRoot);
+        const { readGlobalConfig: _rgc } = await import('../util/global-config.js');
+        const knowledgeUrl = (ws?.knowledgeRepos?.[0]) ?? _rgc().knowledgeRepo;
+        // Pull every workspace-level knowledge repo.
         for (const url of ws?.knowledgeRepos ?? []) {
           const name = url.replace(/\.git$/, '').split('/').pop() ?? '';
           const repoDir = join(wsRoot, name);
@@ -561,19 +565,32 @@ export async function main(event: string): Promise<void> {
               timeout: 15_000,
               stdio: 'ignore',
             });
+            // Re-sync Hermes skills after pull (files may have been updated).
+            const { syncHermesKnowledgeSkills: _syncHermes } = await import('../knowledge/hermes-sync.js');
+            _syncHermes(repoDir);
+          }
+        }
+        // Team knowledge injection: global policies + app-specific docs.
+        if (knowledgeUrl) {
+          const knowledgeName = knowledgeUrl.replace(/\.git$/, '').split('/').pop() ?? '';
+          const knowledgeDir = join(wsRoot, knowledgeName);
+          if (existsSync(knowledgeDir)) {
+            const { buildKnowledgeContext } = await import('../knowledge/inject.js');
+            knowledgeContext = buildKnowledgeContext(knowledgeDir, dir);
           }
         }
       }
     }
+
     // A repo on trail, opened on a machine that has graft but not the trail command.
     // Only while its .mcp.json still names a trail server: once it doesn't, trail: true takes back the stand-in.
     if (repoWiredForTrail(dir)) fitTrailServerToMachine(homedir(), resolve(dir), { trail: trailOnPath() || !repoNamesTrailServer(dir), graft: commandOnPath('graft') });
     const text = orientationAtStart(dir, learningsAtStart(dir));
     const kept = keptAtStart(input, dir);
     // The skills context comes after the learnings; its notice is for the person.
-    // A repo whose team uses a Trail workspace, on a laptop not signed in to it: offered once a session.
     const team = teamSignInLine(dir);
-    const out = [upkeep.join('\n'), text, team, skills.context, kept.context].filter(Boolean).join('\n\n');
+
+    const out = [upkeep.join('\n'), text, knowledgeContext, team, skills.context, kept.context].filter(Boolean).join('\n\n');
     const notice = [skills.notice, kept.notice].filter(Boolean).join('\n') || undefined;
     emitHook('SessionStart', { context: out, notice });
     return;

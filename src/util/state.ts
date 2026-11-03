@@ -125,6 +125,10 @@ export interface BuildConfig {
    * Example: ["specs"] indexes only the specs/ directory.
    */
   mdOnlyDirs?: string[];
+  /** Whether to include `openspec/changes/archive/` when auto-indexing OpenSpec
+   * `.md` files. Off by default: archive specs are historical and add noise.
+   * Persisted so later no-flag builds retain the choice. */
+  includeOpenSpecArchive?: boolean;
 }
 
 /** Local, Git-ignored repository configuration. Under trail, lives in `.trail/`
@@ -220,6 +224,10 @@ export function readIncludeMd(d: string): boolean {
 /** Repo-relative dirs to limit .md indexing to. Empty/absent = all dirs. */
 export function readMdOnlyDirs(d: string): string[] {
   return readBuildConfig(d)?.mdOnlyDirs ?? [];
+}
+
+export function readIncludeOpenSpecArchive(d: string): boolean {
+  return readBuildConfig(d)?.includeOpenSpecArchive === true;
 }
 // Best-effort read-modify-write; not atomic across concurrent processes, but acceptable
 // for episodic hook writes (worst case is a lost update, not corruption).
