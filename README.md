@@ -112,7 +112,7 @@ trail init                      # in your repo: build the graft map, set up .tra
 
 That is the whole setup. `trail init` asks which of your coding agents to wire up, builds the graft map from your code, creates `.trail/` for the repo's learnings, and adds a statusline and hooks to Claude Code. It also reads your past Claude Code sessions in the repo, once, for what you told Claude more than once, and saves those as learnings. Your own Claude Code does that reading, in about a minute. Then work the way you always do. No daemon, no server, nothing to babysit: it is all files.
 
-On a repo whose team hasn't set up trail yet, `trail init` asks who it's for. Just me, which enter picks, keeps all of it out of git for your clone only (in `.git/info/exclude`) and your learnings in `~/.trail`, so there is nothing to commit and nothing asks you to share. Run `trail init --team` when you want your team on it.
+On a repo whose team hasn't set up trail yet, `trail init` asks who it's for. My team, which enter picks, sets it up for you to commit once, as below. Just me keeps all of it out of git for your clone only (in `.git/info/exclude`) and your learnings in `~/.trail`, so there is nothing to commit and nothing asks you to share. Run `trail init --team` when you want your team on it.
 
 Commit the setup so your teammates get it too. The graft map itself, in `graft/`, is a local cache like `node_modules` and is added to `.gitignore`, so it stays out of the commit:
 

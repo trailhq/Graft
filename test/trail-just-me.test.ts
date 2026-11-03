@@ -9,8 +9,9 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { BRAND_ENV } from "../src/brand.js";
-import { isJustMe, JUST_ME_DIRECTIVE, setJustMe } from "../src/notes/just-me.js";
+import { askJustMe, isJustMe, JUST_ME_DIRECTIVE, setJustMe } from "../src/notes/just-me.js";
 import { writeNote } from "../src/notes/notes.js";
 import { cloudLines } from "../src/cloud/nudge.js";
 import { uncommittedDirective } from "../src/claude/hooks.js";
@@ -43,6 +44,33 @@ function repo(): string {
 }
 
 const note = { title: "Retries trip the rate limit", body: "## Decided\nThree retries.", author: "Priya", date: "2026-11-02", touches: [] };
+
+/** init's question, answered with `lines` typed one at a time, then the input closed: what it returns and printed. */
+async function answer(...lines: string[]): Promise<{ justMe: boolean | null; shown: string }> {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let shown = "";
+  output.on("data", (d) => (shown += d));
+  const asked = askJustMe({ input, output });
+  for (const line of lines) {
+    input.write(`${line}\n`);
+    await new Promise((ok) => setTimeout(ok, 20));
+  }
+  input.end();
+  return { justMe: await asked, shown };
+}
+
+test("init's question: enter picks the team, 2 picks just me, anything else asks again, and closed input cancels", async () => {
+  const enter = await answer("");
+  assert.equal(enter.justMe, false);
+  assert.match(enter.shown, /1 {2}my team: .*\n {2}2 {2}just me: .*\n1 or 2 \(enter for 1\): /);
+  assert.equal((await answer("1")).justMe, false);
+  assert.equal((await answer("2")).justMe, true);
+  const again = await answer("me", "2");
+  assert.equal(again.justMe, true);
+  assert.equal(again.shown.match(/1 or 2 \(enter for 1\)/g)?.length, 2);
+  assert.equal((await answer()).justMe, null);
+});
 
 test("a learning for the repo stays in ~/.trail while the repo is just for this person, and goes to .trail/ again after", () => {
   const dir = repo();

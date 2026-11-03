@@ -91,9 +91,8 @@ import {
 import { dropActivity, inWorkspace, maybeSyncInBackground, recordActivity, runSyncChild, syncRepo, syncWorkspaceRepos, workspaceLearnings } from "./cloud/workspace-sync.js";
 import type { CheckResult } from "./check/types.js";
 import { checkLocally } from "./check/local-check.js";
-import { isJustMe, setJustMe } from "./notes/just-me.js";
+import { askJustMe, isJustMe, setJustMe } from "./notes/just-me.js";
 import { trailHome } from "./notes/trail-home.js";
-import { createInterface } from "node:readline/promises";
 import { keepOutOfGit, letGitSee } from "./claude/init.js";
 import { findLearning, learningFileName, liveLearnings } from "./notes/learning-fields.js";
 import { savedIdLine } from "./notes/replace.js";
@@ -1970,28 +1969,6 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
 function trailCommitted(repo: string): boolean {
   const r = spawnSync("git", ["ls-files", "--", ".trail"], { cwd: repo, encoding: "utf8" });
   return r.status === 0 && r.stdout.trim().length > 0;
-}
-
-/**
- * `trail init`'s one question: true for just me, which is also what enter picks, since it changes nothing in the
- * repo. Null when the person closed the terminal's input instead of answering.
- */
-async function askJustMe(): Promise<boolean | null> {
-  console.error("\nWho is trail for in this repo?");
-  console.error("  1  just me: nothing in the repo changes, and your learnings stay in ~/.trail");
-  console.error("  2  my team: you commit .trail/ and .claude/settings.json once, and teammates' Claude reads your learnings");
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    for (;;) {
-      const answer = (await rl.question("1 or 2 (enter for 1): ")).trim();
-      if (answer === "" || answer === "1") return true;
-      if (answer === "2") return false;
-    }
-  } catch {
-    return null;
-  } finally {
-    rl.close();
-  }
 }
 
 /** A plan with the out-of-repo writes only for `laptop`'s hosts; the plan itself when every host may write there. */
