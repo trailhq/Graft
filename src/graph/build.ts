@@ -14,14 +14,14 @@
  * one — the invariant `test/graph-incremental.test.ts` pins down.
  */
 import { readFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { contextDirFor, ensureGitignored, ensureSearchable } from "../context/node-file.js";
-import { extractFile, languageLabelOf, languageOf, type Language, type RawEdge } from "./extract.js";
-import { extractGeneric, fallbackLangOf, genericLangOf, warmGenericGrammars, type GenericLang } from "./generic.js";
-import { containerLangOf, extractContainer, warmContainerGrammars, type ContainerLang } from "./container.js";
-import { depthReady, missingDepthPackages, warmDepthGrammars } from "./depth-parser.js";
+import { languageLabelOf, type Language, type RawEdge } from "./extract.js";
+import { depthReady, missingDepthPackages } from "./depth-parser.js";
 import type { NativeFallback } from "./native.js";
+import { grammarsFor, tierOf, warmGrammars } from "./tier.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
@@ -35,8 +35,11 @@ import {
 import { writeFingerprint } from "./fingerprint.js";
 import { seedGraph, type SeedResult } from "./seed.js";
 import { filterByOnlyDirs, listSourceStats } from "./source-files.js";
+import { extractOne, type ExtractOneResult, type PriorParse } from "./extract-one.js";
+import { poolSize, runParsePool } from "./parse-pool.js";
+import type { SourceStat } from "./source-files.js";
 import { resolveEdges, type GoModule } from "./resolve.js";
-import { enrichGraph, type EnrichStats } from "./enrich.js";
+import { enrichGraph, type EnrichStats, type SourceLookup } from "./enrich.js";
 import { readGraph, writeGraph, wiringPath } from "./write.js";
 import { writeCards, writeIndex, writeCovers, type CardStats } from "./cards.js";
 import { writeAskIndex } from "../ask/index-file.js";
@@ -46,61 +49,7 @@ import type { CruxSummarizer } from "../ai/crux.js";
 
 export { listSourceFiles } from "./source-files.js";
 
-/**
- * Which tier extracts a file. {@link buildGraph} and `checkGraph` both dispatch on
- * this, so a tier the build extracts can never be one the check can't see.
- *
- * Depth tier (hand-written extractor) when a language claims the file and its
- * grammar loads (depth-parser.ts). When it doesn't load, the file goes to that
- * language's stand-in in the breadth tier and `fellBack` names the language. A
- * container (.vue) is checked before the breadth tier so a future grammar claiming
- * its extension can't shadow it; anything else goes to the breadth tier (generic
- * tags.scm over a WASM grammar).
- */
-export interface FileTier {
-  lang: Language | null;
-  container: ContainerLang | null;
-  generic: GenericLang | null;
-  fellBack: Language | null;
-}
-
-export function tierOf(path: string): FileTier {
-  const depth = languageOf(path);
-  if (depth) {
-    return depthReady(depth)
-      ? { lang: depth, container: null, generic: null, fellBack: null }
-      : { lang: null, container: null, generic: fallbackLangOf(depth), fellBack: depth };
-  }
-  const container = containerLangOf(path);
-  if (container) return { lang: null, container, generic: null, fellBack: null };
-  return { lang: null, container: null, generic: genericLangOf(path), fellBack: null };
-}
-
-/** Load every WASM grammar these files need, before a synchronous parse loop can
- * call `extractFile`/`extractGeneric`/`extractContainer`: the depth tier's first
- * (a container's embedded language included), then the breadth tier's, the
- * containers', and the stand-ins for depth languages whose grammar didn't load. */
-export async function warmGrammarsFor(paths: Iterable<string>): Promise<void> {
-  const list = [...paths];
-  const depth = new Set<Language>();
-  for (const path of list) {
-    const lang = languageOf(path) ?? containerLangOf(path)?.inner;
-    if (lang) depth.add(lang);
-  }
-  await warmDepthGrammars(depth);
-  const generic = new Set<string>();
-  const containers = new Set<string>();
-  for (const path of list) {
-    const t = tierOf(path);
-    if (t.generic) generic.add(t.generic.name);
-    if (t.container) {
-      containers.add(t.container.name);
-      if (!depthReady(t.container.inner)) generic.add(fallbackLangOf(t.container.inner).name);
-    }
-  }
-  await warmGenericGrammars(generic);
-  await warmContainerGrammars(containers);
-}
+export { tierOf, warmGrammarsFor, type FileTier } from "./tier.js";
 
 /** Minimum non-file node count for a discovered sub-scope to stand on its own
  * (over-split guard 3). A scope with fewer nodes than this is folded into the
@@ -151,6 +100,12 @@ export interface GraphBuildOptions {
    * set, only files under these prefixes are indexed; the list is recorded in the
    * fingerprint so the freshness probe enumerates the same set. */
   onlyDirs?: string[];
+  /** Parser child processes for the parse loop (`graft build --workers`). Absent
+   * or 0: parse in-thread. `"auto"` sizes the pool from cores, free memory and
+   * the file count (see {@link poolSize}). `buildGraph` never decides this itself
+   * and never reads `process.env`: the pre-query refresh, the MCP server and the
+   * App must never fork under a query. */
+  parseWorkers?: number | "auto";
   onProgress?: (info: {
     phase: "parse" | "enrich";
     index: number;
@@ -165,10 +120,14 @@ export interface GraphBuildResult {
   /** Per-file wiring cards written (Tier-2 passive surface). */
   cards: number;
   files: number;
-  /** Files re-parsed this run (the rest were replayed from the extraction cache). */
+  /** Files parsed this run (the rest were replayed from the extraction cache). Includes files whose previous build recorded a parse error: those are always re-attempted. */
   parsed: number;
   /** Files replayed from the extraction cache. */
   reused: number;
+  /** Parser children forked (0 = parsed in-thread). */
+  parseWorkers: number;
+  /** The pool could not do the parsing and the parent parsed files in-thread. */
+  poolFallback: boolean;
   /** The parent checkout this build copied a starting graph from, when it was run in
    * a git worktree that had none of its own. See `./seed.ts`. */
   seededFrom?: string;
@@ -229,7 +188,6 @@ export async function buildGraph(
 
   const nodes: NodeV1[] = [];
   const rawEdges: RawEdge[] = [];
-  const sources = new Map<string, string>();
   /** Display labels, not grammars — `.mjs` is parsed as typescript but reported as
    * javascript, or the banner claims a repo's JavaScript went unindexed. */
   const langs = new Set<string>();
@@ -255,93 +213,91 @@ export async function buildGraph(
   // repo needs ONCE here (buildGraph is async) before the synchronous parse loop
   // below can call extractFile/extractGeneric/extractContainer. A depth grammar
   // that can't load gets its breadth stand-in warmed instead.
-  await warmGrammarsFor(files.map((f) => f.abs));
+  const grammars = grammarsFor(files.map((f) => f.abs));
+  await warmGrammars(grammars);
   /** Languages whose files went to a stand-in: grammars for the fix, labels for people. */
   const fellBack = new Set<Language>();
   const fellBackLabels = new Set<string>();
 
-  files.forEach((f, i) => {
+  const labelOf = (abs: string): string => {
+    const t = tierOf(abs);
+    return languageLabelOf(abs) ?? t.container?.name ?? t.generic?.name ?? "unknown";
+  };
+  const applyResult = (f: SourceStat, r: ExtractOneResult): void => {
     const rel = f.rel;
-    opts.onProgress?.({ phase: "parse", index: i, total: files.length, file: rel });
-    const { lang, container, generic, fellBack: standIn } = tierOf(f.abs);
-    const label = languageLabelOf(f.abs) ?? container?.name ?? generic?.name ?? "unknown";
+    // Stand-in bookkeeping is a pure function of the path and of which grammars
+    // loaded, so it is recorded here, for every file however it was extracted.
+    const { container, fellBack: standIn } = tierOf(f.abs);
     // A .vue file's embedded script falls back the same way its language does.
     const inner = container && !depthReady(container.inner) ? container.inner : null;
     if (standIn) {
       fellBack.add(standIn);
-      fellBackLabels.add(label);
+      fellBackLabels.add(labelOf(f.abs));
     }
     if (inner) {
       fellBack.add(inner);
       fellBackLabels.add(inner);
     }
-    // Which stand-in parsed this file, if one did. A cached parse is replayed only
-    // when the same parser would produce it now: otherwise a file parsed by the
-    // stand-in would keep its basic parse after a reinstall restored the native
-    // grammar, for as long as its bytes didn't change.
-    const via = standIn ? generic!.name : inner ? fallbackLangOf(inner).name : undefined;
-    const cached = priorExtract.files[rel];
-
-    // Every file is read and hashed, every build — only the *parse* is memoized.
-    // The tempting optimization is to trust the probe's `(size, mtimeMs)` and skip
-    // the read too, but then `graft build` inherits the probe's blind spot: on a
-    // filesystem with coarse mtime granularity, a same-length edit inside the same
-    // second is invisible, so `graft check` reports drift (it always re-hashes) and
-    // the `graft build` it tells you to run refuses to repair it — forever. A stat
-    // may decide whether a *query* bothers rebuilding; it may not decide what the
-    // rebuild itself looks at. Reading is ~0.05ms/file against the ~4.6ms parse
-    // this still skips.
-    let source: string | null;
-    try {
-      source = readSourceFile(f.abs);
-    } catch (err) {
-      const message = `${rel}: ${err instanceof Error ? err.message : String(err)}`;
-      errors.push(message);
-      // Record it anyway (with the stat we do have) so the freshness probe's
-      // fast path doesn't report this file as new on every single query.
-      entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [], error: message };
-      return;
-    }
-    if (source === null) {
-      // Unsupported encoding (UTF-16BE) — a skip, never an error: recorded with
-      // an empty entry so the freshness probe doesn't treat it as new every run.
-      entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [] };
-      return;
-    }
-
-    const hash = contentHash(source);
-    if (cached && hash === cached.hash && cached.via === via) {
-      entries[rel] = { ...cached, size: f.size, mtimeMs: f.mtimeMs };
-      sources.set(rel, source);
-      reused++;
-      if (cached.error) {
-        errors.push(cached.error); // this file failed to parse last time too
+    switch (r.kind) {
+      case "reused": {
+        const cached = priorExtract.files[rel]!; // reused is only reported against a hash we supplied
+        entries[rel] = { ...cached, size: f.size, mtimeMs: f.mtimeMs };
+        reused++;
+        nodes.push(...cached.nodes);
+        rawEdges.push(...cached.rawEdges);
+        langs.add(labelOf(f.abs));
         return;
       }
-      nodes.push(...cached.nodes);
-      rawEdges.push(...cached.rawEdges);
-      langs.add(label);
-      return;
+      case "skipped":
+        entries[rel] = r.entry;
+        if (r.entry.error) errors.push(r.entry.error);
+        return;
+      case "parsed":
+        parsed++;
+        entries[rel] = r.entry;
+        nodes.push(...r.entry.nodes);
+        rawEdges.push(...r.entry.rawEdges);
+        langs.add(r.label);
+        return;
+      case "error":
+        parsed++;
+        entries[rel] = r.entry;
+        errors.push(r.message);
+        return;
     }
+  };
+  // A cached FAILURE is never offered for reuse (see extractOne): it is withheld
+  // so the file is parsed again.
+  const cachedOf = (rel: string): PriorParse | null => {
+    const c = priorExtract.files[rel];
+    return c && !c.error ? { hash: c.hash, via: c.via } : null;
+  };
 
-    parsed++;
-    try {
-      const { nodes: fileNodes, rawEdges: fileEdges } = lang
-        ? extractFile(rel, source, lang)
-        : container
-          ? extractContainer(rel, source, container)
-          : extractGeneric(rel, source, generic!.name);
-      nodes.push(...fileNodes);
-      rawEdges.push(...fileEdges);
-      sources.set(rel, source);
-      langs.add(label);
-      entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, nodes: fileNodes, rawEdges: fileEdges, ...(via ? { via } : {}) };
-    } catch (err) {
-      const message = `${rel}: parse failed — ${err instanceof Error ? err.message : String(err)}`;
-      errors.push(message);
-      entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, nodes: [], rawEdges: [], error: message, ...(via ? { via } : {}) };
-    }
-  });
+  // `cli.ts` does not know the file count, so `"auto"` is resolved here — the one
+  // place that already knows it. `buildGraph` never reads `process.env`: a number
+  // (or `"auto"`) had to be asked for explicitly by the `graft build` command.
+  // An explicit count is honoured up to the cores and one child per file: more
+  // children than either only costs warm-ups (`auto` has its own, tighter, bounds).
+  const workers = opts.parseWorkers === "auto"
+    ? poolSize(files.length, { GRAFT_PARSE_WORKERS: "auto" })
+    : Math.min(Math.max(0, Math.floor(opts.parseWorkers ?? 0)), availableParallelism(), files.length);
+  let poolFallback = false;
+  if (workers > 0 && files.length > 0) {
+    let done = 0;
+    const results = await runParsePool(files, cachedOf, grammars, {
+      workers,
+      onResult: (_index, file) => opts.onProgress?.({ phase: "parse", index: done++, total: files.length, file }),
+      onFallback: () => { poolFallback = true; },
+    });
+    // Fold in FILE order, never completion order: node and edge order is what
+    // makes a pooled build byte-identical to an in-thread one.
+    files.forEach((f, i) => applyResult(f, results[i]));
+  } else {
+    files.forEach((f, i) => {
+      opts.onProgress?.({ phase: "parse", index: i, total: files.length, file: f.rel });
+      applyResult(f, extractOne(f, cachedOf(f.rel)));
+    });
+  }
 
   // Persist the memo BEFORE enrichment, because `enrichGraph` mutates these very
   // node objects (summary/crux/summary_state) and the cache must only ever hold
@@ -381,6 +337,27 @@ export async function buildGraph(
   // Read BEFORE the first checkpoint can overwrite wiring.json.
   const prior = readGraph(wiringPath(outDir));
   const priorById = new Map((prior?.nodes ?? []).map((n) => [n.id, n]));
+  // The meaning pass reads a file only when it summarizes it, and only if the
+  // bytes still hash to what was parsed. Holding every source for the whole build
+  // was ~1 GB of strings on a 65k-file repo, for a pass a Tier-1 build never runs.
+  const absOf = new Map(files.map((f) => [f.rel, f.abs] as const));
+  const sources: SourceLookup = {
+    has: (rel) => {
+      const e = entries[rel];
+      return e !== undefined && e.hash !== "" && !e.error;
+    },
+    get: (rel) => {
+      const abs = absOf.get(rel);
+      const e = entries[rel];
+      if (!abs || !e) return undefined;
+      try {
+        const text = readSourceFile(abs);
+        return text !== null && contentHash(text) === e.hash ? text : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+  };
   const meaning = await enrichGraph(nodes, priorById, sources, {
     summarizer: opts.summarizer,
     concurrency: opts.concurrency,
@@ -464,6 +441,8 @@ export async function buildGraph(
     files: files.length,
     parsed,
     reused,
+    parseWorkers: workers,
+    poolFallback,
     seededFrom: seed.from,
     nodes: nodes.length,
     edges: edges.length,
