@@ -64,6 +64,7 @@ test('formatBlastRadius renders callers or null', () => {
   assert.match(strip(txt!), /blast radius for pkce\.ts/);
   assert.match(strip(txt!), /exchange \(client\.ts\)/);
   assert.equal(formatBlastRadius(wiring2, '/abs/repo/src/unknown.ts'), null);
+  assert.match(strip(formatBlastRadius(wiring2, 'C:\\abs\\repo\\src\\pkce.ts') ?? ''), /exchange \(client\.ts\)/, 'a Windows path');
 });
 
 test('formatRetrieval renders top hits, trims snippet, first pointer only', () => {

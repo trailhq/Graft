@@ -59,10 +59,12 @@ export function renderStatusline(
   return lines;
 }
 
+/** Graph paths use '/'; the edited path is the OS's, so a Windows path is matched with its '\' turned to '/'. */
 function nodeIdsInFile(w: GraphV1, filePath: string): Set<string> {
   const nodes = w.nodes ?? [];
+  const file = filePath.replace(/\\/g, '/');
   return new Set(
-    nodes.filter((n) => n.path && (filePath === n.path || filePath.endsWith(`/${n.path}`)))
+    nodes.filter((n) => n.path && (file === n.path || file.endsWith(`/${n.path}`)))
       .map((n) => n.id),
   );
 }
