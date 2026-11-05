@@ -246,7 +246,7 @@ const CLI = resolve(process.cwd(), "src/cli.ts");
 const TSX = pathToFileURL(require.resolve("tsx")).href;
 
 function cliEnv(home: string): NodeJS.ProcessEnv {
-  return { ...process.env, HOME: home, USERPROFILE: home, TRAIL_HOME: join(home, ".trail"), [BRAND_ENV]: "trail", DO_NOT_TRACK: "1", TRAIL_CLOUD: "1" };
+  return { ...process.env, HOME: home, USERPROFILE: home, TRAIL_HOME: join(home, ".trail"), [BRAND_ENV]: "trail", DO_NOT_TRACK: "1", TRAIL_CLOUD: "1", TRAIL_SHARE_SESSION: "1" };
 }
 
 /** A stand-in Trail on this machine that allows or refuses, and keeps what it was sent. */
@@ -281,6 +281,26 @@ function signIn(home: string, url: string): void {
   mkdirSync(join(home, ".trail"), { recursive: true });
   writeFileSync(join(home, ".trail", "cloud.json"), JSON.stringify({ ...CLOUD, url }));
 }
+
+test("trail share-session: off in this release unless TRAIL_SHARE_SESSION=1, with nothing read or sent; --stop works without it", async () => {
+  const { home, repo } = fakeSession();
+  const trail = await standIn(true);
+  try {
+    signIn(home, trail.url);
+    const env = { ...cliEnv(home), TRAIL_SHARE_SESSION: "" };
+    const off = spawnSync(process.execPath, ["--import", TSX, CLI, "share-session", "--sync"], { cwd: repo, encoding: "utf8", timeout: 60_000, env });
+    assert.equal(off.status, 1, off.stderr);
+    assert.equal(off.stdout, "");
+    assert.equal(off.stderr.trim(), "✗ share-session isn't on in this release yet; to try it, run TRAIL_SHARE_SESSION=1 trail share-session");
+    assert.deepEqual(trail.got, [], "not even the check goes out");
+    assert.ok(!existsSync(join(home, ".trail", "share")), "nothing is scrubbed or copied");
+    const stop = spawnSync(process.execPath, ["--import", TSX, CLI, "share-session", "--stop"], { cwd: repo, encoding: "utf8", timeout: 60_000, env });
+    assert.equal(stop.status, 0, stop.stderr);
+    assert.match(stop.stderr, /nothing to stop/);
+  } finally {
+    trail.close();
+  }
+});
 
 test("trail share-session: not signed in, one line and nothing read or sent", () => {
   const { home, repo } = fakeSession();

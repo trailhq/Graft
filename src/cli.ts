@@ -124,7 +124,7 @@ import {
   track,
   trackFirstRunIfNew,
 } from "./telemetry/index.js";
-import { bundleSession, listLines, MAX_GZ_BYTES, pickSession, previewLines, redactedCount, sessionsHere, shortId, sizeLabel, whoIAm } from "./cloud/share-session.js";
+import { bundleSession, listLines, MAX_GZ_BYTES, pickSession, previewLines, redactedCount, sessionsHere, shareSessionEnabled, shortId, sizeLabel, whoIAm } from "./cloud/share-session.js";
 import { bundlePreviewLines, deleteCode, deleteHash, itemPayload, leaveOut, newCopyDir, newSentState, parseDeleteCode, parseLeaveOut, prepareBundle, readSent, unfinishedCopy, writeSent, type Manifest, type SentState } from "./cloud/share-bundle.js";
 import { trailHome } from "./notes/trail-home.js";
 import { readSyncState, runSync, SYNC_EVERY_MS, syncDir, writeSyncState, type SyncState } from "./cloud/share-sync.js";
@@ -2444,11 +2444,17 @@ function shareSessionCommand(name = "share-session"): Command {
     .action(async (pick: string | undefined, opts: { list?: boolean; days: string; leaveOut?: string; yes?: boolean; delete?: string; sync?: boolean; stop?: boolean }) => {
       const dir = process.cwd();
       const here = workspaceRepo(dir);
+      // Taking back and stopping work without the flag: someone who tried it must always be able to undo it.
+      if (opts.stop) return stopSync(here.checkout);
+      if (!opts.delete && !shareSessionEnabled()) {
+        console.error(`✗ share-session isn't on in this release yet; to try it, run TRAIL_SHARE_SESSION=1 ${cmd("graft share-session")}`);
+        process.exitCode = 1;
+        return;
+      }
       const repoKey = here.git && !here.key.startsWith("local/") ? here.key : null;
       const cloud = await shareCloud(repoKey);
       if (!cloud) return;
       if (opts.delete) return deleteShared(cloud, opts.delete, here.checkout);
-      if (opts.stop) return stopSync(here.checkout);
       if (opts.list) {
         const sessions = sessionsHere(dir);
         console.log(listLines(sessions).join("\n"));
