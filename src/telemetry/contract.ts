@@ -133,13 +133,14 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
   session_shared: new Set<string>(['size_bucket', 'messages_bucket']),
   /** A Trail teammate's answer to sending their whole Claude (`trail
    *  share-session` with no session named, internal only): sent, sent with
-   *  folders left out, declined, or taken back with the delete code; and how
-   *  many items and how big, as buckets. Nothing of the bundle is in it. */
+   *  folders left out, declined, taken back with the delete code, or its
+   *  keep-sending stopped; and how many items and how big, as buckets.
+   *  Nothing of the bundle is in it. */
   share_bundle: new Set<string>(['outcome', 'items_bucket', 'size_bucket']),
 };
 
 /** The answers {@link EVENTS.share_bundle} reports. */
-export const SHARE_BUNDLE_OUTCOMES = ['sent', 'partial', 'declined', 'deleted'] as const;
+export const SHARE_BUNDLE_OUTCOMES = ['sent', 'partial', 'declined', 'deleted', 'stopped'] as const;
 /** The labels {@link shareItemsBucket} returns. */
 export const SHARE_ITEMS_BUCKETS = ['1', '2-9', '10-49', '50-199', '200+'] as const;
 /** The labels {@link shareSizeBucket} returns. */

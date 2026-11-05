@@ -10,6 +10,7 @@ import { noteAuthor, teammatesOn } from '../notes/git-facts.js';
 import { indexFreshness, staleBanner } from '../context/check.js';
 import { dropStoredPrompts, patchStats, readSession, writeSession, resolveContextDir } from './state.js';
 import { emit, emitHook, graftJson, payloadSessionId, withContextDirArg } from './hook-io.js';
+import { maybeShareSyncInBackground } from '../cloud/share-sync-state.js';
 import { codexPostBashPart, postBashPart, sessionStartPart } from './skills-wiring.js';
 import { handlePrompt } from './prompt-hook.js';
 import { runUpkeep } from '../upkeep-run.js';
@@ -527,6 +528,8 @@ export async function main(event: string): Promise<void> {
     // terminal never fires it) goes now. Once a day at most, never waited on.
     flushClosedSessions(dir);
     maybeFlushInBackground();
+    // Someone who said yes to `share-session --sync`: send what changed, from a detached child.
+    maybeShareSyncInBackground();
     // Once per repo: older versions kept the prompt in each session file.
     try { dropStoredPrompts(dir); } catch { /* tried again next session */ }
     trailAtStart(dir);

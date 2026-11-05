@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -424,10 +424,62 @@ test("trail share-session --delete: a code that isn't one says so and sends noth
   }
 });
 
+test("trail share-session --sync: says it keeps sending, --yes turns it on, a later run sends what grew into the same bundle, --stop ends it", async () => {
+  const { home, repo, id } = fakeSession();
+  const transcript = join(claudeProjectDir(repo, home), `${id}.jsonl`);
+  const ago = (min: number) => new Date(Date.now() - min * 60_000);
+  utimesSync(transcript, ago(30), ago(30));
+  const trail = await standIn(true);
+  try {
+    signIn(home, trail.url);
+    const shown = await spawnAsync(repo, home, ["--sync"]);
+    assert.equal(shown.status, 0, shown.stderr);
+    assert.match(shown.stdout, /^Your Claude, last 30 days and from now on, ready to send to the Trail team$/m);
+    assert.match(shown.stdout, /^Keeps on  after this, each Claude Code session you start sends what changed since, .* trail share-session --stop stops it$/m);
+    assert.match(shown.stdout, /only if they say yes, run trail share-session --sync --yes/);
+    assert.ok(!trail.got.some((g) => g.method === "POST"));
+
+    const on = await spawnAsync(repo, home, ["--sync", "--yes"]);
+    assert.equal(on.status, 0, on.stderr);
+    assert.match(on.stderr, /and from now on: each Claude Code session you start sends what changed since, at most every 15 minutes/);
+    assert.match(on.stderr, /stop any time: trail share-session --stop/);
+    const first = trail.got.filter((g) => g.method === "POST").map((g) => JSON.parse(g.body));
+    assert.deepEqual(first.map((p) => p.kind), ["setup", "session"]);
+
+    const status = await spawnAsync(repo, home, ["--sync"]);
+    assert.match(status.stdout, /^Sending to the Trail team since .*: 1 session so far/m);
+    assert.equal(trail.got.filter((g) => g.method === "POST").length, 2, "asking again only shows where it stands");
+
+    appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: "and one more thing" } }) + "\n");
+    utimesSync(transcript, ago(15), ago(15));
+    const ran = await spawnTrail(repo, home, ["_share-sync"]);
+    assert.equal(ran.status, 0, ran.stderr);
+    const later = trail.got.filter((g) => g.method === "POST").map((g) => JSON.parse(g.body)).slice(2);
+    assert.deepEqual(later.map((p) => p.session_id), [id]);
+    assert.equal(later[0].bundle_id, first[0].bundle_id);
+    assert.equal(later[0].delete_hash, first[0].delete_hash);
+    assert.match(gunzipSync(Buffer.from(later[0].transcript_gz, "base64")).toString("utf8"), /and one more thing/);
+
+    const stop = await spawnAsync(repo, home, ["--stop"]);
+    assert.match(stop.stderr, /✓ stopped: nothing more is sent/);
+    assert.match(stop.stderr, /stays with the Trail team until you take it back: trail share-session --delete /);
+    appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: "after stopping" } }) + "\n");
+    utimesSync(transcript, ago(12), ago(12));
+    await spawnTrail(repo, home, ["_share-sync"]);
+    assert.equal(trail.got.filter((g) => g.method === "POST").length, 3, "nothing goes once stopped");
+  } finally {
+    trail.close();
+  }
+});
+
 /** trailIn, without blocking the stand-in server's event loop. */
 function spawnAsync(cwd: string, home: string, args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return spawnTrail(cwd, home, ["share-session", ...args]);
+}
+
+function spawnTrail(cwd: string, home: string, args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((done) => {
-    const child = spawn(process.execPath, ["--import", TSX, CLI, "share-session", ...args], {
+    const child = spawn(process.execPath, ["--import", TSX, CLI, ...args], {
       cwd,
       env: cliEnv(home),
       stdio: ["ignore", "pipe", "pipe"],

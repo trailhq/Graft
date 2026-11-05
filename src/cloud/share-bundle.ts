@@ -58,6 +58,8 @@ export interface Manifest {
   /** Images and files that aren't text, left out. */
   leftOut: number;
   setup: ReturnType<typeof setupCounts>;
+  /** The folders the sessions ran in, as they are on this laptop. Kept here, never sent. */
+  dirs: string[];
 }
 
 /** What has gone from one copy: kept beside it, so a broken send picks up where it stopped. */
@@ -74,7 +76,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 const dayLabel = (ms: number) => `${MONTHS[new Date(ms).getMonth()]} ${new Date(ms).getDate()}`;
 
 /** `~/Documents/assign` → `Documents-assign`, safe as one folder name. */
-function slug(label: string): string {
+export function slug(label: string): string {
   return label.replace(/^~[\\/]?/, "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "home";
 }
 
@@ -180,6 +182,7 @@ export function prepareBundle(opts: {
     hidden,
     leftOut,
     setup: setupCounts(set.setup),
+    dirs: [...cwds].sort(),
   };
   writeCopy(opts.out, m);
   return m;
@@ -289,7 +292,7 @@ function plural(n: number, one: string, many = `${one}s`): string {
 }
 
 /** What will be sent, for the person to say yes to. `copy` is the folder as shown (`~/.trail/share/…`). */
-export function bundlePreviewLines(m: Manifest, copy: string, to: { url: string }): string[] {
+export function bundlePreviewLines(m: Manifest, copy: string, to: { url: string }, opts: { sync?: string } = {}): string[] {
   const sessions = m.items.filter((it) => it.kind === "session");
   const gz = m.items.reduce((n, it) => n + it.gzBytes, 0);
   const times = sessions.map((s) => s.mtime);
@@ -317,9 +320,11 @@ export function bundlePreviewLines(m: Manifest, copy: string, to: { url: string 
     ...(m.dropped.length ? [["Dropped", `you left out ${plural(m.dropped.length, "folder")}: ${m.dropped.join(", ")}`] as [string, string]] : []),
     ["Copy", `${copy}  every file exactly as it will go, listed in SUMMARY.md`],
     ["Goes to", `the Trail team on ${host}, for the team-memory experiment, without your name`],
+    ...(opts.sync ? [["Keeps on", `after this, each Claude Code session you start sends what changed since, scrubbed the same way and kept in a copy you can read; ${opts.sync} stops it`] as [string, string]] : []),
     ["Delete", "any time, with the code you get once it's sent"],
   ];
-  return [`Your Claude, last ${plural(m.days, "day")}, ready to send to the Trail team`, "", ...rows.map(([k, v]) => `${k.padEnd(10)}${v}`)];
+  const head = `Your Claude, last ${plural(m.days, "day")}${opts.sync ? " and from now on" : ""}, ready to send to the Trail team`;
+  return [head, "", ...rows.map(([k, v]) => `${k.padEnd(10)}${v}`)];
 }
 
 function setupLine(c: Manifest["setup"]): string {
