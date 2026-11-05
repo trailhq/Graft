@@ -56,12 +56,36 @@ export interface SessionFile {
   /** Last written, ms. */
   mtime: number;
   size: number;
+  /** The Claude Code project folder it's in (`-Users-maya-src-web`), when listed across folders. */
+  folder?: string;
 }
 
 /** This folder's Claude Code sessions (or the nearest folder above's), newest first. */
 export function sessionsHere(dir: string, home?: string): SessionFile[] {
   const folder = sessionProjectDir(dir, home);
-  if (!folder) return [];
+  return folder ? sessionsIn(folder).sort((a, b) => b.mtime - a.mtime) : [];
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Every Claude Code session on this laptop written in the last `days` days, in any folder, newest first. */
+export function sessionsSince(days: number, home: string = homedir(), now = Date.now()): SessionFile[] {
+  const root = join(home, ".claude", "projects");
+  let folders: string[];
+  try {
+    folders = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const since = now - days * DAY_MS;
+  return folders
+    .flatMap((f) => sessionsIn(join(root, f)).map((s) => ({ ...s, folder: f })))
+    .filter((s) => s.mtime >= since)
+    .sort((a, b) => b.mtime - a.mtime);
+}
+
+/** The session transcripts directly in one Claude Code project folder. */
+function sessionsIn(folder: string): SessionFile[] {
   let names: string[];
   try {
     names = readdirSync(folder).filter((f) => f.endsWith(".jsonl") && !f.startsWith("agent-"));
@@ -77,7 +101,21 @@ export function sessionsHere(dir: string, home?: string): SessionFile[] {
       // gone while listing
     }
   }
-  return out.sort((a, b) => b.mtime - a.mtime);
+  return out;
+}
+
+/** The folder the session ran in, as its first lines say, or null. */
+export function sessionCwd(s: SessionFile): string | null {
+  for (const line of readSpan(s, 0).split("\n")) {
+    if (!line.includes('"cwd"')) continue;
+    try {
+      const cwd = (JSON.parse(line) as { cwd?: unknown }).cwd;
+      if (typeof cwd === "string" && cwd) return cwd;
+    } catch {
+      // the last line read can be cut short
+    }
+  }
+  return null;
 }
 
 /** The session `pick` names: its number in the list (1 = newest), or its id or the start of it. */
@@ -203,7 +241,7 @@ export function bundleSession(session: SessionFile, who: string[] = whoIAm()): B
       } catch {
         const r = redactText(line);
         count(r.found);
-        out.push(r.text);
+        out.push(hide(r.text));
         continue;
       }
       const e = entry as { type?: unknown; timestamp?: unknown; customTitle?: unknown; summary?: unknown; message?: { id?: unknown } };
@@ -291,8 +329,11 @@ export function whoIAm(extra: string[] = []): string[] {
   }
   const emails = [git("user.email"), ...extra.filter((x) => x.includes("@"))];
   const all = [homedir(), login, basename(homedir()), git("user.name"), ...emails, ...emails.map((e) => e.split("@")[0]!), ...extra];
-  return [...new Set(all.map((x) => x.trim()).filter((x) => x.length >= 3))].sort((a, b) => b.length - a.length);
+  return [...new Set(all.map((x) => x.trim()).filter((x) => x.length >= 3 && !GENERIC_LOGINS.has(x.toLowerCase())))].sort((a, b) => b.length - a.length);
 }
+
+/** Machine logins that name nobody, and would turn up as ordinary words (`test runner`). */
+const GENERIC_LOGINS = new Set(["root", "admin", "user", "users", "ubuntu", "runner", "vscode", "node", "ec2-user", "codespace", "developer", "dev", "app", "default"]);
 
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 
@@ -312,7 +353,11 @@ export function anonymize(text: string, who: string[]): { text: string; n: numbe
   for (const w of who) {
     if (!out.toLowerCase().includes(w.toLowerCase())) continue;
     const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = w.startsWith("/") || /^[A-Za-z]:\\/.test(w) ? new RegExp(esc, "gi") : new RegExp(`(?<![A-Za-z0-9])${esc}(?![A-Za-z0-9])`, "gi");
+    // A distinctive name, six characters or more, goes wherever it stands: after an escape
+    // (`\nmaya…`), a URL-encoded slash (`%2Fmaya`) or inside a longer word (`mayas-branch`).
+    // A short one only as its own word, so `ian` leaves `Christian` alone.
+    const anywhere = w.startsWith("/") || /^[A-Za-z]:\\/.test(w) || w.length >= 6;
+    const re = anywhere ? new RegExp(esc, "gi") : new RegExp(`(?<![A-Za-z0-9])${esc}(?![A-Za-z0-9])`, "gi");
     const to = w.startsWith("/") || /^[A-Za-z]:\\/.test(w) ? "~" : w.includes("@") ? "[email]" : "[you]";
     out = out.replace(re, () => {
       n++;

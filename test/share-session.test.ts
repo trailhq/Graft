@@ -7,16 +7,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
-import { mkdirSync, mkdtempSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { BRAND_ENV } from "../src/brand.js";
-import { bundleSession, pickSession, previewLines, redactedCount, sessionsHere, type SessionFile } from "../src/cloud/share-session.js";
-import { shareAllowed, shareSession, type Cloud } from "../src/cloud/workspace.js";
+import { anonymize, bundleSession, pickSession, previewLines, redactedCount, sessionsHere, whoIAm, type SessionFile } from "../src/cloud/share-session.js";
+import { deleteSharedBundle, shareAllowed, shareSession, type Cloud } from "../src/cloud/workspace.js";
 import { claudeProjectDir } from "../src/notes/session-cost.js";
 import { secretReason } from "../src/notes/secrets.js";
 import { REDACTED, redactText } from "../src/trace/redact.js";
@@ -62,6 +63,18 @@ test("redactText: a private key goes whole, BEGIN to END, and the lines around i
 test("redactText: only the line with the secret changes", () => {
   const got = redactText(`line one\nTOKEN=${GH}\nline three`);
   assert.equal(got.text, "line one\nTOKEN=[redacted]\nline three");
+});
+
+test("anonymize: a distinctive name goes wherever it stands, glued to an escape, a URL-encoded slash or a longer word; a short one only as its own word", () => {
+  const who = ["/Users/maya.okafor", "mayaokafor", "okafor", "maya"];
+  const got = anonymize("cd /Users/maya.okafor/src\\nokafor said hi; see github.com%2Fmayaokafor-acme and okafors-branch. maya and mayans and Okafor, mail maya@acme.test", who);
+  assert.equal(got.text, "cd ~/src\\n[you] said hi; see github.com%2F[you]-acme and [you]s-branch. [you] and mayans and [you], mail [email]");
+  assert.equal(got.n, 7);
+});
+
+test("whoIAm: a machine login like runner or ubuntu names nobody, so it isn't hidden", () => {
+  assert.ok(!whoIAm(["runner", "ubuntu", "Maya Okafor"]).some((w) => ["runner", "ubuntu"].includes(w)));
+  assert.ok(whoIAm(["Maya Okafor"]).includes("Maya Okafor"));
 });
 
 /** A Claude Code project folder with one session in it, under a scratch home. */
@@ -198,15 +211,25 @@ test("shareAllowed: Trail decides; a workspace it refuses is a no, and a Trail w
   assert.equal(await shareAllowed(CLOUD, answering(403, { error: "no" }).fetchImpl), false);
   const old = await shareAllowed(CLOUD, answering(404, { error: "not found" }).fetchImpl);
   assert.ok(typeof old === "object" && /doesn't take shared sessions yet/.test(old.error));
+  const noBucket = await shareAllowed(CLOUD, answering(503, { error: "no bucket" }).fetchImpl);
+  assert.ok(typeof noBucket === "object" && /doesn't take shared sessions yet/.test(noBucket.error));
 });
 
 test("shareSession: posts the zipped session and its counts, nothing about the person", async () => {
   const t = answering(201, { id: "u1", gz_bytes: 10 });
-  const body = { session_id: "s1", repo: "github.com/acme/web", trail_version: "0.28.0", title: "t", messages: 3, subagents: 0, bytes: 100, redacted: 1, transcript_gz: "H4sI" };
+  const body = { bundle_id: "4f6c0e2a-1111-4222-8333-944455556666", kind: "session" as const, delete_hash: "ab".repeat(32), session_id: "s1", repo: "github.com/acme/web", trail_version: "0.28.0", title: "t", messages: 3, subagents: 0, bytes: 100, redacted: 1, transcript_gz: "H4sI" };
   assert.deepEqual(await shareSession(CLOUD, body, t.fetchImpl), { id: "u1", gz_bytes: 10 });
   assert.equal(t.sent[0]!.method, "POST");
   assert.equal(t.sent[0]!.url, "http://trail.test/api/cli/shared-sessions");
-  assert.deepEqual(Object.keys(t.sent[0]!.body as object).sort(), ["bytes", "messages", "redacted", "repo", "session_id", "subagents", "title", "trail_version", "transcript_gz"]);
+  assert.deepEqual(Object.keys(t.sent[0]!.body as object).sort(), ["bundle_id", "bytes", "delete_hash", "kind", "messages", "redacted", "repo", "session_id", "subagents", "title", "trail_version", "transcript_gz"]);
+});
+
+test("deleteSharedBundle: sends the code to the bundle's own address, and Trail says how many went", async () => {
+  const t = answering(200, { deleted: 37 });
+  assert.deepEqual(await deleteSharedBundle(CLOUD, "4f6c0e2a-1111-4222-8333-944455556666", "s3cret-part", t.fetchImpl), { deleted: 37 });
+  assert.equal(t.sent[0]!.method, "DELETE");
+  assert.equal(t.sent[0]!.url, "http://trail.test/api/cli/shared-sessions/bundles/4f6c0e2a-1111-4222-8333-944455556666");
+  assert.deepEqual(t.sent[0]!.body, { delete_code: "s3cret-part" });
 });
 
 test("session_shared carries only its size and message count, as fixed labels", () => {
@@ -227,22 +250,31 @@ function cliEnv(home: string): NodeJS.ProcessEnv {
 }
 
 /** A stand-in Trail on this machine that allows or refuses, and keeps what it was sent. */
-async function standIn(allowed: boolean): Promise<{ url: string; got: Array<{ method: string; path: string; body: string }>; close: () => void }> {
+async function standIn(allowed: boolean): Promise<{ url: string; got: Array<{ method: string; path: string; body: string }>; close: () => void; failPostsAfter: number | null }> {
   const got: Array<{ method: string; path: string; body: string }> = [];
+  const self = { url: "", got, close: () => {}, failPostsAfter: null as number | null };
   const server = createServer(async (req: IncomingMessage, res) => {
     let body = "";
     for await (const chunk of req) body += chunk;
     got.push({ method: req.method!, path: req.url!, body });
+    if (req.method === "POST" && self.failPostsAfter !== null && got.filter((g) => g.method === "POST").length > self.failPostsAfter) {
+      got.pop();
+      res.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ error: "the database is busy" }));
+      return;
+    }
     if (!allowed) {
       res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ error: "sharing a session is for the Trail team only" }));
       return;
     }
     if (req.url === "/api/cli/shared-sessions/allowed") res.writeHead(200).end(JSON.stringify({ ok: true }));
+    else if (req.method === "DELETE") res.writeHead(200).end(JSON.stringify({ deleted: got.filter((g) => g.method === "POST").length }));
     else res.writeHead(201).end(JSON.stringify({ id: "u1", gz_bytes: 1 }));
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as { port: number }).port;
-  return { url: `http://127.0.0.1:${port}`, got, close: () => server.close() };
+  self.url = `http://127.0.0.1:${port}`;
+  self.close = () => server.close();
+  return self;
 }
 
 function signIn(home: string, url: string): void {
@@ -255,7 +287,7 @@ test("trail share-session: not signed in, one line and nothing read or sent", ()
   const r = spawnSync(process.execPath, ["--import", TSX, CLI, "share-session"], { cwd: repo, encoding: "utf8", timeout: 60_000, env: cliEnv(home) });
   assert.equal(r.status, 1, r.stderr);
   assert.equal(r.stdout, "");
-  assert.equal(r.stderr.trim(), "✗ internal only: share-session is for the Trail team, signed in to its workspace on team.trailhq.com");
+  assert.equal(r.stderr.trim(), "✗ internal only: share-session is for the Trail team, signed in to team.trailhq.com with a trailhq.com or nanonets.com email");
 });
 
 test("trail share-session: signed in to another workspace, the same one line, and only the check is sent", async () => {
@@ -272,12 +304,12 @@ test("trail share-session: signed in to another workspace, the same one line, an
   }
 });
 
-test("trail share-session: without a terminal it shows what would go and sends nothing; --yes sends it", async () => {
+test("trail share-session <session>: without a terminal it shows what would go and sends nothing; --yes sends it", async () => {
   const { home, repo, id } = fakeSession();
   const trail = await standIn(true);
   try {
     signIn(home, trail.url);
-    const shown = await spawnAsync(repo, home, []);
+    const shown = await spawnAsync(repo, home, ["1"]);
     assert.equal(shown.status, 0, shown.stderr);
     assert.match(shown.stdout, /^Session {3}Stop hook misses Desktop corrections$/m);
     assert.match(shown.stdout, /nothing sent\. Show the person what's above; only if they say yes, run trail share-session 5a1e0c2d --yes/);
@@ -286,10 +318,13 @@ test("trail share-session: without a terminal it shows what would go and sends n
     const sent = await spawnAsync(repo, home, ["5a1e0c2d", "--yes"]);
     assert.equal(sent.status, 0, sent.stderr);
     assert.match(sent.stderr, /✓ sent 5a1e0c2d to the Trail team/);
+    assert.match(sent.stderr, /take it back any time: trail share-session --delete [0-9a-f-]{36}\.[A-Za-z0-9_-]{16,}/);
     const post = trail.got.find((g) => g.method === "POST")!;
     assert.equal(post.path, "/api/cli/shared-sessions");
     const body = JSON.parse(post.body);
     assert.equal(body.session_id, id);
+    assert.equal(body.kind, "session");
+    assert.match(body.delete_hash, /^[0-9a-f]{64}$/);
     assert.equal(body.subagents, 1);
     const jsonl = gunzipSync(Buffer.from(body.transcript_gz, "base64")).toString("utf8");
     assert.match(jsonl, /why does the stop hook skip my corrections/);
@@ -298,6 +333,92 @@ test("trail share-session: without a terminal it shows what would go and sends n
     const list = await spawnAsync(repo, home, ["--list"]);
     assert.match(list.stdout, /^ {3}1 {2}.*Stop hook misses Desktop corrections/m);
     assert.match(list.stdout, /^ {3}2 {2}Oct 1 .*old/m);
+  } finally {
+    trail.close();
+  }
+});
+
+test("trail share-session: without a terminal it scrubs the whole Claude into a copy, shows it and sends nothing; --yes sends that copy; --delete takes it back", async () => {
+  const { home, repo, id } = fakeSession();
+  const trail = await standIn(true);
+  try {
+    signIn(home, trail.url);
+    const shown = await spawnAsync(repo, home, []);
+    assert.equal(shown.status, 0, shown.stderr);
+    assert.match(shown.stdout, /^Your Claude, last 30 days, ready to send to the Trail team$/m);
+    assert.match(shown.stdout, /^Sessions {2}1 session in 1 folder · [A-Z][a-z]{2} \d{1,2} · /m);
+    assert.match(shown.stdout, /^ {12}1 {2}\/work\/web {2}1 session$/m);
+    assert.match(shown.stdout, /^Copy {6}~\/\.trail\/share\/\d{4}-\d{2}-\d{2}-\d{4} {2}every file exactly as it will go/m);
+    assert.match(shown.stdout, /nothing sent\. Show the person what's above and the copy at ~\/\.trail\/share\/[\d-]+; only if they say yes, run trail share-session --yes/);
+    assert.ok(!trail.got.some((g) => g.method === "POST"), "nothing is posted without a yes");
+    const root = join(home, ".trail", "share");
+    const copy = join(root, readdirSync(root)[0]!);
+    for (const f of ["SUMMARY.md", "setup.json", "manifest.json"]) assert.ok(existsSync(join(copy, f)), f);
+
+    const sent = await spawnAsync(repo, home, ["--yes"]);
+    assert.equal(sent.status, 0, sent.stderr);
+    assert.match(sent.stderr, /✓ sent your Claude to the Trail team: 2 items/);
+    const posts = trail.got.filter((g) => g.method === "POST").map((g) => JSON.parse(g.body));
+    assert.deepEqual(posts.map((p) => p.kind), ["setup", "session"]);
+    assert.equal(new Set(posts.map((p) => p.bundle_id)).size, 1, "one bundle");
+    assert.equal(posts[1].session_id, id);
+    const jsonl = gunzipSync(Buffer.from(posts[1].transcript_gz, "base64")).toString("utf8");
+    assert.match(jsonl, /why does the stop hook skip my corrections/);
+    assert.equal(secretReason(jsonl), null);
+    const code = /--delete (\S+)/.exec(sent.stderr)![1]!;
+    const [bundleId, secret] = code.split(".");
+    assert.equal(posts[0].bundle_id, bundleId);
+    assert.equal(posts[0].delete_hash, createHash("sha256").update(secret!).digest("hex"));
+    assert.ok(!JSON.stringify(posts).includes(secret!), "the secret never leaves");
+
+    const again = await spawnAsync(repo, home, ["--yes"]);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /nothing sent\./, "a sent copy isn't sent again; a new one is shown first");
+    assert.equal(trail.got.filter((g) => g.method === "POST").length, 2);
+
+    const del = await spawnAsync(repo, home, ["--delete", code]);
+    assert.equal(del.status, 0, del.stderr);
+    assert.match(del.stderr, /✓ deleted 2 items from the Trail team/);
+    const d = trail.got.find((g) => g.method === "DELETE")!;
+    assert.equal(d.path, `/api/cli/shared-sessions/bundles/${bundleId}`);
+    assert.deepEqual(JSON.parse(d.body), { delete_code: secret });
+    assert.ok(JSON.parse(readFileSync(join(copy, "sent.json"), "utf8")).deletedAt, "the copy knows it was taken back");
+  } finally {
+    trail.close();
+  }
+});
+
+test("trail share-session --yes: a send that stops partway picks up where it stopped, in the same bundle", async () => {
+  const { home, repo } = fakeSession();
+  const trail = await standIn(true);
+  try {
+    signIn(home, trail.url);
+    await spawnAsync(repo, home, []);
+    trail.failPostsAfter = 1;
+    const broke = await spawnAsync(repo, home, ["--yes"]);
+    assert.equal(broke.status, 1, broke.stderr);
+    assert.match(broke.stderr, /✗ couldn't send it · the database is busy/);
+    assert.match(broke.stderr, /1 of 2 went; run trail share-session again to send the rest, or take back what went with --delete /);
+    trail.failPostsAfter = null;
+    const rest = await spawnAsync(repo, home, ["--yes"]);
+    assert.equal(rest.status, 0, rest.stderr);
+    const posts = trail.got.filter((g) => g.method === "POST").map((g) => JSON.parse(g.body));
+    assert.deepEqual(posts.map((p) => p.kind), ["setup", "session"], "each item once");
+    assert.equal(new Set(posts.map((p) => p.bundle_id)).size, 1);
+  } finally {
+    trail.close();
+  }
+});
+
+test("trail share-session --delete: a code that isn't one says so and sends nothing", async () => {
+  const { home, repo } = fakeSession();
+  const trail = await standIn(true);
+  try {
+    signIn(home, trail.url);
+    const r = await spawnAsync(repo, home, ["--delete", "nope"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /that isn't a delete code/);
+    assert.ok(!trail.got.some((g) => g.method === "DELETE"));
   } finally {
     trail.close();
   }
