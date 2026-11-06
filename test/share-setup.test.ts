@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectSetup, setupCounts } from "../src/cloud/share-setup.js";
@@ -15,10 +15,22 @@ import { secretReason } from "../src/notes/secrets.js";
 // Built in pieces so no scanner reads a real-looking key in this file.
 const OPENAI = "sk-" + "proj-" + "Q7x2Lm9Pz4Rt8Vb1Nc6Kw3Hy5Jd0Fs";
 
+let made = 0;
+/**
+ * A scratch folder with a plain name. mkdtemp's random suffix (`setup-home-Qx9Zk2`)
+ * can read as a key to the redaction, which runs before the home folder becomes `~`.
+ */
+function scratch(kind: string): string {
+  const dir = join(tmpdir(), `setup-${kind}-${process.pid}-${++made}`);
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 /** A home folder with a Claude Code setup in it, and one repo the person worked in. */
 function fakeHome(): { home: string; repo: string } {
-  const home = mkdtempSync(join(tmpdir(), "setup-home-"));
-  const repo = mkdtempSync(join(tmpdir(), "setup-repo-"));
+  const home = scratch("home");
+  const repo = scratch("repo");
   const put = (path: string, text: string) => {
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, text);
