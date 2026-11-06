@@ -127,7 +127,30 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
   wall_hit: new Set<string>(['class', 'had_lesson']),
   /** How long one hook took, as a bucket: which hook. */
   hook_ms: new Set<string>(['event', 'bucket']),
+  /** A Trail teammate sent one of their Claude Code sessions to the Trail
+   *  team (`trail share-session`, internal only): its size and how many
+   *  messages, as buckets. The session itself goes to Trail on the person's
+   *  yes, never through telemetry; nothing of it is in this event. */
+  session_shared: new Set<string>(['size_bucket', 'messages_bucket']),
+  /** A Trail teammate's answer to sending their whole Claude (`trail
+   *  share-session` with no session named, internal only): sent, sent with
+   *  folders left out, declined, taken back with the delete code, or its
+   *  keep-sending stopped; and how many items and how big, as buckets.
+   *  Nothing of the bundle is in it. */
+  share_bundle: new Set<string>(['outcome', 'items_bucket', 'size_bucket']),
 };
+
+/** The answers {@link EVENTS.share_bundle} reports. */
+export const SHARE_BUNDLE_OUTCOMES = ['sent', 'partial', 'declined', 'deleted', 'stopped'] as const;
+/** The labels {@link shareItemsBucket} returns. */
+export const SHARE_ITEMS_BUCKETS = ['1', '2-9', '10-49', '50-199', '200+'] as const;
+/** The labels {@link shareSizeBucket} returns. */
+export const SHARE_SIZE_BUCKETS = ['<1MB', '1-10MB', '10-50MB', '50-200MB', '200MB+'] as const;
+
+/** The labels {@link sessionSizeBucket} returns. */
+export const SESSION_SIZE_BUCKETS = ['<100KB', '100KB-1MB', '1-5MB', '5-20MB', '20MB+'] as const;
+/** The labels {@link sessionMessagesBucket} returns. */
+export const SESSION_MESSAGES_BUCKETS = ['<50', '50-199', '200-499', '500-1999', '2000+'] as const;
 
 /** The labels {@link hookMsBucket} returns. */
 export const HOOK_MS_BUCKETS = ['<50ms', '50-100ms', '100-300ms', '300ms-1s', '1-3s', '3s+'] as const;
@@ -160,6 +183,15 @@ export const VALUES: Record<string, Record<string, ReadonlySet<string>>> = {
   hook_ms: {
     event: new Set(['session-start', 'prompt', 'pre-bash', 'pre-edit', 'tool-savings', 'post-bash', 'post-bash-fail', 'post-edit', 'post-edit-sync', 'stop']),
     bucket: new Set(HOOK_MS_BUCKETS),
+  },
+  session_shared: {
+    size_bucket: new Set(SESSION_SIZE_BUCKETS),
+    messages_bucket: new Set(SESSION_MESSAGES_BUCKETS),
+  },
+  share_bundle: {
+    outcome: new Set(SHARE_BUNDLE_OUTCOMES),
+    items_bucket: new Set(SHARE_ITEMS_BUCKETS),
+    size_bucket: new Set(SHARE_SIZE_BUCKETS),
   },
 };
 
@@ -318,6 +350,44 @@ export function hookMsBucket(ms: number): (typeof HOOK_MS_BUCKETS)[number] {
   if (ms < 1000) return '300ms-1s';
   if (ms < 3000) return '1-3s';
   return '3s+';
+}
+
+/** A shared session's size, redacted, before zipping. */
+export function sessionSizeBucket(bytes: number): (typeof SESSION_SIZE_BUCKETS)[number] {
+  const kb = bytes / 1024;
+  if (kb < 100) return '<100KB';
+  if (kb < 1024) return '100KB-1MB';
+  if (kb < 5 * 1024) return '1-5MB';
+  if (kb < 20 * 1024) return '5-20MB';
+  return '20MB+';
+}
+
+/** How many messages a shared session has, tool calls and results included. */
+export function sessionMessagesBucket(n: number): (typeof SESSION_MESSAGES_BUCKETS)[number] {
+  if (n < 50) return '<50';
+  if (n < 200) return '50-199';
+  if (n < 500) return '200-499';
+  if (n < 2000) return '500-1999';
+  return '2000+';
+}
+
+/** How many items a shared bundle has: sessions, plus its setup. */
+export function shareItemsBucket(n: number): (typeof SHARE_ITEMS_BUCKETS)[number] {
+  if (n <= 1) return '1';
+  if (n < 10) return '2-9';
+  if (n < 50) return '10-49';
+  if (n < 200) return '50-199';
+  return '200+';
+}
+
+/** A shared bundle's size, zipped. */
+export function shareSizeBucket(bytes: number): (typeof SHARE_SIZE_BUCKETS)[number] {
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1) return '<1MB';
+  if (mb < 10) return '1-10MB';
+  if (mb < 50) return '10-50MB';
+  if (mb < 200) return '50-200MB';
+  return '200MB+';
 }
 
 /** Estimated tokens saved in one session — the README's central claim, in the

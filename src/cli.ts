@@ -10,9 +10,9 @@
  */
 import { spawnSync } from "node:child_process";
 import "dotenv/config";
-import { Command } from "commander";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { Command, Option } from "commander";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Graft } from "./engine.js";
 import { resolveConfig, type EngineConfig } from "./ai/providers.js";
@@ -54,6 +54,8 @@ import { buildGraphWithProgress } from "./claude/build-progress.js";
 import { installBrainsServer, installCursorBrainsServer, removeBrainsServer, removeCursorBrainsServer } from "./hosts/claude-global.js";
 import { upsertCodexToml } from "./hosts/mcp-config.js";
 import { homedir } from "node:os";
+import { createInterface } from "node:readline";
+import { createHash } from "node:crypto";
 import { formatUpgradeReport, formatVersionReport, getNpmViewVersion, readCurrentVersion, readPackageName, runUpgrade } from "./cli-meta.js";
 import { nativeFallbackNotice } from "./graph/native.js";
 import { lockHeldByOther, patchBuildConfig, type BuildConfig } from "./util/state.js";
@@ -74,7 +76,7 @@ import { gateNote, namesRepoSymbol, symbolCandidates, trackedFiles } from "./not
 import { recordLookup } from "./cloud/lookup-activity.js";
 import { clearPending, cloudLines, loginLines, loginLink, sessionKey, startWaiting, WAIT_MS, waitForConnect } from "./cloud/nudge.js";
 import { teamWorkspace } from "./cloud/team-file.js";
-import { addRepo, claimLoginCode, clearCloud, cloudEnabled, cloudForRepo, cloudIn, failPair, fetchMe, fetchTeam, isError, readCloud, readClouds, sameWorkspace, serverUrl, trailUrl, useServer, writeCloud, type Cloud, type Me, type SetupFailure } from "./cloud/workspace.js";
+import { addRepo, claimLoginCode, clearCloud, cloudEnabled, cloudForRepo, cloudIn, deleteSharedBundle, failPair, fetchMe, fetchTeam, isError, readCloud, readClouds, sameWorkspace, serverUrl, shareAllowed, shareSession, trailUrl, useServer, writeCloud, type Cloud, type Me, type SetupFailure } from "./cloud/workspace.js";
 import {
   claimConnectCode,
   connectAgain,
@@ -99,7 +101,7 @@ import { formatOverlap, maybeRefreshBranches, overlapsWith, pushedWhen, readBran
 import { ensureRepoTrail, LEARNINGS_DIR } from "./notes/repo-trail.js";
 import type { AskResult } from "./ask/ask.js";
 import { setInputRate } from "./context/savings.js";
-import { formatUpdateNudge, maybeRefreshInBackground, readStamp, readUpdateCache, refreshUpdateCache, wiredHostIds, wiringOpts, writeStamp } from "./upkeep.js";
+import { formatUpdateNudge, maybeRefreshInBackground, readStamp, readUpdateCache, refreshUpdateCache, runningVersion, wiredHostIds, wiringOpts, writeStamp } from "./upkeep.js";
 import { shouldMoveToTrail } from "./upkeep-run.js";
 import {
   countBucket,
@@ -115,9 +117,18 @@ import {
   maybeFlushInBackground,
   patchState,
   runFlush,
+  sessionMessagesBucket,
+  sessionSizeBucket,
+  shareItemsBucket,
+  shareSizeBucket,
   track,
   trackFirstRunIfNew,
 } from "./telemetry/index.js";
+import { bundleSession, listLines, MAX_GZ_BYTES, pickSession, previewLines, redactedCount, sessionsHere, shareSessionEnabled, shortId, sizeLabel, whoIAm } from "./cloud/share-session.js";
+import { bundlePreviewLines, deleteCode, deleteHash, itemPayload, leaveOut, newCopyDir, newSentState, parseDeleteCode, parseLeaveOut, prepareBundle, readSent, unfinishedCopy, writeSent, type Manifest, type SentState } from "./cloud/share-bundle.js";
+import { trailHome } from "./notes/trail-home.js";
+import { readSyncState, runSync, syncDir, writeSyncState, type SyncState } from "./cloud/share-sync.js";
+import { hasShareSyncHook, installShareSyncHook, removeShareSyncHook, settingsPath, type HookResult } from "./cloud/share-hook.js";
 
 const program = new Command();
 const currentVersion = readCurrentVersion(import.meta.url);
@@ -396,6 +407,28 @@ program
   .description("internal: POST the queued anonymous usage events")
   .action(async () => {
     await runFlush();
+  });
+
+// Hidden: spawned detached by maybeShareSyncInBackground from the session-start
+// hook, once someone has said yes to `share-session`'s keep-sending. By hand it just
+// sends what changed, quietly.
+program
+  .command("_share-sync", { hidden: true })
+  .description("internal: send the Claude Code sessions that changed since the last share")
+  .action(async () => {
+    const s = readSyncState();
+    const cloud = s ? readClouds().find((c) => c.url === s.url) : undefined;
+    if (!s || !cloud) return;
+    await runSync({
+      home: homedir(),
+      who: whoIAm([cloud.user.name, cloud.user.email]),
+      trailVersion: runningVersion(),
+      repoOf: (cwd) => {
+        const r = workspaceRepo(cwd);
+        return r.git && !r.key.startsWith("local/") ? r.key : "";
+      },
+      send: (body) => shareSession(cloud, body),
+    });
   });
 
 grouped(program.command("telemetry"), GROUP.setup)
@@ -2352,6 +2385,382 @@ function logoutCommand(name = "logout"): Command {
     });
 }
 
+const INTERNAL_ONLY = "✗ internal only: share-session is for the Trail team, signed in to team.trailhq.com with a trailhq.com or nanonets.com email";
+
+/**
+ * The connection that may send sessions: one Trail says yes to, which it
+ * decides by the signed-in email. This repo's workspace is asked first. Null
+ * after saying why there is none.
+ */
+async function shareCloud(repoKey: string | null): Promise<Cloud | null> {
+  const all = readClouds();
+  const mine = repoKey ? cloudIn(all, repoKey) : null;
+  let failed: string | null = null;
+  for (const c of mine ? [mine, ...all.filter((x) => x !== mine)] : all) {
+    const ok = await shareAllowed(c);
+    if (ok === true) return c;
+    if (isError(ok)) failed = ok.error;
+  }
+  console.error(failed ? `✗ couldn't check with Trail · ${failed}` : INTERNAL_ONLY);
+  process.exitCode = 1;
+  return null;
+}
+
+/** Ask on the terminal for a line; a closed input is null. */
+function askLine(question: string): Promise<string | null> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise((done) => {
+    let answered = false;
+    rl.on("close", () => answered || done(null));
+    rl.question(question, (a) => {
+      answered = true;
+      rl.close();
+      done(a.trim());
+    });
+  });
+}
+
+/** Ask on the terminal; only `y` or `yes` is a yes, and a closed input is a no. */
+async function askYes(question: string): Promise<boolean> {
+  return /^y(es)?$/i.test((await askLine(question)) ?? "");
+}
+
+/** `~/…` for a path in the home folder, as the person reads it. */
+function homePath(p: string): string {
+  const home = homedir();
+  return p === home || p.startsWith(home + sep) ? `~${p.slice(home.length)}` : p;
+}
+
+/** A copy prepared longer ago than this isn't what the person saw today: it's prepared again. */
+const COPY_FRESH_MS = 24 * 60 * 60 * 1000;
+
+function shareSessionCommand(name = "share-session"): Command {
+  return new Command(name)
+    .description("Send your Claude to the Trail team for the team-memory experiment, and keep sending: the last 30 days of sessions, your setup and memory, then each new session, secrets and your name taken out (Trail team only)")
+    .argument("[session]", "send only this one of this folder's sessions: its number in --list, or its id")
+    .option("--list", "list this folder's sessions, newest first")
+    .option("--days <n>", "how many days of sessions to take", "30")
+    .option("--leave-out <numbers>", 'with --yes: folder numbers from the summary to leave out, like "3 7"')
+    .option("--yes", "send without asking: only after the person said yes to what it showed")
+    .option("--once", "send once: the last 30 days, and nothing after")
+    // Sending on is the default now; --sync, its old switch, still works.
+    .addOption(new Option("--sync").hideHelp())
+    .option("--stop", "stop sending: nothing more goes after this")
+    .option("--delete <code>", "take back everything sent under this delete code, and stop sending")
+    .action(async (pick: string | undefined, opts: { list?: boolean; days: string; leaveOut?: string; yes?: boolean; delete?: string; once?: boolean; stop?: boolean }) => {
+      const dir = process.cwd();
+      const here = workspaceRepo(dir);
+      // Taking back and stopping work without the flag: someone who tried it must always be able to undo it.
+      if (opts.stop) return stopSync(here.checkout);
+      if (!opts.delete && !shareSessionEnabled()) {
+        console.error(`✗ share-session isn't on in this release yet; to try it, run TRAIL_SHARE_SESSION=1 ${cmd("graft share-session")}`);
+        process.exitCode = 1;
+        return;
+      }
+      const repoKey = here.git && !here.key.startsWith("local/") ? here.key : null;
+      const cloud = await shareCloud(repoKey);
+      if (!cloud) return;
+      if (opts.delete) return deleteShared(cloud, opts.delete, here.checkout);
+      if (opts.list) {
+        const sessions = sessionsHere(dir);
+        console.log(listLines(sessions).join("\n"));
+        if (sessions.length) console.log(`· send one: ${cmd("graft share-session")} <number>`);
+        return;
+      }
+      if (pick) return shareOneSession(cloud, pick, !!opts.yes, here.checkout, repoKey);
+      const days = Number(opts.days);
+      if (!Number.isInteger(days) || days < 1 || days > 365) {
+        console.error("✗ --days takes a whole number of days, 1 to 365");
+        process.exitCode = 1;
+        return;
+      }
+      const sync = !opts.once;
+      if (sync) {
+        const on = readSyncState();
+        if (on && !on.stoppedAt) return console.log(syncStatusLines(on).join("\n"));
+      }
+      return shareWholeClaude(cloud, { days, leaveOut: opts.leaveOut, yes: !!opts.yes, sync }, here.checkout);
+    });
+}
+
+/** One session from this folder, as before: shown, then sent on a yes. */
+async function shareOneSession(cloud: Cloud, pick: string, yes: boolean, checkout: string, repoKey: string | null): Promise<void> {
+  const sessions = sessionsHere(process.cwd());
+  const session = pickSession(sessions, pick);
+  if (!session) {
+    console.error(sessions.length ? `✗ no session "${pick}" here · ${cmd("graft share-session")} --list shows them` : "✗ no Claude Code sessions for this folder yet");
+    process.exitCode = 1;
+    return;
+  }
+  const bundle = bundleSession(session, whoIAm([cloud.user.name, cloud.user.email]));
+  if (bundle.gz.length > MAX_GZ_BYTES) {
+    console.error(`✗ this session is too big to send: ${sizeLabel(bundle.gz.length)} zipped, and Trail takes up to ${sizeLabel(MAX_GZ_BYTES)}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(previewLines(bundle, { workspace: cloud.workspace.name, url: cloud.url }).join("\n"));
+  console.log("");
+  const interactive = process.stdin.isTTY && process.stderr.isTTY;
+  if (!yes && !interactive) {
+    console.log(`· nothing sent. Show the person what's above; only if they say yes, run ${cmd("graft share-session")} ${shortId(session)} --yes`);
+    return;
+  }
+  if (!yes && !(await askYes("Send this whole session, every message, tool call and result, to the Trail team? [y/N] "))) {
+    console.error("· nothing sent");
+    return;
+  }
+  const s = newSentState();
+  const sent = await shareSession(cloud, {
+    bundle_id: s.bundleId,
+    kind: "session",
+    delete_hash: deleteHash(s.secret),
+    session_id: session.id,
+    repo: repoKey ?? "",
+    trail_version: runningVersion(),
+    title: bundle.title,
+    messages: bundle.messages,
+    subagents: bundle.subagents,
+    bytes: bundle.bytes,
+    redacted: redactedCount(bundle),
+    transcript_gz: bundle.gz.toString("base64"),
+  });
+  if (isError(sent)) {
+    console.error(`✗ couldn't send it · ${sent.error}`);
+    process.exitCode = 1;
+    return;
+  }
+  track("session_shared", { size_bucket: sessionSizeBucket(bundle.bytes), messages_bucket: sessionMessagesBucket(bundle.messages) }, { repo: checkout });
+  console.error(`✓ sent ${shortId(session)} to the Trail team (${sizeLabel(bundle.gz.length)}) · thank you: it goes into the team-memory experiment`);
+  console.error(`· take it back any time: ${cmd("graft share-session")} --delete ${deleteCode(s)}`);
+}
+
+/**
+ * The whole Claude: every session from the last `days` days, the setup and
+ * the memory notes. Scrubbed into a copy under `~/.trail/share/` first; the
+ * person reads it and says yes, no, or which folders to leave out. Without a
+ * terminal (an agent ran it) it stops after the summary, and `--yes` later
+ * sends that same copy.
+ */
+async function shareWholeClaude(cloud: Cloud, opts: { days: number; leaveOut?: string; yes: boolean; sync: boolean }, checkout: string): Promise<void> {
+  const root = join(trailHome(), "share");
+  const tty = !!(process.stdin.isTTY && process.stderr.isTTY);
+  const earlier = unfinishedCopy(root);
+
+  if (earlier?.sent && tty && !opts.yes) {
+    const left = earlier.manifest.items.filter((it) => !earlier.sent!.sent.includes(it.id)).length;
+    console.log(`An earlier send stopped with ${left} of ${earlier.manifest.items.length} items left (${homePath(earlier.dir)}).`);
+    if (await askYes("Send the rest? [y/N] ")) await sendCopy(cloud, earlier.dir, earlier.manifest, earlier.sent, checkout, opts.sync);
+    else console.error("· nothing sent");
+    return;
+  }
+  if (opts.yes && earlier && (earlier.sent || Date.now() - earlier.manifest.createdAt < COPY_FRESH_MS)) {
+    let m = earlier.manifest;
+    if (opts.leaveOut && !earlier.sent) {
+      const ns = parseLeaveOut(opts.leaveOut, m);
+      if (!ns) {
+        console.error(`✗ --leave-out takes folder numbers from the summary, like "3 7"; nothing sent`);
+        process.exitCode = 1;
+        return;
+      }
+      m = leaveOut(earlier.dir, m, ns);
+    }
+    await sendCopy(cloud, earlier.dir, m, earlier.sent ?? newSentState(), checkout, opts.sync);
+    return;
+  }
+
+  // Nothing prepared yet, so it's prepared and shown: never sent unseen, --yes or not.
+  const out = newCopyDir(root);
+  const who = whoIAm([cloud.user.name, cloud.user.email]);
+  if (!tty) console.error(`· scrubbing your Claude Code sessions from the last ${opts.days} days, your setup and memory…`);
+  let m = prepareBundle({
+    days: opts.days,
+    home: homedir(),
+    who,
+    out,
+    repoOf: (cwd) => {
+      const r = workspaceRepo(cwd);
+      return r.git && !r.key.startsWith("local/") ? r.key : "";
+    },
+    onProgress: tty ? (done, total) => process.stderr.write(`\r· scrubbing sessions: ${done} of ${total}`) : undefined,
+  });
+  if (tty) process.stderr.write("\n");
+  const again = `${cmd("graft share-session")}${opts.sync ? "" : " --once"}`;
+  const show = () => {
+    console.log(bundlePreviewLines(m, homePath(out), cloud, opts.sync ? { sync: `${cmd("graft share-session")} --stop` } : {}).join("\n"));
+    console.log("");
+  };
+  show();
+  if (!tty) {
+    console.log(`· nothing sent. Show the person what's above and the copy at ${homePath(out)}; only if they say yes, run ${again} --yes, with --leave-out "<numbers>" for any folders they want out`);
+    return;
+  }
+  const declined = () => {
+    rmSync(out, { recursive: true, force: true });
+    track("share_bundle", { outcome: "declined", items_bucket: shareItemsBucket(m.items.length), size_bucket: shareSizeBucket(bundleGz(m)) }, { repo: checkout });
+    console.error("· nothing sent, and the copy is deleted");
+  };
+  const all = opts.sync ? "Send all of this, and keep sending?" : "Send all of this?";
+  for (;;) {
+    const a = await askLine(`${all} y · n · or folder numbers to leave out (like 3 7): `);
+    if (a === null || /^(n|no)?$/i.test(a)) return declined();
+    if (/^y(es)?$/i.test(a)) return void (await sendCopy(cloud, out, m, newSentState(), checkout, opts.sync));
+    const ns = parseLeaveOut(a, m);
+    if (!ns) {
+      console.error("· answer y, n, or folder numbers from the list");
+      continue;
+    }
+    m = leaveOut(out, m, ns);
+    show();
+    if (await askYes(opts.sync ? "Send the rest, and keep sending? [y/N] " : "Send the rest? [y/N] ")) return void (await sendCopy(cloud, out, m, newSentState(), checkout, opts.sync));
+    return declined();
+  }
+}
+
+function bundleGz(m: Manifest): number {
+  return m.items.reduce((n, it) => n + it.gzBytes, 0);
+}
+
+/** Send what's left of a copy, one item at a time, writing down each as it lands. */
+async function sendCopy(cloud: Cloud, dir: string, m: Manifest, sent: SentState, checkout: string, sync = false): Promise<boolean> {
+  writeSent(dir, sent);
+  const tty = process.stderr.isTTY;
+  const total = m.items.length;
+  let n = sent.sent.length;
+  for (const it of m.items) {
+    if (sent.sent.includes(it.id)) continue;
+    const r = await shareSession(cloud, {
+      bundle_id: sent.bundleId,
+      kind: it.kind,
+      delete_hash: deleteHash(sent.secret),
+      session_id: it.id,
+      repo: it.repo,
+      trail_version: runningVersion(),
+      title: it.title,
+      messages: it.messages,
+      subagents: it.subagents,
+      bytes: it.bytes,
+      redacted: it.redacted,
+      transcript_gz: itemPayload(dir, it),
+    });
+    if (isError(r)) {
+      if (tty) process.stderr.write("\n");
+      console.error(`✗ couldn't send it · ${r.error}`);
+      console.error(`· ${n} of ${total} went; run ${cmd("graft share-session")} again to send the rest${n ? `, or take back what went with --delete ${deleteCode(sent)}` : ""}`);
+      process.exitCode = 1;
+      return false;
+    }
+    sent.sent.push(it.id);
+    writeSent(dir, sent);
+    n++;
+    if (tty) process.stderr.write(`\r· sent ${n} of ${total}`);
+  }
+  if (tty) process.stderr.write("\n");
+  sent.finishedAt = Date.now();
+  writeSent(dir, sent);
+  const gz = bundleGz(m);
+  track("share_bundle", { outcome: m.dropped.length ? "partial" : "sent", items_bucket: shareItemsBucket(total), size_bucket: shareSizeBucket(gz) }, { repo: checkout });
+  console.error(`✓ sent your Claude to the Trail team: ${total} item${total === 1 ? "" : "s"}, ${sizeLabel(gz)} · thank you, it goes into the team-memory experiment`);
+  if (sync) {
+    const setup = readFileSync(join(dir, "setup.json"), "utf8");
+    writeSyncState({
+      bundleId: sent.bundleId,
+      secret: sent.secret,
+      since: Date.now(),
+      days: m.days,
+      url: cloud.url,
+      excluded: m.dropped,
+      dirs: m.dirs ?? [],
+      sessions: Object.fromEntries(m.items.filter((it) => it.kind === "session").map((it) => [it.id, it.mtime])),
+      setupHash: createHash("sha256").update(setup).digest("hex"),
+      lastRunAt: Date.now(),
+    });
+    console.error(`· and from now on: each Claude Code session you start, in any folder, sends what changed since, kept in ${homePath(syncDir())}`);
+    console.error(hookLine(installShareSyncHook(homedir())));
+    console.error(`· stop any time: ${cmd("graft share-session")} --stop`);
+  }
+  console.error(`· take it all back any time: ${cmd("graft share-session")} --delete ${deleteCode(sent)}`);
+  console.error(`· the code is also kept in ${homePath(join(dir, "sent.json"))}`);
+  return true;
+}
+
+/** What happened to the hook in `~/.claude/settings.json`, in one line. */
+function hookLine(r: HookResult): string {
+  const where = homePath(settingsPath(homedir()));
+  if (r === "added") return `· added one hook to ${where} so this runs in every folder, in the terminal and in Claude Desktop; --stop takes it out`;
+  if (r === "already") return `· its hook is in ${where}, so this runs in every folder`;
+  if (r === "removed") return `· took its hook out of ${where}`;
+  if (r === "absent") return "";
+  return `✗ couldn't add its hook to ${where}${r === "unparseable" ? " (the file isn't valid JSON)" : ""}, so this runs only in repos where trail is set up`;
+}
+
+/** Where a running sync stands, and its hook put back if something took it out. */
+function syncStatusLines(s: SyncState): string[] {
+  const n = Object.keys(s.sessions).length;
+  const at = (ms: number) => new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const last = s.lastRun;
+  const lastLine = !last
+    ? "· no background run yet: the next Claude Code session you start sends what changed"
+    : last.error
+      ? `✗ the last run, ${at(last.at)}, stopped: ${last.error}. The next session you start tries again`
+      : `· last run ${at(last.at)}: ${last.sent ? `sent ${last.sent}` : "nothing new to send"}`;
+  const put = hasShareSyncHook(homedir()) ? "already" : installShareSyncHook(homedir());
+  const hook = put === "added" ? `· put its hook back in ${homePath(settingsPath(homedir()))}, so this runs in every folder again` : hookLine(put);
+  return [
+    `Sending to the Trail team since ${at(s.since)}: ${n} session${n === 1 ? "" : "s"} so far.`,
+    lastLine,
+    hook,
+    `· what went is kept in ${homePath(syncDir())}`,
+    `· stop: ${cmd("graft share-session")} --stop · take it all back: ${cmd("graft share-session")} --delete ${deleteCode(s)}`,
+  ];
+}
+
+/** `--stop`: nothing more is sent; what went stays until it's deleted. */
+function stopSync(checkout: string): void {
+  const s = readSyncState();
+  if (!s || s.stoppedAt) {
+    console.error("· nothing to stop: you aren't sending sessions");
+    return;
+  }
+  writeSyncState({ ...s, stoppedAt: Date.now() });
+  track("share_bundle", { outcome: "stopped", items_bucket: shareItemsBucket(Object.keys(s.sessions).length + 1) }, { repo: checkout });
+  console.error("✓ stopped: nothing more is sent");
+  const hook = hookLine(removeShareSyncHook(homedir()));
+  if (hook) console.error(hook);
+  console.error(`· what already went stays with the Trail team until you take it back: ${cmd("graft share-session")} --delete ${deleteCode(s)}`);
+}
+
+/** `--delete <code>`: Trail deletes everything sent under it. */
+async function deleteShared(cloud: Cloud, code: string, checkout: string): Promise<void> {
+  const p = parseDeleteCode(code);
+  if (!p) {
+    console.error("✗ that isn't a delete code: it's the <id>.<secret> share-session printed when it sent");
+    process.exitCode = 1;
+    return;
+  }
+  const r = await deleteSharedBundle(cloud, p.bundleId, p.secret);
+  if (isError(r)) {
+    console.error(`✗ couldn't delete it · ${r.error}`);
+    process.exitCode = 1;
+    return;
+  }
+  const root = join(trailHome(), "share");
+  try {
+    for (const name of readdirSync(root)) {
+      const s = readSent(join(root, name));
+      if (s?.bundleId === p.bundleId) writeSent(join(root, name), { ...s, deletedAt: Date.now() });
+    }
+  } catch {
+    // no copies on this laptop
+  }
+  const on = readSyncState();
+  if (on?.bundleId === p.bundleId && !on.stoppedAt) {
+    writeSyncState({ ...on, stoppedAt: Date.now() });
+    removeShareSyncHook(homedir());
+  }
+  track("share_bundle", { outcome: "deleted", items_bucket: shareItemsBucket(r.deleted) }, { repo: checkout });
+  console.error(`✓ deleted ${r.deleted} item${r.deleted === 1 ? "" : "s"} from the Trail team`);
+}
+
 /** The repo at `repo`, as the workspace names it. */
 function workspaceRepo(repo: string): { key: string; name: string; checkout: string; git: boolean } {
   const place = repoPlace(repo);
@@ -2802,6 +3211,8 @@ if (TRAIL) {
   // Signing in is how every coding agent here gets the team's workspace: always listed.
   program.addCommand(loginCommand().helpGroup(GROUP.cloud));
   for (const c of [workspaceCommand(), logoutCommand()]) program.addCommand(c.helpGroup(GROUP.cloud), { hidden: !cloudEnabled() });
+  // The Trail team's own: never listed, and anyone else is told so in one line.
+  program.addCommand(shareSessionCommand(), { hidden: true });
   program.addCommand(statusCommand().helpGroup(GROUP.setup));
 
   // Help lists the groups in this order, and the commands within each.
