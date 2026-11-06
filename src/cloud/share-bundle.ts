@@ -126,7 +126,8 @@ export function prepareBundle(opts: {
     if (b.gz.length > MAX_GZ_BYTES) {
       tooBig.push({ folder, title: b.title, gzBytes: b.gz.length });
     } else {
-      const file = join("sessions", slug(folder), `${s.id}.jsonl.gz`);
+      // Always `/`: it's shown in SUMMARY.md, and join() takes it on Windows too.
+      const file = ["sessions", slug(folder), `${s.id}.jsonl.gz`].join("/");
       mkdirSync(join(opts.out, dirname(file)), { recursive: true });
       writeFileSync(join(opts.out, file), b.gz);
       add(b.redacted);

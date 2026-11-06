@@ -84,7 +84,7 @@ test("collectSetup: env, headers and URL paths go as names or origins, keys are 
   assert.ok(!all.includes(home), "the home folder becomes ~");
   assert.ok(!/maya/i.test(all), "the person's name and email come out");
   const memory = r.setup.files.find((f) => f.kind === "memory")!;
-  assert.match(memory.path, /^~\/\.claude\/projects\/-Users-\[you\]-web\/memory\/auth\.md$/);
+  assert.match(memory.path, /^~[\\/]\.claude[\\/]projects[\\/]-Users-\[you\]-web[\\/]memory[\\/]auth\.md$/);
   assert.match(memory.content, /AWS login moved to SSO/);
   assert.ok(r.redacted["an API key"]! >= 1);
   assert.ok(r.hidden > 0);

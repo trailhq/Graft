@@ -71,7 +71,7 @@ test("prepareBundle: the last 30 days of sessions from every folder, numbered by
   ]);
   const web = m.items.find((it) => it.id === "aaaa1111-0000-4000-8000-000000000001")!;
   assert.equal(web.repo, "github.com/acme/web");
-  assert.equal(web.file, join("sessions", "work-web", "aaaa1111-0000-4000-8000-000000000001.jsonl.gz"));
+  assert.equal(web.file, "sessions/work-web/aaaa1111-0000-4000-8000-000000000001.jsonl.gz", "always /, so SUMMARY.md reads the same on Windows");
   const jsonl = gunzipSync(readFileSync(join(out, web.file))).toString("utf8");
   assert.match(jsonl, /fix the order reader/);
   assert.equal(secretReason(jsonl), null, "the copy is already scrubbed");

@@ -368,8 +368,8 @@ test("trail share-session: without a terminal it scrubs the whole Claude into a 
     assert.match(shown.stdout, /^Your Claude, last 30 days, ready to send to the Trail team$/m);
     assert.match(shown.stdout, /^Sessions {2}1 session in 1 folder · [A-Z][a-z]{2} \d{1,2} · /m);
     assert.match(shown.stdout, /^ {12}1 {2}\/work\/web {2}1 session$/m);
-    assert.match(shown.stdout, /^Copy {6}~\/\.trail\/share\/\d{4}-\d{2}-\d{2}-\d{4} {2}every file exactly as it will go/m);
-    assert.match(shown.stdout, /nothing sent\. Show the person what's above and the copy at ~\/\.trail\/share\/[\d-]+; only if they say yes, run trail share-session --yes/);
+    assert.match(shown.stdout, /^Copy {6}~[\\/]\.trail[\\/]share[\\/]\d{4}-\d{2}-\d{2}-\d{4} {2}every file exactly as it will go/m);
+    assert.match(shown.stdout, /nothing sent\. Show the person what's above and the copy at ~[\\/]\.trail[\\/]share[\\/][\d-]+; only if they say yes, run trail share-session --yes/);
     assert.ok(!trail.got.some((g) => g.method === "POST"), "nothing is posted without a yes");
     const root = join(home, ".trail", "share");
     const copy = join(root, readdirSync(root)[0]!);
