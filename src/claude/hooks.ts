@@ -499,6 +499,8 @@ export async function main(event: string): Promise<void> {
   if (event === 'pre-bash') { await preBashMain(event); return; }
   // trail's own headless Claude calls (the first-run read of past sessions) run with this set.
   if (process.env.TRAIL_NO_HOOKS === '1') return;
+  // The one user-level entry `trail share-session` adds: start the background send, nothing else.
+  if (event === 'share-sync') { maybeShareSyncInBackground(); return; }
   const input = readStdin();
   // Registered in the repo and in ~/.claude, Claude Code runs both: one answers.
   // Who sent the payload decides first: Copilot CLI runs only the repo's copy.

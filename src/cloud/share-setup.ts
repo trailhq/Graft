@@ -184,14 +184,15 @@ export function collectSetup(opts: { home?: string; dirs?: string[]; who: string
         const matcher = typeof obj(g).matcher === "string" ? (obj(g).matcher as string) : "";
         for (const h of Array.isArray(obj(g).hooks) ? (obj(g).hooks as unknown[]) : []) {
           const command = obj(h).command;
-          if (typeof command === "string") out.push(clean(matcher ? `${matcher} → ${command}` : command));
+          // share-session's own entry is plumbing, not the person's setup: leaving it out keeps the setup unchanged by the yes.
+          if (typeof command === "string" && !command.includes('-hooks.cjs" share-sync')) out.push(clean(matcher ? `${matcher} → ${command}` : command));
         }
       }
       if (out.length) hooks[event] = out;
     }
     const perms = obj(s.permissions);
     const statusLine = obj(s.statusLine).command;
-    settings.push({
+    const info: SettingsInfo = {
       path: clean(path),
       ...(typeof s.model === "string" ? { model: s.model } : {}),
       ...(typeof s.outputStyle === "string" ? { outputStyle: clean(s.outputStyle) } : {}),
@@ -202,7 +203,11 @@ export function collectSetup(opts: { home?: string; dirs?: string[]; who: string
         .filter(([, on]) => on === true)
         .map(([name]) => clean(name)),
       env: Object.keys(obj(s.env)).map(clean),
-    });
+    };
+    // A file that says nothing (one holding only share-session's own hook, say) adds nothing to the setup.
+    const { path: _path, permissions, hooks: h, ...rest } = info;
+    const empty = !Object.keys(h).length && !permissions.allow.length && !permissions.ask.length && !permissions.deny.length && Object.values(rest).every((v) => (Array.isArray(v) ? !v.length : v === undefined));
+    if (!empty) settings.push(info);
   };
   addSettings(join(home, ".claude", "settings.json"));
   for (const d of dirs) for (const f of ["settings.json", "settings.local.json"]) addSettings(join(d, ".claude", f));

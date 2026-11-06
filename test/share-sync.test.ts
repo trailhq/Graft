@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { newSentState } from "../src/cloud/share-bundle.js";
 import { changedSessions, maybeShareSyncInBackground, readSyncState, runSync, syncDir, syncDue, writeSyncState, type SyncState } from "../src/cloud/share-sync.js";
-import { QUIET_MS, SYNC_EVERY_MS } from "../src/cloud/share-sync-state.js";
+import { QUIET_MS } from "../src/cloud/share-sync-state.js";
 import type { SharedSession } from "../src/cloud/workspace.js";
 import { secretReason } from "../src/notes/secrets.js";
 
@@ -66,12 +66,12 @@ function collector(failAfter: number | null = null) {
   return { got, send };
 }
 
-test("syncDue: on, not stopped, and not run in the last 15 minutes", () => {
+test("syncDue: every session start, while it's on and not stopped", () => {
   const { state } = synced();
-  assert.equal(syncDue(null, NOW), false);
-  assert.equal(syncDue(state, NOW), true);
-  assert.equal(syncDue({ ...state, lastRunAt: NOW - SYNC_EVERY_MS + 1000 }, NOW), false);
-  assert.equal(syncDue({ ...state, stoppedAt: NOW - 1 }, NOW), false);
+  assert.equal(syncDue(null), false);
+  assert.equal(syncDue(state), true);
+  assert.equal(syncDue({ ...state, lastRunAt: Date.now() }), true, "a run a moment ago doesn't hold the next one back");
+  assert.equal(syncDue({ ...state, stoppedAt: NOW - 1 }), false);
 });
 
 test("changedSessions: new or grown, and quiet for ten minutes; one already sent and unchanged isn't", () => {
@@ -97,6 +97,7 @@ test("runSync: sends what changed into the same bundle, scrubbed, keeps a readab
   assert.ok(!existsSync(join(syncDir(env), "sessions", "work-private")), "a left-out folder isn't even copied");
   const after = readSyncState(env)!;
   assert.equal(after.lastRunAt, NOW);
+  assert.deepEqual(after.lastRun, { at: NOW, sent: 2 }, "the run writes down what it did, for the status to show");
   assert.ok(after.setupHash);
   assert.ok(after.sessions["bbbb0000-0000-4000-8000-000000000001"], "a left-out session is passed over for good");
 
@@ -119,6 +120,7 @@ test("runSync: a send that fails stops there and keeps what went; the next run s
   const broke = collector(0);
   const r = await runSync({ home, who: [home], send: broke.send, trailVersion: "0.29.0", env, now: NOW });
   assert.equal(r!.error, "the database is busy");
+  assert.deepEqual(readSyncState(env)!.lastRun, { at: NOW, sent: 0, error: "the database is busy" }, "a failed run says so, instead of looking fine");
   const next = collector();
   await runSync({ home, who: [home], send: next.send, trailVersion: "0.29.0", env, now: NOW + 1000 });
   assert.deepEqual(next.got.map((b) => b.kind), ["session", "setup"]);
@@ -135,12 +137,25 @@ test("runSync: one run at a time, and none once stopped or never turned on", asy
   assert.equal(await runSync({ home, who: [home], send: collector().send, trailVersion: "0.29.0", env: empty, now: NOW }), null);
 });
 
-test("maybeShareSyncInBackground: starts a run when one is due and marks the time first, so a burst of sessions starts one", () => {
-  const { env } = synced();
-  const now = NOW + HOUR;
-  assert.equal(maybeShareSyncInBackground(env, now), true);
-  assert.equal(readSyncState(env)!.lastRunAt, now);
-  assert.equal(maybeShareSyncInBackground(env, now + 1000), false);
+test("runSync: a lock left by a run that died over an hour ago is taken over", async () => {
+  const { home, env } = synced();
+  mkdirSync(syncDir(env), { recursive: true });
+  const lock = join(syncDir(env), ".lock");
+  writeFileSync(lock, "123");
+  const old = new Date(Date.now() - 2 * HOUR);
+  utimesSync(lock, old, old);
+  const r = await runSync({ home, who: [home], send: collector().send, trailVersion: "0.29.0", env, now: Date.now() });
+  assert.ok(r && !r.error, "it ran");
+  assert.ok(!existsSync(lock), "and let go of the lock");
+});
+
+test("maybeShareSyncInBackground: starts a run at every session start while it's on, and none once stopped", () => {
+  const { env, state } = synced();
+  assert.equal(maybeShareSyncInBackground(env), true);
+  assert.equal(maybeShareSyncInBackground(env), true, "the next session starts one too; the run's lock keeps them from overlapping");
+  assert.equal(readSyncState(env)!.lastRunAt, state.lastRunAt, "starting a run doesn't claim it ran");
+  writeSyncState({ ...state, stoppedAt: NOW }, env);
+  assert.equal(maybeShareSyncInBackground(env), false);
   const off = { ...process.env, TRAIL_HOME: mkdtempSync(join(tmpdir(), "sync-off-")) };
-  assert.equal(maybeShareSyncInBackground(off, now), false);
+  assert.equal(maybeShareSyncInBackground(off), false);
 });

@@ -127,7 +127,8 @@ import {
 import { bundleSession, listLines, MAX_GZ_BYTES, pickSession, previewLines, redactedCount, sessionsHere, shareSessionEnabled, shortId, sizeLabel, whoIAm } from "./cloud/share-session.js";
 import { bundlePreviewLines, deleteCode, deleteHash, itemPayload, leaveOut, newCopyDir, newSentState, parseDeleteCode, parseLeaveOut, prepareBundle, readSent, unfinishedCopy, writeSent, type Manifest, type SentState } from "./cloud/share-bundle.js";
 import { trailHome } from "./notes/trail-home.js";
-import { readSyncState, runSync, SYNC_EVERY_MS, syncDir, writeSyncState, type SyncState } from "./cloud/share-sync.js";
+import { readSyncState, runSync, syncDir, writeSyncState, type SyncState } from "./cloud/share-sync.js";
+import { hasShareSyncHook, installShareSyncHook, removeShareSyncHook, settingsPath, type HookResult } from "./cloud/share-hook.js";
 
 const program = new Command();
 const currentVersion = readCurrentVersion(import.meta.url);
@@ -2670,7 +2671,8 @@ async function sendCopy(cloud: Cloud, dir: string, m: Manifest, sent: SentState,
       setupHash: createHash("sha256").update(setup).digest("hex"),
       lastRunAt: Date.now(),
     });
-    console.error(`· and from now on: each Claude Code session you start sends what changed since, at most every ${SYNC_EVERY_MS / 60_000} minutes, kept in ${homePath(syncDir())}`);
+    console.error(`· and from now on: each Claude Code session you start, in any folder, sends what changed since, kept in ${homePath(syncDir())}`);
+    console.error(hookLine(installShareSyncHook(homedir())));
     console.error(`· stop any time: ${cmd("graft share-session")} --stop`);
   }
   console.error(`· take it all back any time: ${cmd("graft share-session")} --delete ${deleteCode(sent)}`);
@@ -2678,12 +2680,32 @@ async function sendCopy(cloud: Cloud, dir: string, m: Manifest, sent: SentState,
   return true;
 }
 
-/** Where a running sync stands. */
+/** What happened to the hook in `~/.claude/settings.json`, in one line. */
+function hookLine(r: HookResult): string {
+  const where = homePath(settingsPath(homedir()));
+  if (r === "added") return `· added one hook to ${where} so this runs in every folder, in the terminal and in Claude Desktop; --stop takes it out`;
+  if (r === "already") return `· its hook is in ${where}, so this runs in every folder`;
+  if (r === "removed") return `· took its hook out of ${where}`;
+  if (r === "absent") return "";
+  return `✗ couldn't add its hook to ${where}${r === "unparseable" ? " (the file isn't valid JSON)" : ""}, so this runs only in repos where trail is set up`;
+}
+
+/** Where a running sync stands, and its hook put back if something took it out. */
 function syncStatusLines(s: SyncState): string[] {
   const n = Object.keys(s.sessions).length;
   const at = (ms: number) => new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const last = s.lastRun;
+  const lastLine = !last
+    ? "· no background run yet: the next Claude Code session you start sends what changed"
+    : last.error
+      ? `✗ the last run, ${at(last.at)}, stopped: ${last.error}. The next session you start tries again`
+      : `· last run ${at(last.at)}: ${last.sent ? `sent ${last.sent}` : "nothing new to send"}`;
+  const put = hasShareSyncHook(homedir()) ? "already" : installShareSyncHook(homedir());
+  const hook = put === "added" ? `· put its hook back in ${homePath(settingsPath(homedir()))}, so this runs in every folder again` : hookLine(put);
   return [
-    `Sending to the Trail team since ${at(s.since)}: ${n} session${n === 1 ? "" : "s"} so far${s.lastRunAt ? `, last checked ${at(s.lastRunAt)}` : ""}.`,
+    `Sending to the Trail team since ${at(s.since)}: ${n} session${n === 1 ? "" : "s"} so far.`,
+    lastLine,
+    hook,
     `· what went is kept in ${homePath(syncDir())}`,
     `· stop: ${cmd("graft share-session")} --stop · take it all back: ${cmd("graft share-session")} --delete ${deleteCode(s)}`,
   ];
@@ -2699,6 +2721,8 @@ function stopSync(checkout: string): void {
   writeSyncState({ ...s, stoppedAt: Date.now() });
   track("share_bundle", { outcome: "stopped", items_bucket: shareItemsBucket(Object.keys(s.sessions).length + 1) }, { repo: checkout });
   console.error("✓ stopped: nothing more is sent");
+  const hook = hookLine(removeShareSyncHook(homedir()));
+  if (hook) console.error(hook);
   console.error(`· what already went stays with the Trail team until you take it back: ${cmd("graft share-session")} --delete ${deleteCode(s)}`);
 }
 
@@ -2726,7 +2750,10 @@ async function deleteShared(cloud: Cloud, code: string, checkout: string): Promi
     // no copies on this laptop
   }
   const on = readSyncState();
-  if (on?.bundleId === p.bundleId && !on.stoppedAt) writeSyncState({ ...on, stoppedAt: Date.now() });
+  if (on?.bundleId === p.bundleId && !on.stoppedAt) {
+    writeSyncState({ ...on, stoppedAt: Date.now() });
+    removeShareSyncHook(homedir());
+  }
   track("share_bundle", { outcome: "deleted", items_bucket: shareItemsBucket(r.deleted) }, { repo: checkout });
   console.error(`✓ deleted ${r.deleted} item${r.deleted === 1 ? "" : "s"} from the Trail team`);
 }

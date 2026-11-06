@@ -459,17 +459,24 @@ test("trail share-session keeps sending by default: says so, --yes turns it on, 
     assert.match(shown.stdout, /^Your Claude, last 30 days and from now on, ready to send to the Trail team$/m);
     assert.match(shown.stdout, /^Keeps on  after this, each Claude Code session you start sends what changed since, .* trail share-session --stop stops it$/m);
     assert.match(shown.stdout, /only if they say yes, run trail share-session --yes,/);
+    assert.match(shown.stdout, /^Hook {6}one entry in ~\/\.claude\/settings\.json, so it runs in every folder/m);
+    assert.ok(!existsSync(join(home, ".claude", "settings.json")), "nothing is added before the yes");
     assert.ok(!trail.got.some((g) => g.method === "POST"));
 
     const on = await spawnAsync(repo, home, ["--yes"]);
     assert.equal(on.status, 0, on.stderr);
-    assert.match(on.stderr, /and from now on: each Claude Code session you start sends what changed since, at most every 15 minutes/);
+    assert.match(on.stderr, /and from now on: each Claude Code session you start, in any folder, sends what changed since/);
+    assert.match(on.stderr, /added one hook to ~[\\/]\.claude[\\/]settings\.json so this runs in every folder, in the terminal and in Claude Desktop/);
+    const settings = () => (existsSync(join(home, ".claude", "settings.json")) ? readFileSync(join(home, ".claude", "settings.json"), "utf8") : "");
+    assert.match(settings(), /graft-hooks\.cjs\\" share-sync \|\| exit 0/);
     assert.match(on.stderr, /stop any time: trail share-session --stop/);
     const first = trail.got.filter((g) => g.method === "POST").map((g) => JSON.parse(g.body));
     assert.deepEqual(first.map((p) => p.kind), ["setup", "session"]);
 
     const status = await spawnAsync(repo, home, []);
     assert.match(status.stdout, /^Sending to the Trail team since .*: 1 session so far/m);
+    assert.match(status.stdout, /no background run yet/);
+    assert.match(status.stdout, /its hook is in ~[\\/]\.claude[\\/]settings\.json/);
     assert.equal(trail.got.filter((g) => g.method === "POST").length, 2, "asking again only shows where it stands");
 
     const oldSwitch = await spawnAsync(repo, home, ["--sync"]);
@@ -479,6 +486,11 @@ test("trail share-session keeps sending by default: says so, --yes turns it on, 
     utimesSync(transcript, ago(15), ago(15));
     const ran = await spawnTrail(repo, home, ["_share-sync"]);
     assert.equal(ran.status, 0, ran.stderr);
+    writeFileSync(join(home, ".claude", "settings.json"), "{}\n");
+    const after = await spawnAsync(repo, home, []);
+    assert.match(after.stdout, /last run .*: sent 1/, "the status says what the last run did");
+    assert.match(after.stdout, /put its hook back in ~[\\/]\.claude[\\/]settings\.json/, "a hook something took out is put back");
+    assert.match(settings(), /share-sync/);
     const later = trail.got.filter((g) => g.method === "POST").map((g) => JSON.parse(g.body)).slice(2);
     assert.deepEqual(later.map((p) => p.session_id), [id]);
     assert.equal(later[0].bundle_id, first[0].bundle_id);
@@ -487,6 +499,8 @@ test("trail share-session keeps sending by default: says so, --yes turns it on, 
 
     const stop = await spawnAsync(repo, home, ["--stop"]);
     assert.match(stop.stderr, /✓ stopped: nothing more is sent/);
+    assert.match(stop.stderr, /took its hook out of ~[\\/]\.claude[\\/]settings\.json/);
+    assert.doesNotMatch(settings(), /share-sync/);
     assert.match(stop.stderr, /stays with the Trail team until you take it back: trail share-session --delete /);
     appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: "after stopping" } }) + "\n");
     utimesSync(transcript, ago(12), ago(12));

@@ -321,7 +321,12 @@ export function bundlePreviewLines(m: Manifest, copy: string, to: { url: string 
     ...(m.dropped.length ? [["Dropped", `you left out ${plural(m.dropped.length, "folder")}: ${m.dropped.join(", ")}`] as [string, string]] : []),
     ["Copy", `${copy}  every file exactly as it will go, listed in SUMMARY.md`],
     ["Goes to", `the Trail team on ${host}, for the team-memory experiment, without your name`],
-    ...(opts.sync ? [["Keeps on", `after this, each Claude Code session you start sends what changed since, scrubbed the same way and kept in a copy you can read; ${opts.sync} stops it`] as [string, string]] : []),
+    ...(opts.sync
+      ? ([
+          ["Keeps on", `after this, each Claude Code session you start sends what changed since, scrubbed the same way and kept in a copy you can read; ${opts.sync} stops it`],
+          ["Hook", "one entry in ~/.claude/settings.json, so it runs in every folder, in the terminal and in Claude Desktop; stopping takes it out"],
+        ] as Array<[string, string]>)
+      : []),
     ["Delete", "any time, with the code you get once it's sent"],
   ];
   const head = `Your Claude, last ${plural(m.days, "day")}${opts.sync ? " and from now on" : ""}, ready to send to the Trail team`;

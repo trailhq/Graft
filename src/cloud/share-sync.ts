@@ -11,7 +11,7 @@
  * `--stop` ends it; `--delete <code>` takes everything back and ends it too.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { deleteHash, slug } from "./share-bundle.js";
@@ -20,7 +20,7 @@ import { collectSetup } from "./share-setup.js";
 import { QUIET_MS, readSyncState, syncDir, writeSyncState, type SyncState } from "./share-sync-state.js";
 import type { SharedSession } from "./workspace.js";
 
-export { maybeShareSyncInBackground, readSyncState, SYNC_EVERY_MS, syncDir, syncDue, writeSyncState, type SyncState } from "./share-sync-state.js";
+export { maybeShareSyncInBackground, readSyncState, syncDir, syncDue, writeSyncState, type SyncState } from "./share-sync-state.js";
 
 /** A lock older than this was left by a child that died. */
 const LOCK_STALE_MS = 60 * 60 * 1000;
@@ -53,12 +53,7 @@ export async function runSync(opts: {
   const dir = syncDir(opts.env);
   mkdirSync(dir, { recursive: true });
   const lock = join(dir, ".lock");
-  try {
-    if (now - statSync(lock).mtimeMs < LOCK_STALE_MS) return null;
-  } catch {
-    // no lock
-  }
-  writeFileSync(lock, String(process.pid));
+  if (!takeLock(lock, now)) return null;
   let sent = 0;
   let skipped = 0;
   const base = { bundle_id: s.bundleId, delete_hash: deleteHash(s.secret), trail_version: opts.trailVersion };
@@ -90,7 +85,7 @@ export async function runSync(opts: {
         redacted: Object.values(b.redacted).reduce((n, c) => n + c, 0),
         transcript_gz: b.gz.toString("base64"),
       });
-      if ("error" in r) return { sent, skipped, error: r.error };
+      if ("error" in r) return finish({ sent, skipped, error: r.error });
       s.sessions[f.id] = f.mtime;
       sent++;
       writeSyncState(s, opts.env);
@@ -113,14 +108,40 @@ export async function runSync(opts: {
         redacted: Object.values(set.redacted).reduce((n, c) => n + c, 0),
         transcript_gz: gzipSync(json).toString("base64"),
       });
-      if ("error" in r) return { sent, skipped, error: r.error };
+      if ("error" in r) return finish({ sent, skipped, error: r.error });
       s.setupHash = hash;
       sent++;
     }
-    s.lastRunAt = now;
-    writeSyncState(s, opts.env);
-    return { sent, skipped };
+    return finish({ sent, skipped });
+  } catch (err) {
+    return finish({ sent, skipped, error: err instanceof Error ? err.message : String(err) });
   } finally {
     rmSync(lock, { force: true });
   }
+
+  /** Write down what this run did, so `trail share-session` can say. */
+  function finish(r: { sent: number; skipped: number; error?: string }) {
+    s!.lastRunAt = now;
+    s!.lastRun = { at: now, sent: r.sent, ...(r.error ? { error: r.error } : {}) };
+    writeSyncState(s!, opts.env);
+    return r;
+  }
+}
+
+/** The run's lock, taken in one step so two runs started together can't both get it. */
+function takeLock(lock: string, now: number): boolean {
+  for (let tries = 0; tries < 2; tries++) {
+    try {
+      closeSync(openSync(lock, "wx"));
+      return true;
+    } catch {
+      try {
+        if (now - statSync(lock).mtimeMs < LOCK_STALE_MS) return false;
+        rmSync(lock, { force: true }); // left by a run that died
+      } catch {
+        // gone between the two calls: try again
+      }
+    }
+  }
+  return false;
 }

@@ -28,11 +28,11 @@ export interface SyncState {
   /** sha256 of the setup as last sent. */
   setupHash?: string;
   lastRunAt?: number;
+  /** What the last background run did, for `trail share-session` to show. */
+  lastRun?: { at: number; sent: number; error?: string };
   stoppedAt?: number;
 }
 
-/** A sync runs at most this often, however many sessions start. */
-export const SYNC_EVERY_MS = 15 * 60 * 1000;
 /** A session written to in the last ten minutes is still going: it's sent next time. */
 export const QUIET_MS = 10 * 60 * 1000;
 export function syncDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -57,21 +57,18 @@ export function writeSyncState(s: SyncState, env?: NodeJS.ProcessEnv): void {
   writeFileSync(stateFile(env), `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 });
 }
 
-/** On, and not run in the last {@link SYNC_EVERY_MS}. */
-export function syncDue(s: SyncState | null, now = Date.now()): s is SyncState {
-  return !!s && !s.stoppedAt && (s.lastRunAt === undefined || now - s.lastRunAt >= SYNC_EVERY_MS);
+/** On, and not stopped. Every session start syncs; the run's lock keeps a burst of them to one. */
+export function syncDue(s: SyncState | null): s is SyncState {
+  return !!s && !s.stoppedAt;
 }
 
 /**
- * From the session-start hook: start a detached sync when one is due. Reads
+ * From the session-start hook: start a detached sync whenever it's on. Reads
  * one small file and never waits. Returns whether a child was started.
  */
-export function maybeShareSyncInBackground(env: NodeJS.ProcessEnv = process.env, now = Date.now()): boolean {
+export function maybeShareSyncInBackground(env: NodeJS.ProcessEnv = process.env): boolean {
   try {
-    const s = readSyncState(env);
-    if (!syncDue(s, now)) return false;
-    // Before the spawn, so a child that dies costs one round, not one per session.
-    writeSyncState({ ...s, lastRunAt: now }, env);
+    if (!syncDue(readSyncState(env))) return false;
     const child = spawn(process.execPath, [graftCliPath(), "_share-sync"], { detached: true, stdio: "ignore", windowsHide: true, env });
     child.unref();
     return true;
