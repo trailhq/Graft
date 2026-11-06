@@ -10,7 +10,7 @@
  */
 import { spawnSync } from "node:child_process";
 import "dotenv/config";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -409,7 +409,7 @@ program
   });
 
 // Hidden: spawned detached by maybeShareSyncInBackground from the session-start
-// hook, once someone has said yes to `share-session --sync`. By hand it just
+// hook, once someone has said yes to `share-session`'s keep-sending. By hand it just
 // sends what changed, quietly.
 program
   .command("_share-sync", { hidden: true })
@@ -2432,16 +2432,18 @@ const COPY_FRESH_MS = 24 * 60 * 60 * 1000;
 
 function shareSessionCommand(name = "share-session"): Command {
   return new Command(name)
-    .description("Send your Claude to the Trail team for the team-memory experiment: the last 30 days of sessions, your setup and memory, secrets and your name taken out (Trail team only)")
+    .description("Send your Claude to the Trail team for the team-memory experiment, and keep sending: the last 30 days of sessions, your setup and memory, then each new session, secrets and your name taken out (Trail team only)")
     .argument("[session]", "send only this one of this folder's sessions: its number in --list, or its id")
     .option("--list", "list this folder's sessions, newest first")
     .option("--days <n>", "how many days of sessions to take", "30")
     .option("--leave-out <numbers>", 'with --yes: folder numbers from the summary to leave out, like "3 7"')
     .option("--yes", "send without asking: only after the person said yes to what it showed")
-    .option("--sync", "keep sending: after this, each Claude Code session you start sends what changed since")
+    .option("--once", "send once: the last 30 days, and nothing after")
+    // Sending on is the default now; --sync, its old switch, still works.
+    .addOption(new Option("--sync").hideHelp())
     .option("--stop", "stop sending: nothing more goes after this")
     .option("--delete <code>", "take back everything sent under this delete code, and stop sending")
-    .action(async (pick: string | undefined, opts: { list?: boolean; days: string; leaveOut?: string; yes?: boolean; delete?: string; sync?: boolean; stop?: boolean }) => {
+    .action(async (pick: string | undefined, opts: { list?: boolean; days: string; leaveOut?: string; yes?: boolean; delete?: string; once?: boolean; stop?: boolean }) => {
       const dir = process.cwd();
       const here = workspaceRepo(dir);
       // Taking back and stopping work without the flag: someone who tried it must always be able to undo it.
@@ -2468,11 +2470,12 @@ function shareSessionCommand(name = "share-session"): Command {
         process.exitCode = 1;
         return;
       }
-      if (opts.sync) {
+      const sync = !opts.once;
+      if (sync) {
         const on = readSyncState();
         if (on && !on.stoppedAt) return console.log(syncStatusLines(on).join("\n"));
       }
-      return shareWholeClaude(cloud, { days, leaveOut: opts.leaveOut, yes: !!opts.yes, sync: !!opts.sync }, here.checkout);
+      return shareWholeClaude(cloud, { days, leaveOut: opts.leaveOut, yes: !!opts.yes, sync }, here.checkout);
     });
 }
 
@@ -2577,7 +2580,7 @@ async function shareWholeClaude(cloud: Cloud, opts: { days: number; leaveOut?: s
     onProgress: tty ? (done, total) => process.stderr.write(`\r· scrubbing sessions: ${done} of ${total}`) : undefined,
   });
   if (tty) process.stderr.write("\n");
-  const again = `${cmd("graft share-session")}${opts.sync ? " --sync" : ""}`;
+  const again = `${cmd("graft share-session")}${opts.sync ? "" : " --once"}`;
   const show = () => {
     console.log(bundlePreviewLines(m, homePath(out), cloud, opts.sync ? { sync: `${cmd("graft share-session")} --stop` } : {}).join("\n"));
     console.log("");

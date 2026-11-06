@@ -358,26 +358,28 @@ test("trail share-session <session>: without a terminal it shows what would go a
   }
 });
 
-test("trail share-session: without a terminal it scrubs the whole Claude into a copy, shows it and sends nothing; --yes sends that copy; --delete takes it back", async () => {
+test("trail share-session --once: without a terminal it scrubs the whole Claude into a copy, shows it and sends nothing; --yes sends that copy; --delete takes it back", async () => {
   const { home, repo, id } = fakeSession();
   const trail = await standIn(true);
   try {
     signIn(home, trail.url);
-    const shown = await spawnAsync(repo, home, []);
+    const shown = await spawnAsync(repo, home, ["--once"]);
     assert.equal(shown.status, 0, shown.stderr);
     assert.match(shown.stdout, /^Your Claude, last 30 days, ready to send to the Trail team$/m);
     assert.match(shown.stdout, /^Sessions {2}1 session in 1 folder · [A-Z][a-z]{2} \d{1,2} · /m);
     assert.match(shown.stdout, /^ {12}1 {2}\/work\/web {2}1 session$/m);
     assert.match(shown.stdout, /^Copy {6}~[\\/]\.trail[\\/]share[\\/]\d{4}-\d{2}-\d{2}-\d{4} {2}every file exactly as it will go/m);
-    assert.match(shown.stdout, /nothing sent\. Show the person what's above and the copy at ~[\\/]\.trail[\\/]share[\\/][\d-]+; only if they say yes, run trail share-session --yes/);
+    assert.match(shown.stdout, /nothing sent\. Show the person what's above and the copy at ~[\\/]\.trail[\\/]share[\\/][\d-]+; only if they say yes, run trail share-session --once --yes/);
     assert.ok(!trail.got.some((g) => g.method === "POST"), "nothing is posted without a yes");
     const root = join(home, ".trail", "share");
     const copy = join(root, readdirSync(root)[0]!);
     for (const f of ["SUMMARY.md", "setup.json", "manifest.json"]) assert.ok(existsSync(join(copy, f)), f);
 
-    const sent = await spawnAsync(repo, home, ["--yes"]);
+    const sent = await spawnAsync(repo, home, ["--once", "--yes"]);
     assert.equal(sent.status, 0, sent.stderr);
     assert.match(sent.stderr, /✓ sent your Claude to the Trail team: 2 items/);
+    assert.doesNotMatch(sent.stderr, /from now on/, "a one-time send doesn't keep sending");
+    assert.ok(!existsSync(join(home, ".trail", "share", "sync.json")));
     const posts = trail.got.filter((g) => g.method === "POST").map((g) => JSON.parse(g.body));
     assert.deepEqual(posts.map((p) => p.kind), ["setup", "session"]);
     assert.equal(new Set(posts.map((p) => p.bundle_id)).size, 1, "one bundle");
@@ -391,7 +393,7 @@ test("trail share-session: without a terminal it scrubs the whole Claude into a 
     assert.equal(posts[0].delete_hash, createHash("sha256").update(secret!).digest("hex"));
     assert.ok(!JSON.stringify(posts).includes(secret!), "the secret never leaves");
 
-    const again = await spawnAsync(repo, home, ["--yes"]);
+    const again = await spawnAsync(repo, home, ["--once", "--yes"]);
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /nothing sent\./, "a sent copy isn't sent again; a new one is shown first");
     assert.equal(trail.got.filter((g) => g.method === "POST").length, 2);
@@ -444,7 +446,7 @@ test("trail share-session --delete: a code that isn't one says so and sends noth
   }
 });
 
-test("trail share-session --sync: says it keeps sending, --yes turns it on, a later run sends what grew into the same bundle, --stop ends it", async () => {
+test("trail share-session keeps sending by default: says so, --yes turns it on, a later run sends what grew into the same bundle, --stop ends it", async () => {
   const { home, repo, id } = fakeSession();
   const transcript = join(claudeProjectDir(repo, home), `${id}.jsonl`);
   const ago = (min: number) => new Date(Date.now() - min * 60_000);
@@ -452,23 +454,26 @@ test("trail share-session --sync: says it keeps sending, --yes turns it on, a la
   const trail = await standIn(true);
   try {
     signIn(home, trail.url);
-    const shown = await spawnAsync(repo, home, ["--sync"]);
+    const shown = await spawnAsync(repo, home, []);
     assert.equal(shown.status, 0, shown.stderr);
     assert.match(shown.stdout, /^Your Claude, last 30 days and from now on, ready to send to the Trail team$/m);
     assert.match(shown.stdout, /^Keeps on  after this, each Claude Code session you start sends what changed since, .* trail share-session --stop stops it$/m);
-    assert.match(shown.stdout, /only if they say yes, run trail share-session --sync --yes/);
+    assert.match(shown.stdout, /only if they say yes, run trail share-session --yes,/);
     assert.ok(!trail.got.some((g) => g.method === "POST"));
 
-    const on = await spawnAsync(repo, home, ["--sync", "--yes"]);
+    const on = await spawnAsync(repo, home, ["--yes"]);
     assert.equal(on.status, 0, on.stderr);
     assert.match(on.stderr, /and from now on: each Claude Code session you start sends what changed since, at most every 15 minutes/);
     assert.match(on.stderr, /stop any time: trail share-session --stop/);
     const first = trail.got.filter((g) => g.method === "POST").map((g) => JSON.parse(g.body));
     assert.deepEqual(first.map((p) => p.kind), ["setup", "session"]);
 
-    const status = await spawnAsync(repo, home, ["--sync"]);
+    const status = await spawnAsync(repo, home, []);
     assert.match(status.stdout, /^Sending to the Trail team since .*: 1 session so far/m);
     assert.equal(trail.got.filter((g) => g.method === "POST").length, 2, "asking again only shows where it stands");
+
+    const oldSwitch = await spawnAsync(repo, home, ["--sync"]);
+    assert.match(oldSwitch.stdout, /^Sending to the Trail team since /m, "--sync, the old switch, still works");
 
     appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: "and one more thing" } }) + "\n");
     utimesSync(transcript, ago(15), ago(15));

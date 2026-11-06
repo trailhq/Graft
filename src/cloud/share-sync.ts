@@ -1,6 +1,7 @@
 /**
  * Keeping on sharing, for the team-memory experiment. Once a person says yes
- * to `trail share-session --sync`, every Claude Code session they start sends,
+ * to `trail share-session` (which keeps sending unless run with `--once`), every
+ * Claude Code session they start sends,
  * from a detached child of the session-start hook, what changed since the last
  * time: sessions that are new or have grown, and the setup when it changes.
  * Each is scrubbed exactly as the first send was, kept under

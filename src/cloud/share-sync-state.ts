@@ -1,5 +1,5 @@
 /**
- * Whether `trail share-session --sync` is on, and starting its detached run.
+ * Whether `trail share-session`'s keep-sending is on, and starting its detached run.
  * Kept apart from share-sync.ts so the session-start hook loads only this:
  * one small file read, and a spawn when a run is due.
  */
