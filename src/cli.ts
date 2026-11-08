@@ -1959,7 +1959,7 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
       for (const w of selectedWrites(plan, ids)) {
         if (w.scope !== "repo") continue;
         const rel = shown(repo, w.path);
-        const r = spawnSync("git", ["status", "--porcelain", "--", rel], { cwd: repo, encoding: "utf8" });
+        const r = spawnSync("git", ["status", "--porcelain", "--", rel], { cwd: repo, encoding: "utf8", windowsHide: true });
         if (r.stdout.startsWith("??")) keepOutOfGit(repo, rel);
         else if (r.stdout.trim()) inGit.push(rel);
       }
@@ -2055,7 +2055,7 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
 
 /** The repo's team committed `.trail/`: trail is shared here already. */
 function trailCommitted(repo: string): boolean {
-  const r = spawnSync("git", ["ls-files", "--", ".trail"], { cwd: repo, encoding: "utf8" });
+  const r = spawnSync("git", ["ls-files", "--", ".trail"], { cwd: repo, encoding: "utf8", windowsHide: true });
   return r.status === 0 && r.stdout.trim().length > 0;
 }
 
