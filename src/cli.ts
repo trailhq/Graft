@@ -72,6 +72,7 @@ import { finishPair, PairRun, validPairCode } from "./cloud/pair.js";
 import { currentBranch, noteAuthor, teammatesOn } from "./notes/git-facts.js";
 import { listSkills } from "./skills/skills.js";
 import { registerSkillCommands } from "./skills/cli-skills.js";
+import { setSummaryView, summaryView } from "./claude/summary-view.js";
 import { gateNote, namesRepoSymbol, symbolCandidates, trackedFiles } from "./notes/note-gate.js";
 import { recordLookup } from "./cloud/lookup-activity.js";
 import { clearPending, cloudLines, loginLines, loginLink, sessionKey, startWaiting, WAIT_MS, waitForConnect } from "./cloud/nudge.js";
@@ -93,6 +94,8 @@ import {
 import { dropActivity, inWorkspace, maybeSyncInBackground, recordActivity, runSyncChild, syncRepo, syncWorkspaceRepos, workspaceLearnings } from "./cloud/workspace-sync.js";
 import type { CheckResult } from "./check/types.js";
 import { checkLocally } from "./check/local-check.js";
+import { askJustMe, isJustMe, setJustMe } from "./notes/just-me.js";
+import { keepOutOfGit, letGitSee } from "./claude/init.js";
 import { findLearning, learningFileName, liveLearnings } from "./notes/learning-fields.js";
 import { savedIdLine } from "./notes/replace.js";
 import { addToLearning, rememberSessionLearning, sessionLearning } from "./notes/session-learning.js";
@@ -169,7 +172,7 @@ function grouped(c: Command, heading: string): Command {
  * centrally — and because a command that calls `process.exit` should simply
  * report nothing, which falls out of never emitting until postAction.
  */
-let queryNote: { repo?: string; hit?: "yes" | "no"; command?: string; notes?: string } = {};
+let queryNote: { repo?: string; hit?: "yes" | "no"; command?: string; notes?: string; stale?: string } = {};
 
 /** Record the repo a query ran against, and pass it straight through so call
  *  sites stay one line. */
@@ -247,12 +250,13 @@ const DIR_ARG = ["[dir]", "repository root (default: nearest ancestor with a gra
  * The root a query runs against: the dir the user named, else the nearest
  * ancestor holding a graft index (`graph/root.ts`) so a shell or agent session
  * in a subdirectory still finds the graph. The walk is announced on stderr —
- * answering from an ancestor's graph must never be silent.
+ * answering from an ancestor's graph must never be silent. A walk that stopped at
+ * a Git checkout root with no graph there answers from nothing, so it says nothing.
  */
 function queryRoot(dir?: string): string {
   if (dir !== undefined) return resolve(dir);
   const { root, levels } = nearestGraftRoot(process.cwd(), program.opts<GlobalOpts>().dir);
-  if (levels > 0) console.error(`${tag()} no code map here: answering from ${contextDirFor(root, program.opts<GlobalOpts>().dir)}`);
+  if (levels > 0 && hasGraftIndex(root)) console.error(`${tag()} no code map here: answering from ${contextDirFor(root, program.opts<GlobalOpts>().dir)}`);
   return root;
 }
 
@@ -344,7 +348,7 @@ program.hook("postAction", (_parent, action) => {
   // `trail build --check` is graft's `check`, and counts as it always has.
   const name = queryNote.command ?? action.name();
   if (!isTrackedCommand(name)) return;
-  track("query", { command: name, surface: "cli", hit: queryNote.hit, notes: queryNote.notes }, { repo: queryNote.repo });
+  track("query", { command: name, surface: "cli", hit: queryNote.hit, notes: queryNote.notes, stale: queryNote.stale }, { repo: queryNote.repo });
 });
 
 /** `graft ask`, `graft build`: a command as graft spells it, whatever ran it. */
@@ -861,6 +865,8 @@ grouped(program.command("ask"), GROUP.find)
     if (TRAIL) afterAsk(r, dir);
     // How many notes reached the agent: the demand side of `trail note`.
     if (r.notesChecked) queryNote.notes = String(Math.min(r.notes?.length ?? 0, 2));
+    // And how many of those may be stale: they name code that's gone (notes/stale.ts).
+    if (r.notesChecked) queryNote.stale = String(Math.min(r.notes?.filter((h) => h.note.stale?.length).length ?? 0, 2));
     if (opts.json) {
       console.log(JSON.stringify(r, null, 2));
     } else {
@@ -1212,6 +1218,17 @@ grouped(program.command("note", { hidden: !TRAIL }), GROUP.memory)
     await runNoteCommand(resolve(dir), opts);
   });
 
+// `trail summary one-line`: the learnings and blast radius the hooks add, one line each (summary-view.ts).
+grouped(program.command("summary", { hidden: !TRAIL }), GROUP.memory)
+  .description("How long the learnings and blast radius under each prompt and edit are: full (the default) or one-line")
+  .argument("[view]", "full or one-line; leave it out to see the one in force")
+  .action((view?: string) => {
+    if (view) setSummaryView(view);
+    const now = summaryView();
+    const fromEnv = process.env.TRAIL_SUMMARY === now ? " (from TRAIL_SUMMARY)" : "";
+    console.log(`${tag()} summary: ${now}${fromEnv}. The next prompt and edit use it; nothing to restart.`);
+  });
+
 // `trail skills` (design 1.7): the skills Trail kept for you, held ones to keep, offers and the switch; and
 // `trail forget <name>`, the undo every save line names. The person-only ones refuse an agent (cli-skills.ts).
 registerSkillCommands(program);
@@ -1233,6 +1250,8 @@ grouped(program.command("init"), GROUP.setup)
   .option("--no-hooks", "skip hook installation for other agents")
   .option("--no-statusline", "skip writing Claude Code statusLine (keep a user-defined one)")
   .option("--dry-run", "print every file init would touch, then exit without writing")
+  .option("--just-me", "trail just for you here: git sees none of it, your learnings stay in ~/.trail, and nothing asks you to commit or share")
+  .option("--team", "share trail with your team here: you commit .trail/ and .claude/settings.json once, and teammates' Claude reads your learnings")
   .option("-y, --yes", "skip the picker and wire every detected agent (the pre-0.8 default)")
   .option("--no-global", "skip writes outside this repo (the ~/.codex/ config + hooks)")
   .option("--verbose", "print every file written, the graph build's own output and the closing banner")
@@ -1669,6 +1688,42 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
       return null;
     }
 
+    // Who trail is for here (notes/just-me.ts), settled before anything is written. Asked on a terminal, in a repo
+    // whose team hasn't committed `.trail/`; a repo already on trail just for this person stays so until --team.
+    const scopeFlags = opts as { justMe?: boolean; team?: boolean };
+    if (scopeFlags.justMe && scopeFlags.team) {
+      console.error("✗ --just-me and --team are the two answers to one question: give one");
+      process.exitCode = 1;
+      return null;
+    }
+    let justMe = false;
+    let scope: "just_me" | "team" | "unasked" = scopeFlags.justMe ? "just_me" : scopeFlags.team ? "team" : "unasked";
+    if (TRAIL && isGitWorkTree(repo) && opts.pair === undefined && opts.connect === undefined) {
+      if (scope !== "unasked") justMe = scope === "just_me";
+      else if (trailCommitted(repo)) justMe = false;
+      else if (isJustMe(repo)) justMe = true;
+      else if (process.stdin.isTTY && process.stderr.isTTY && !opts.yes) {
+        const answer = await askJustMe();
+        if (answer === null) {
+          console.error("· cancelled, nothing written");
+          return null;
+        }
+        justMe = answer;
+        scope = justMe ? "just_me" : "team";
+      }
+      for (const target of targets) {
+        if (!isGitWorkTree(target)) continue;
+        // This clone's own `.git/info/exclude`: never committed, so nobody else's checkout changes.
+        if (justMe) {
+          setJustMe(target, true);
+          keepOutOfGit(target, ".trail");
+        } else if (isJustMe(target)) {
+          setJustMe(target, false);
+          letGitSee(target, ".trail");
+        }
+      }
+    }
+
     // With --pair, Trail's onboarding page is waiting on this run: tell it
     // first, so the person can sign up while the rest of init runs.
     let pair: PairRun | null = null;
@@ -1865,13 +1920,13 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
         // saveReviewFindings keeps the findings' order.
         fromReviews.saved.forEach((note, i) => {
           const prs = fromReviews.kept[i]?.prs ?? [];
-          console.error(`    for your team · ${note.title}${prs.length ? ` (${prs.map((n) => `#${n}`).join(", ")})` : ""}`);
+          console.error(`    ${note.scope === "personal" ? "just for you " : "for your team"} · ${note.title}${prs.length ? ` (${prs.map((n) => `#${n}`).join(", ")})` : ""}`);
         });
       }
       if (fromSessions?.saved.length) {
         const n = fromSessions.saved.length;
         console.error(`✓ ${n < fromSessions.offered ? `kept ${n} of the ${fromSessions.offered} learnings` : `${n} learning${n === 1 ? "" : "s"}`} from your past Claude sessions here`);
-        for (const note of fromSessions.saved) console.error(`    for your team · ${note.title}`);
+        for (const note of fromSessions.saved) console.error(`    ${note.scope === "personal" ? "just for you " : "for your team"} · ${note.title}`);
       }
       if (fromMemory?.saved.length) {
         console.error(`✓ kept ${fromMemory.saved.length} of the ${fromMemory.offered} notes your Claude keeps about this repo`);
@@ -1896,19 +1951,32 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
       teamSaved = learned.team;
       if (learnedNow) {
         console.error("· Claude follows them from your next session");
-        if (learned.inRepo) console.error(commitLines({}, teammatesOn(repo), "repo").uncommitted);
+        if (learned.inRepo && !justMe) console.error(commitLines({}, teammatesOn(repo), "repo").uncommitted);
       }
     }
     // Not looked back (not trail, or not Claude Code): the page still gets its stage.
     if (!lookBack) report?.learned?.({ notes: [], sessions: 0 });
     if (TRAIL && !learnedNow) {
       const home = notesHome.get(repo);
-      if (home) {
+      if (home && justMe) console.error(`✓ learnings  ${shownPath(trailHome())} · just for you: a session that fixes a bug, takes a correction or opens a PR leaves one there`);
+      else if (home) {
         const learnings = liveLearnings(listNotes(repo, { branches: false })).filter((n) => n.scope === "repo");
         if (learnings.length === 0) console.error(`✓ learnings  ${LEARNINGS_DIR}/ · a session that fixes a bug, takes a correction or opens a PR leaves one there, for your whole team`);
         else console.error(`✓ learnings  ${learnings.length} in ${LEARNINGS_DIR}/, from ${new Set(learnings.map((n) => n.author || "someone")).size} ${new Set(learnings.map((n) => n.author)).size === 1 ? "person" : "people"}`);
       }
     }
+
+    // Just for this person: what init added for the other agents stays out of git too. A file git already
+    // tracks can't be kept out, so it's named.
+    const inGit: string[] = [];
+    if (justMe)
+      for (const w of selectedWrites(plan, ids)) {
+        if (w.scope !== "repo") continue;
+        const rel = shown(repo, w.path);
+        const r = spawnSync("git", ["status", "--porcelain", "--", rel], { cwd: repo, encoding: "utf8", windowsHide: true });
+        if (r.stdout.startsWith("??")) keepOutOfGit(repo, rel);
+        else if (r.stdout.trim()) inGit.push(rel);
+      }
 
     if (!verbose) {
       // What there is to commit: the top-level entries the picked agents wrote.
@@ -1933,7 +2001,10 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
       // Outside git there is nothing to commit to, and `git status` failing above
       // made every path look changed.
       if (TRAIL && !children.length && !isGitWorkTree(repo)) console.error(NOT_GIT_LINE);
-      else if (tops.length)
+      else if (justMe) {
+        for (const f of inGit) console.error(`⚠ git tracks ${f}, so trail's change to it shows in git status: leave it out of your commits`);
+        console.error(`· just for you: git sees nothing trail added, so there's nothing to commit. To share it with your team later, run ${cmd("graft init")} --team`);
+      } else if (tops.length)
         console.error(
           TRAIL
             ? `· commit ${tops.slice(0, 5).join(" and ")}${tops.length > 5 ? ` +${tops.length - 5} more` : ""} once: after that, teammates' Claude reads your learnings even before they install trail`
@@ -1978,7 +2049,7 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
     // Run by an agent, not a person: the last line tells it to ask about the
     // commit, since the person never saw the picker and Claude Code folds the rest.
     // With --pair the person reviews them on the Trail page first, so no ask here.
-    if (teamSaved && !pair && !process.stderr.isTTY)
+    if (teamSaved && !pair && !justMe && !process.stderr.isTTY)
       console.error(
         `→ ${teamSaved} team learning${teamSaved === 1 ? "" : "s"} in ${LEARNINGS_DIR}/ ${teamSaved === 1 ? "isn't" : "aren't"} committed yet. Ask the user: "Commit ${teamSaved === 1 ? "it" : `the ${teamSaved}`} so your teammates' Claude starts from ${teamSaved === 1 ? "it" : "them"}? (yes / no)"`,
       );
@@ -1988,11 +2059,18 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
       {
         agents: [...ids].sort().join(","),
         consent: consent === undefined ? "unasked" : String(consent),
+        scope,
         ...(reports[0]?.statusline ? { statusline: reports[0].statusline } : {}),
       },
       { repo },
     );
     return { ids, laptop: laptop ?? ids };
+}
+
+/** The repo's team committed `.trail/`: trail is shared here already. */
+function trailCommitted(repo: string): boolean {
+  const r = spawnSync("git", ["ls-files", "--", ".trail"], { cwd: repo, encoding: "utf8", windowsHide: true });
+  return r.status === 0 && r.stdout.trim().length > 0;
 }
 
 /** A plan with the out-of-repo writes only for `laptop`'s hosts; the plan itself when every host may write there. */

@@ -329,7 +329,7 @@ export function bundleSession(session: SessionFile, who: string[] = whoIAm()): B
  */
 export function whoIAm(extra: string[] = []): string[] {
   const git = (key: string) => {
-    const r = spawnSync("git", ["config", "--global", "--get", key], { encoding: "utf8", timeout: 3000 });
+    const r = spawnSync("git", ["config", "--global", "--get", key], { encoding: "utf8", timeout: 3000, windowsHide: true });
     return r.status === 0 ? r.stdout.trim() : "";
   };
   let login = "";

@@ -336,7 +336,7 @@ export function repoDocs(repo: string): { id: string; text: string }[] {
 
 /** The repo's revert commits, newest first: what was tried and backed out. */
 export function revertCommits(repo: string): string {
-  const r = spawnSync("git", ["-C", repo, "log", "-n", "400", "--grep=^Revert", "--format=%h %ad %s%n%b%n---", "--date=short"], { encoding: "utf8", timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
+  const r = spawnSync("git", ["-C", repo, "log", "-n", "400", "--grep=^Revert", "--format=%h %ad %s%n%b%n---", "--date=short"], { encoding: "utf8", timeout: 15_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true });
   return r.status === 0 ? scrub(r.stdout.trim()).slice(0, DOC_CHARS) : "";
 }
 
