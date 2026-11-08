@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BRAND_ENV } from '../src/brand.js';
+import { BRAND_ENV, inBrand } from '../src/brand.js';
 import { formatOrientation } from '../src/claude/format.js';
 
 // An INDEX.md written by graft before the rename, still on disk: query-path
@@ -36,6 +36,19 @@ test('under trail, a graft-era INDEX.md preamble is injected in trail spelling',
     assert.match(map, /`trail callers <symbol>`/);
     assert.doesNotMatch(map, /`graft ask|graft_find_code|`graft callers|`graft` CLI/);
     assert.match(map, /- \[graft\]\(graft\.md\) — how the orchard app models a graft · src\/graft\.ts/, "the repo's own concept list is left alone");
+  } finally {
+    if (saved === undefined) delete process.env[BRAND_ENV];
+    else process.env[BRAND_ENV] = saved;
+  }
+});
+
+test('under trail, an INDEX.md a trail build wrote is injected unchanged', () => {
+  const saved = process.env[BRAND_ENV];
+  process.env[BRAND_ENV] = 'trail';
+  try {
+    const cut = GRAFT_ERA_INDEX.indexOf('\n## ');
+    const trailBuilt = inBrand(GRAFT_ERA_INDEX.slice(0, cut)) + GRAFT_ERA_INDEX.slice(cut);
+    assert.ok(formatOrientation(trailBuilt, 4000).endsWith(`repo map (graft/INDEX.md):\n${trailBuilt}`));
   } finally {
     if (saved === undefined) delete process.env[BRAND_ENV];
     else process.env[BRAND_ENV] = saved;
