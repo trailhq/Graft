@@ -84,7 +84,7 @@ export interface RawEdge {
   relation: Relation;
   file: string; // the file this edge originates in (scopes name resolution)
   targetId?: string; // already-resolved target (contains)
-  specifier?: string; // module path to resolve (imports / imported-symbol references / Gleam calls)
+  specifier?: string; // module path to resolve (imports / imported-symbol references / Gleam and Go package calls)
   name?: string; // symbol name to resolve (extends/implements/calls)
   viaMember?: boolean; // calls: was it `obj.foo()` (→ prefer method targets)?
   /** calls with viaMember: the receiver's resolved type name (from bindings /
@@ -314,6 +314,8 @@ export interface WalkCtx {
   enclosingClass: string | null; // nearest enclosing class (py/ts `self`/`this`)
   goReceiverVar: string | null; // Go receiver var, e.g. `w` in `func (w *Worker)`
   importedSymbols: ReadonlyMap<string, { name: string; specifier: string }>;
+  goImports: ReadonlyMap<string, string>;
+  goLocals: ReadonlyMap<string, number>;
   // R6 (Phase 2): which list we're inside while walking an `R6Class(...)` call's
   // arguments — set only for the direct span of a `public =`/`private =`/
   // `active =` `list(...)`'s own entries (see walk()'s special-cased `argument`
@@ -363,6 +365,7 @@ export function extractFile(rel: string, source: string, lang: Language): Extrac
 function extractTree(rel: string, source: string, lang: Language, root: SyntaxNode): ExtractResult {
   const bindings = collectBindings(root, lang);
   const importedSymbols = collectImportedSymbols(root, lang);
+  const goImports = lang === "go" ? collectGoImports(root) : new Map<string, string>();
   const rGenerics = lang === "r" ? collectRGenerics(root) : EMPTY_SET;
 
   const nodes: NodeV1[] = [
@@ -396,6 +399,8 @@ function extractTree(rel: string, source: string, lang: Language, root: SyntaxNo
     enclosingClass: null,
     goReceiverVar: null,
     importedSymbols,
+    goImports,
+    goLocals: new Map(),
     rR6Access: null,
     rGenerics,
     rSuperClass: null,
@@ -615,6 +620,7 @@ function walk(node: SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEdge[], m
       parentId: id,
       enclosingClass,
       goReceiverVar: isGoMethod ? goReceiverVarOf(node) : ctx.goReceiverVar,
+      goLocals: ctx.lang === "go" && (desc.kind === "function" || desc.kind === "method") ? collectGoLocals(node) : ctx.goLocals,
       importedSymbols:
         desc.kind === "function" || desc.kind === "method"
           ? withoutShadowedImports(ctx.importedSymbols, node)
@@ -743,7 +749,11 @@ function walk(node: SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEdge[], m
         });
       } else {
         const recvType = resolveRecvType(callee.receiver, ctx);
-        edges.push(recvType ? { ...callEdge, recvType } : callEdge);
+        const goPackage =
+          !recvType && callee.receiver && node.startIndex < (ctx.goLocals.get(callee.receiver) ?? Infinity)
+            ? ctx.goImports.get(callee.receiver)
+            : undefined;
+        edges.push(recvType ? { ...callEdge, recvType } : goPackage ? { ...callEdge, specifier: goPackage } : callEdge);
       }
     }
   } else if (ctx.lang === "php" && node.type === "use_declaration") {
@@ -850,6 +860,40 @@ function collectImportedSymbols(
   }
   if (lang === "php") return collectPhpImportedSymbols(root);
   return new Map();
+}
+
+function collectGoLocals(definition: SyntaxNode): Map<string, number> {
+  const out = new Map<string, number>();
+  const declare = (holder: SyntaxNode | null, end: number): void => {
+    for (const c of holder?.namedChildren ?? []) if (c.type === "identifier" && !out.has(c.text)) out.set(c.text, end);
+  };
+  const visit = (node: SyntaxNode): void => {
+    if (node.type === "parameter_declaration" || node.type === "variadic_parameter_declaration" || node.type === "var_spec") {
+      declare(node, node.endIndex);
+    } else if (node.type === "short_var_declaration" || node.type === "range_clause" || node.type === "receive_statement") {
+      declare(node.childForFieldName("left"), node.endIndex);
+    } else if (node.type === "type_switch_statement") {
+      declare(node.childForFieldName("alias"), node.childForFieldName("value")?.endIndex ?? node.endIndex);
+    }
+    node.namedChildren.forEach(visit);
+  };
+  visit(definition);
+  return out;
+}
+
+function collectGoImports(root: SyntaxNode): Map<string, string> {
+  const out = new Map<string, string>();
+  const visit = (node: SyntaxNode): void => {
+    if (node.type === "import_spec") {
+      const spec = importSpecifier(node, "go");
+      const local = node.childForFieldName("name")?.text ?? spec?.split("/").at(-1);
+      if (spec && local) out.set(local, spec);
+      return;
+    }
+    if (node.type === "source_file" || node.type.startsWith("import_")) node.namedChildren.forEach(visit);
+  };
+  visit(root);
+  return out;
 }
 
 /** PHP `use` bindings: local alias → { exported name, FQN specifier }. */

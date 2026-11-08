@@ -293,6 +293,15 @@ export function resolveEdges(
         if (candidates.length === 1) add(e.source, candidates[0].id, "calls", "extracted");
         continue;
       }
+      if (e.specifier && e.file.endsWith(".go")) {
+        const dir = hasGoModules ? goImportDir(e.specifier, opts.goModules!) : null;
+        const candidates = (dir ? (goFilesByDir.get(dir) ?? []) : [])
+          .filter((f) => !f.endsWith("_test.go"))
+          .flatMap((f) => perFileName.get(f)?.get(e.name!) ?? [])
+          .filter((n) => n.kind === "function");
+        if (candidates.length === 1) add(e.source, candidates[0].id, "calls", "extracted");
+        continue;
+      }
       if (e.viaMember) {
         if (!e.recvType) continue;
         const hit = resolveTypedMember(e.recvType, e.name!, e.file, ownerMethod, classParents, classTraits, e.argCount);
@@ -708,6 +717,13 @@ function resolveRustUse(spec: string, file: string, byId: Map<string, NodeV1>, c
  * dir may hold several `.go` files; we pick a deterministic representative (lowest id).
  */
 function resolveGoImport(spec: string, modules: GoModule[], filesByDir: Map<string, string[]>): string {
+  const dir = goImportDir(spec, modules);
+  const files = dir === null ? undefined : filesByDir.get(dir);
+  if (!files || files.length === 0) return spec; // stdlib / third-party — keep the package path
+  return [...files].sort()[0];
+}
+
+function goImportDir(spec: string, modules: GoModule[]): string | null {
   let best: { mod: GoModule; subpath: string } | null = null;
   for (const mod of modules) {
     let subpath: string | null = null;
@@ -716,10 +732,5 @@ function resolveGoImport(spec: string, modules: GoModule[], filesByDir: Map<stri
     if (subpath === null) continue;
     if (!best || mod.module.length > best.mod.module.length) best = { mod, subpath };
   }
-  if (!best) return spec; // stdlib / third-party — keep the package path
-
-  const dir = posix.normalize(posix.join(best.mod.dir, best.subpath));
-  const files = filesByDir.get(dir);
-  if (!files || files.length === 0) return spec;
-  return [...files].sort()[0];
+  return best ? posix.normalize(posix.join(best.mod.dir, best.subpath)) : null;
 }
