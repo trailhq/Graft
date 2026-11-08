@@ -22,7 +22,7 @@ touches:
 
 ## Tried and ruled out
 - Looking symbols up in the code map (.trail/cache/.graph/wiring.json): about 0.4s per hook on this repo, nothing on a fresh clone, and the cloud can't state the same rule. Reading the one touched file takes ~2ms for all 29 learnings here and flags the same 3.
-- Judging backticked names in a learning's body (`fooBar`, `foo()`): on 2026-10-29 it flagged 10 of 38 learnings across Trail-Code and assign, and 9 of those names were still in the code (interface properties like `costUsd`, module variables like `livePair`, Node built-ins like `execFileSync`).
+- Judging backticked names in a learning's body (`fooBar`, `foo()`): on 2026-10-29 it flagged 10 of 38 learnings across Trail-Code and another repo, and 9 of those names were still in the code (interface properties like `costUsd`, module variables like `livePair`, Node built-ins like `execFileSync`).
 
 ## Watch out
 - `trail note` records only files in `touches:`, so a learning that names a function only in its text is flagged only once the file goes. Recording `file#Symbol` for backticked names the graph knows (as `codeAnchors` in src/notes/team-check.ts already does for init) would let the check catch a deleted function.

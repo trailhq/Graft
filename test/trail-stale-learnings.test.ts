@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { learningsPayload, syncIsDue, syncRepo } from '../src/cloud/workspace-sync.js';
@@ -46,6 +46,19 @@ test("a teammate's unmerged learning isn't judged, nor a folder's symbol", () =>
   const dir = repo();
   assert.deepEqual(goneTouches(note(['src/gone.ts'], { ref: 'origin/kumar/jitter' }), dir), []);
   assert.deepEqual(goneTouches(note(['docs#anything']), dir), []);
+});
+
+test("a touch outside the checkout is never looked at: not ../, an absolute path or a symlink out", () => {
+  const dir = repo();
+  // A file next to the checkout that exists and has the word: judging it would say whether it's there.
+  const outside = mkdtempSync(join(tmpdir(), 'stale-outside-'));
+  writeFileSync(join(outside, 'secret.txt'), 'withJitter\n');
+  const up = join('..', '..', '..', '..', '..', '..', '..', '..', outside, 'secret.txt').replace(/\\/g, '/');
+  symlinkSync(outside, join(dir, 'link'));
+  const touches = [`${up}`, `${up}#withJitter`, `${up}#nothere`, join(outside, 'secret.txt'), `${join(outside, 'gone.txt')}`, '../gone.txt', 'link/secret.txt#nothere', 'link/gone.txt'];
+  assert.deepEqual(goneTouches(note(touches), dir), []);
+  // Inside, the same entries are judged as before.
+  assert.deepEqual(goneTouches(note(['src/../src/retry.ts#nothere', 'src/../gone.ts']), dir), ['src/../src/retry.ts#nothere', 'src/../gone.ts']);
 });
 
 test('markStale sets and clears the mark, and ask shows it under the title', () => {

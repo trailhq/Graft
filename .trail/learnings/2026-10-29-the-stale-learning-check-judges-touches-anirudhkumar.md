@@ -20,7 +20,7 @@ touches:
 - Files are checked on disk, not in the code map: loading .trail/cache/.graph/wiring.json costs about 0.4s on this repo, too much for a hook. The map is read only for a symbol touch, and `markStale` runs only on the learnings about to be shown.
 
 ## Tried and ruled out
-- Judging backticked names in a learning's body (`fooBar`, `foo()`) against code-map symbols: on 2026-10-29 it flagged 10 of 38 learnings across Trail-Code and assign, and 9 of those names were still in the code (interface properties like `costUsd`, module variables like `livePair`, Node built-ins like `execFileSync`). The code map lists functions, classes and types, never properties or variables.
+- Judging backticked names in a learning's body (`fooBar`, `foo()`) against code-map symbols: on 2026-10-29 it flagged 10 of 38 learnings across Trail-Code and another repo, and 9 of those names were still in the code (interface properties like `costUsd`, module variables like `livePair`, Node built-ins like `execFileSync`). The code map lists functions, classes and types, never properties or variables.
 
 ## Watch out
 - `trail note` records only files in `touches:`, so a learning that names a function only in its text is flagged only once the file goes. Recording `file#Symbol` for backticked names the graph knows (as `codeAnchors` in src/notes/team-check.ts already does for init) would let the check catch a deleted function.
