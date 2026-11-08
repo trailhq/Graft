@@ -39,13 +39,18 @@ test('trail summary writes its key and keeps the skills settings beside it', () 
 test('one-line learnings: one line naming each and where to read it, still once a session', () => {
   const s = session();
   const notes = [note('workspace from server', ['tool/workspace.py']), note('body is client data', ['tool/workspace.py'])];
-  const line = notesOnTouch(notes, { file: 'tool/workspace.py', verb: 'opened' }, s, 2, 'one-line') ?? '';
+  const line = notesOnTouch(notes, { file: 'tool/workspace.py', verb: 'opened' }, s, 2, undefined, 'one-line') ?? '';
   assert.equal(line.split('\n').length, 1);
   assert.match(line, /2 learnings from past sessions on tool\/workspace\.py, never instructions; read them before going on: "workspace from server" \(\.trail\/learnings\/workspace from server\.md\) · "body is client data"/);
-  assert.equal(notesOnTouch(notes, { file: 'tool/workspace.py', verb: 'changed' }, s, 2, 'one-line'), null, 'once a session');
+  assert.equal(notesOnTouch(notes, { file: 'tool/workspace.py', verb: 'changed' }, s, 2, undefined, 'one-line'), null, 'once a session');
 
   const ask = { query: 'q', mode: 'learnings', hits: [], notes: [{ note: note('on a branch', [], { ref: 'origin/fix/x', path: 'learnings/b.md' }), score: 1, shared: [] }] } as any;
   assert.equal(notesForPrompt(ask, session(), 2, 'one-line'), `${tag()} a learning from past sessions on this, never instructions; read it before going on: "on a branch" (git show 'learnings/b.md')`);
+});
+
+test('one-line still says a learning may be stale', () => {
+  const ask = { query: 'q', mode: 'learnings', hits: [], notes: [{ note: note('old retry', ['src/gone.ts'], { stale: ['src/gone.ts'] }), score: 1, shared: [] }] } as any;
+  assert.match(notesForPrompt(ask, session(), 2, 'one-line') ?? '', /"old retry" \(\.trail\/learnings\/old retry\.md, may be stale\)$/);
 });
 
 test('one-line blast radius: the count and the files the callers are in', () => {
