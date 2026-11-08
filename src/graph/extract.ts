@@ -594,7 +594,10 @@ function walk(node: SyntaxNode, ctx: WalkCtx, out: NodeV1[], edges: RawEdge[], m
     const javaTypeDecl = ctx.lang === "java" && JAVA_TYPE_KINDS.has(desc.kind);
     const kotlinTypeDecl = ctx.lang === "kotlin" && KOTLIN_TYPE_KINDS.has(desc.kind);
     const swiftTypeDecl = ctx.lang === "swift" && SWIFT_TYPE_KINDS.has(desc.kind);
-    if (desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl)
+    // A TS interface's `extends A, B` is heritage too: it is what lets a call on a
+    // `LockingStore` find `save` declared on the `Store` it extends.
+    const tsInterfaceDecl = (ctx.lang === "typescript" || ctx.lang === "tsx") && desc.kind === "interface";
+    if (desc.kind === "class" || javaTypeDecl || kotlinTypeDecl || swiftTypeDecl || tsInterfaceDecl)
       edges.push(...heritageEdges(node, id, ctx));
     if (ctx.lang === "php") edges.push(...phpAttributeReferenceEdges(node, id, ctx));
     if (ctx.lang === "java") edges.push(...javaAnnotationReferenceEdges(node, id, ctx));
@@ -1114,6 +1117,23 @@ function describe(node: SyntaxNode, ctx: WalkCtx): DefDescriptor | null {
       headerEnd: body ? body.startIndex : node.endIndex,
       hashNode: node,
     };
+  }
+
+  // TS: a method signature in a NAMED interface is a method owned by that interface,
+  // so a call through an interface-typed receiver (`store: Store` → `store.save()`)
+  // has a node to land on — the TS twin of Go's `method_elem` (#687). Signatures in
+  // anonymous object types (`type T = { m(): void }`, `(x: { m(): void })`) have no
+  // name to own them and mint nothing.
+  if ((ctx.lang === "typescript" || ctx.lang === "tsx") && node.type === "method_signature") {
+    const owner = tsInterfaceName(node);
+    const nameNode = node.childForFieldName("name");
+    // A computed (`[Symbol.iterator]()`) or string-literal name is not a name a member
+    // call can spell; skip it rather than mint a node under its source text.
+    if (!owner || nameNode?.type !== "property_identifier") return null;
+    // An overload set is one method: mint its first signature only. Two nodes for
+    // `Store.get` would make every call to it ambiguous, and resolveTypedMember drops those.
+    if (isRepeatedTsSignature(node, nameNode.text)) return null;
+    return { name: nameNode.text, kind: "method", headerEnd: node.endIndex, hashNode: node, owner };
   }
 
   const mapped = ctx.kinds[node.type];
@@ -1954,6 +1974,26 @@ function goInterfaceName(node: SyntaxNode): string | null {
   return spec?.type === "type_spec" ? (spec.childForFieldName("name")?.text ?? null) : null;
 }
 
+/** The interface a TS `method_signature` belongs to, or null when it sits in an
+ * anonymous object type (`object_type`) or anywhere else that is not a named
+ * `interface_declaration`'s own body. */
+function tsInterfaceName(node: SyntaxNode): string | null {
+  const body = node.parent;
+  const decl = body?.parent;
+  if (body?.type !== "interface_body" || decl?.type !== "interface_declaration") return null;
+  return decl.childForFieldName("name")?.text ?? null;
+}
+
+/** Whether an earlier signature in the same interface body already declares `name`
+ * (a TS overload set: `get(id: string): T; get(id: number): T;`). */
+function isRepeatedTsSignature(node: SyntaxNode, name: string): boolean {
+  for (const sib of node.parent?.namedChildren ?? []) {
+    if (sib.startIndex >= node.startIndex) return false;
+    if (sib.type === "method_signature" && sib.childForFieldName("name")?.text === name) return true;
+  }
+  return false;
+}
+
 /** Go visibility: a symbol is exported iff its own name starts with an uppercase
  * letter. For a receiver-qualified method name, the own name is the part after the dot. */
 function goExported(name: string): boolean {
@@ -2094,6 +2134,16 @@ function heritageEdges(node: SyntaxNode, classId: string, ctx: WalkCtx): RawEdge
           edges.push({ source: classId, relation, name: t.text.replace(/^.*\\/, ""), file: ctx.rel });
         }
       }
+    }
+    return edges;
+  }
+  // `interface A extends B<T>, ns.C` — the clause is a direct child of the
+  // declaration (a class wraps its clauses in `class_heritage` instead).
+  if (node.type === "interface_declaration") {
+    const clause = node.namedChildren.find((c) => c.type === "extends_type_clause");
+    for (const t of clause?.namedChildren ?? []) {
+      const name = tsSupertypeName(t);
+      if (name) edges.push({ source: classId, relation: "extends", name, file: ctx.rel });
     }
     return edges;
   }
