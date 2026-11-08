@@ -249,12 +249,13 @@ const DIR_ARG = ["[dir]", "repository root (default: nearest ancestor with a gra
  * The root a query runs against: the dir the user named, else the nearest
  * ancestor holding a graft index (`graph/root.ts`) so a shell or agent session
  * in a subdirectory still finds the graph. The walk is announced on stderr —
- * answering from an ancestor's graph must never be silent.
+ * answering from an ancestor's graph must never be silent. A walk that stopped at
+ * a Git checkout root with no graph there answers from nothing, so it says nothing.
  */
 function queryRoot(dir?: string): string {
   if (dir !== undefined) return resolve(dir);
   const { root, levels } = nearestGraftRoot(process.cwd(), program.opts<GlobalOpts>().dir);
-  if (levels > 0) console.error(`${tag()} no code map here: answering from ${contextDirFor(root, program.opts<GlobalOpts>().dir)}`);
+  if (levels > 0 && hasGraftIndex(root)) console.error(`${tag()} no code map here: answering from ${contextDirFor(root, program.opts<GlobalOpts>().dir)}`);
   return root;
 }
 
