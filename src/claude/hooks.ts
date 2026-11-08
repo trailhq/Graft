@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -161,6 +161,25 @@ function handleToolUse(input: any, dir: string): void {
     { ...classifyAndScore(input?.tool_name, input?.tool_input?.command, () => input?.tool_response ?? input), host: telemetryHost(input) });
 }
 
+/** The repo's shared git dir (`git rev-parse --git-common-dir`) for the checkout at `cwd`, resolved; null outside git. */
+function commonGitDir(cwd: string): string | null {
+  try {
+    const out = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000, windowsHide: true,
+    }).trim();
+    return out ? realpathSync(out) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `checkout` is the project at `dir` itself, or a linked worktree of the same repo. Git runs only when it's another folder. */
+function sameRepo(checkout: string, dir: string): boolean {
+  if (resolve(checkout) === checkoutRoot(dir)) return true;
+  const theirs = commonGitDir(checkout);
+  return theirs !== null && theirs === commonGitDir(dir);
+}
+
 /**
  * Under trail, the learnings about the file a Read, Edit or Write just touched,
  * or that a shell command (`sed -n 1,40p src/a.ts`, `cat`, a test run) names,
@@ -176,8 +195,10 @@ export function learningsOnTouch(input: any, dir: string, before = false): strin
     if (path) {
       const abs = isAbsolute(path) ? path : join(dir, path);
       // In a Claude Desktop worktree session the project is the main checkout and the file is in
-      // the worktree: its path in its own checkout is what a learning's touches name.
-      const rel = relative(checkoutRoot(dirname(abs)) ?? dir, abs).replace(/\\/g, '/');
+      // the worktree: its path in its own checkout is what a learning's touches name. Only a
+      // checkout of this same repo, though: a file in an unrelated repo is no file of the project's.
+      const own = checkoutRoot(dirname(abs));
+      const rel = relative(own && sameRepo(own, dir) ? own : dir, abs).replace(/\\/g, '/');
       if (!rel || rel.startsWith('..') || underGraft(dir, path)) return null;
       touch = { file: rel, verb: before ? 'editing' : input?.tool_name === 'Read' ? 'opened' : 'changed' };
     } else if (typeof ti.command === 'string' && ti.command && !commandInvokesGraft(ti.command)) {

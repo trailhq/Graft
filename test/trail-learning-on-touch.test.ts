@@ -101,6 +101,26 @@ test('in a Claude Desktop worktree session, editing a file in the worktree bring
   assert.equal(learningsOnTouch({ ...edit, tool_name: 'Read' }, d), null, 'once a session, as in the main checkout');
 });
 
+test('a file at the same relative path in an unrelated repo brings no learning of this one', () => {
+  process.env.TRAIL_HOME = mkdtempSync(join(tmpdir(), 'touch-home-'));
+  process.env[BRAND_ENV] = 'trail';
+  const make = () => {
+    const d = mkdtempSync(join(tmpdir(), 'touch-repo-'));
+    spawnSync('git', ['init', '-q'], { cwd: d });
+    mkdirSync(join(d, 'tool'), { recursive: true });
+    writeFileSync(join(d, 'tool', 'workspace.py'), 'x = 1\n');
+    return d;
+  };
+  const a = make();
+  const b = make();
+  mkdirSync(join(a, 'graft', '.cache', 'session'), { recursive: true });
+  writeNote(a, { title: 'Take workspace from server-held data', body: BODY, author: 'Priya', date: '2026-10-07', touches: ['tool/workspace.py'] }, 'repo');
+  const read = (file: string) => ({ session_id: 'x1', tool_name: 'Read', tool_input: { file_path: file } });
+  assert.equal(learningsOnTouch(read(join(b, 'tool', 'workspace.py')), a), null);
+  // The project's own copy still brings it.
+  assert.match(learningsOnTouch(read(join(a, 'tool', 'workspace.py')), a) ?? '', /Take workspace from server-held data/);
+});
+
 test("a Bash call's learnings join the skills part's context in one answer, and a block stays the whole answer", () => {
   process.env.TRAIL_HOME = mkdtempSync(join(tmpdir(), 'touch-home-'));
   process.env[BRAND_ENV] = 'trail';
