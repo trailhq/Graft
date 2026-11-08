@@ -258,3 +258,35 @@ test("Go extraction: an inline interface type mints no method nodes", async () =
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Go extraction: a bare call resolves inside its own package only", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-go-bare-"));
+  try {
+    writeFileSync(join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n");
+    for (const sub of ["server", "worker", "mathx"]) mkdirSync(join(dir, sub));
+    writeFileSync(join(dir, "server", "server.go"), "package server\n\nfunc Start() {\n\tc := newClient()\n\t_ = c\n}\n");
+    writeFileSync(
+      join(dir, "server", "client.go"),
+      "package server\n\ntype client struct{}\n\nfunc newClient() *client { return &client{} }\n",
+    );
+    writeFileSync(
+      join(dir, "worker", "worker.go"),
+      "package worker\n\ntype client struct{}\n\nfunc newClient() *client { return &client{} }\n\nfunc Run(items []int) int {\n\tm := 0\n\tfor _, it := range items {\n\t\tm = max(m, it)\n\t}\n\t_ = newClient()\n\treturn m\n}\n",
+    );
+    writeFileSync(
+      join(dir, "mathx", "mathx.go"),
+      "package mathx\n\nfunc max(a, b int) int {\n\tif a > b {\n\t\treturn a\n\t}\n\treturn b\n}\n\nfunc Clamp(v int) int { return max(v, 0) }\n",
+    );
+
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+
+    const calls = (source: string) =>
+      graph.edges.filter((e) => e.relation === "calls" && e.source === source).map((e) => e.target);
+    assert.deepEqual(calls("server/server.go#Start"), ["server/client.go#newClient"]);
+    assert.deepEqual(calls("worker/worker.go#Run"), ["worker/worker.go#newClient"]);
+    assert.deepEqual(calls("mathx/mathx.go#Clamp"), ["mathx/mathx.go#max"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
