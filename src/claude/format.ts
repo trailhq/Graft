@@ -11,7 +11,7 @@ import { flatLine } from '../notes/flatten.js';
 import { isAlwaysFollow } from '../notes/units.js';
 import { shownPath, type NoteCounts } from '../notes/home.js';
 import { trailHome } from '../notes/trail-home.js';
-import { formatNoteHits, learningCredit, learningSavingsLine, sectionLead, whereToRead, type Note, type NoteHit } from '../notes/notes.js';
+import { formatNoteHits, learningCredit, learningSavedTokens, learningSavingsLine, sectionLead, whereToRead, type Note, type NoteHit } from '../notes/notes.js';
 import { summaryView, type SummaryView } from './summary-view.js';
 
 const C = {
@@ -131,6 +131,7 @@ export function notesForPrompt(ask: AskJson, s: SessionState, cap = PROMPT_NOTES
   const fresh = (ask.notes ?? []).filter((h) => h?.note && !seen.has(h.note.path || h.note.title)).slice(0, cap);
   if (!fresh.length) return null;
   s.injectedNotes = [...(s.injectedNotes ?? []), ...fresh.map((h) => h.note.path || h.note.title)].slice(-INJECTED_POINTERS_CAP);
+  countSaved(s, fresh);
   if (view === 'one-line') return oneLineNotes(fresh, 'this');
   const saved = learningSavingsLine(fresh);
   // A worth only when these learnings' own measured cost backs one; otherwise the line names whose it was, nothing more.
@@ -143,6 +144,16 @@ export function notesForPrompt(ask: AskJson, s: SessionState, cap = PROMPT_NOTES
     formatNoteHits(fresh).join('\n').trimEnd() +
     (saved ? `\n${saved}` : '')
   );
+}
+
+/**
+ * Add what these learnings saved to the session's tokens-saved counter (the
+ * statusline's), in either view. Counted from the learnings, not read back out
+ * of the text: one-line has no savings line, and a title could fake one.
+ */
+function countSaved(s: SessionState, hits: NoteHit[]): void {
+  const saved = learningSavedTokens(hits);
+  if (saved > 0) s.savedTokens = (s.savedTokens ?? 0) + saved;
 }
 
 /** The `one-line` summary (summary-view.ts): the learnings named on one line, with where to read each. */
@@ -192,6 +203,7 @@ export function notesOnTouch(notes: Note[], touch: Touch, s: SessionState, cap =
   if (!fresh.length) return null;
   s.injectedNotes = [...(s.injectedNotes ?? []), ...fresh.map((n) => n.path || n.title)].slice(-INJECTED_POINTERS_CAP);
   const hits: NoteHit[] = fresh.map((note) => ({ note, score: 0, shared: [] }));
+  countSaved(s, hits);
   const what =
     'file' in touch
       ? touch.verb === 'editing'
