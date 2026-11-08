@@ -288,7 +288,7 @@ export function mergeTrailShared(existing: Json): Json {
  */
 export function mergeTrailLocal(
   existing: Json,
-  opts: { statusline?: boolean; hooks?: boolean; theirs?: (Json | null)[] } = {},
+  opts: { statusline?: boolean; hooks?: boolean; sessionStart?: boolean; theirs?: (Json | null)[] } = {},
 ): { merged: Json; warnings: string[]; statusline: 'trail' | 'theirs' | 'off' } {
   const merged = withoutOurs(existing);
   const warnings: string[] = [];
@@ -304,7 +304,7 @@ export function mergeTrailLocal(
   if (opts.hooks) {
     merged.hooks = { ...(merged.hooks ?? {}) };
     for (const [event, blocks] of Object.entries(hookBlocks(trailHookCmd))) {
-      if (event === 'SessionStart') continue;
+      if (event === 'SessionStart' && !opts.sessionStart) continue;
       merged.hooks[event] = [...(Array.isArray(merged.hooks[event]) ? merged.hooks[event] : []), ...blocks];
     }
   }

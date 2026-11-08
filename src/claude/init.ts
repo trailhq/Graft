@@ -226,7 +226,11 @@ function runTrailInit(
   // they go in the personal file, beside the status line.
   const existingLocal = readSettings(local);
   const theirs = [readSettings(join(home, '.claude', 'settings.json')), existingShared];
-  const { merged, warnings, statusline: shown } = mergeTrailLocal(existingLocal ?? {}, { statusline: opts.statusline, hooks: !global, theirs });
+  // Just for this person with `~/.claude` off, nothing else runs SessionStart: it goes in the personal file too,
+  // unless a settings.json git tracks already has trail's.
+  const sharedNow = justMe ? readSettings(settings) : null;
+  const sessionStart = justMe && !global && !(sharedNow && JSON.stringify(withoutOurs(sharedNow)) !== JSON.stringify(sharedNow));
+  const { merged, warnings, statusline: shown } = mergeTrailLocal(existingLocal ?? {}, { statusline: opts.statusline, hooks: !global, sessionStart, theirs });
   if (existingLocal) writeFileSync(local, `${JSON.stringify(merged, null, 2)}\n`);
   else warnings.push(notPlainJson('.claude/settings.local.json', "trail's status line and allowlist"));
   if (!existingShared) warnings.unshift(notPlainJson('.claude/settings.json', "trail's session-start hook"));

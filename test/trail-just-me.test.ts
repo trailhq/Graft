@@ -142,9 +142,17 @@ test("trail init --just-me leaves git status clean, and --team brings back what 
   assert.equal(git(dir, "status", "--porcelain"), "");
   assert.match(mine.stderr, /just for you: git sees nothing trail added, so there's nothing to commit\. To share it with your team later, run trail init --team/);
   assert.doesNotMatch(mine.stderr, /· commit /);
+  // With ~/.claude off (--no-global), the personal file is the only place SessionStart can run from.
+  const local = join(dir, ".claude", "settings.local.json");
+  const startHooks = () => JSON.stringify(JSON.parse(readFileSync(local, "utf8")).hooks?.SessionStart ?? []);
+  assert.match(startHooks(), /\.trail\/hook\.cjs.*session-start/);
+  assert.equal(existsSync(join(dir, ".claude", "settings.json")), false);
 
   const team = await run(["init", dir, "--team", "--agents", "claude", "--no-global", "--no-build"], env);
   assert.equal(team.status, 0, team.stderr);
   assert.match(git(dir, "status", "--porcelain"), /\?\? \.claude\/\n\?\? \.trail\//);
   assert.match(team.stderr, /· commit \.claude\/settings\.json and \.trail\/ once/);
+  // Shared again: SessionStart runs from the committed file, not twice.
+  assert.equal(startHooks(), "[]");
+  assert.match(readFileSync(join(dir, ".claude", "settings.json"), "utf8"), /session-start/);
 });
