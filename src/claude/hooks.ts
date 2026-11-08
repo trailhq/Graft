@@ -3,9 +3,10 @@ import { execFileSync } from 'node:child_process';
 import { join, basename, isAbsolute, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { readWiring } from './stats.js';
-import { formatBlastRadius, formatOrientation, notesOnTouch, standingDirective, teamNotesDirective, type Touch } from './format.js';
+import { formatBlastRadius, formatOrientation, notesOnTouch, standingDirective, teamNotesDirective, TOUCH_NOTES_CAP, type Touch } from './format.js';
 import { commitLines, listNotes, setupCommitLine, standingLearnings } from '../notes/notes.js';
 import { liveLearnings } from '../notes/learning-fields.js';
+import { markStale } from '../notes/stale.js';
 import { noteAuthor, teammatesOn } from '../notes/git-facts.js';
 import { indexFreshness, staleBanner } from '../context/check.js';
 import { dropStoredPrompts, patchStats, readSession, writeSession, resolveContextDir } from './state.js';
@@ -16,6 +17,7 @@ import { handlePrompt } from './prompt-hook.js';
 import { runUpkeep } from '../upkeep-run.js';
 import { runningVersion, wiredHostIds } from '../upkeep.js';
 import { hostsWiredForTrail } from '../hosts/registry.js';
+import { isJustMe, JUST_ME_DIRECTIVE } from '../notes/just-me.js';
 import { flushClosedSessions, summarizeSession } from '../telemetry/sessions.js';
 import { maybeFlushInBackground } from '../telemetry/flush.js';
 import { handleStopEvent } from './stop.js';
@@ -184,7 +186,7 @@ export function learningsOnTouch(input: any, dir: string, before = false): strin
     if (!notes.length) return null;
     const id = payloadSessionId(input);
     const s = readSession(dir, id);
-    const text = notesOnTouch(notes, touch, s);
+    const text = notesOnTouch(notes, touch, s, TOUCH_NOTES_CAP, dir);
     // notesOnTouch added what they saved to the session's counter.
     if (text) writeSession(dir, id, s);
     return text;
@@ -342,12 +344,15 @@ export function trackLearningsCommitted(dir: string): void {
  * Learnings added to this repo but sitting uncommitted in `.trail/learnings/` (from trail init's
  * read of past sessions, or a session that ended before committing) reach no
  * teammate. Once a day per repo, the first reply says so, with the line that
- * makes the case for committing them. Empty when everything is committed.
+ * makes the case for committing them. Empty when everything is committed. In a
+ * repo on trail just for this person (notes/just-me.ts), every session is told
+ * instead that there is nothing to commit.
  */
 export function uncommittedDirective(dir: string, now = Date.now()): string {
   try {
     const place = repoPlace(dir);
     if (!place.git) return '';
+    if (isJustMe(place.checkout)) return `${tag()} ${JUST_ME_DIRECTIVE}\n`;
     const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all', '--', '.trail/learnings'], {
       cwd: place.checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000, windowsHide: true,
     });
@@ -436,7 +441,7 @@ function learningsAtStart(dir: string): StartLearnings {
   try {
     if (!keepsNotes(dir)) return { kept: false, count: 0, extra: standingDirective(every) };
     const skills = skillsDirective(dir);
-    const standing = brand() === 'trail' ? standingDirective(withEvery(standingLearnings(dir), every)) + uncommittedDirective(dir) : standingDirective(every);
+    const standing = brand() === 'trail' ? standingDirective(withEvery(markStale(standingLearnings(dir), dir), every)) + uncommittedDirective(dir) : standingDirective(every);
     return { kept: true, count: noteCounts(dir), extra: skills + standing };
   } catch {
     return { kept: false, count: 0, extra: standingDirective(every) };

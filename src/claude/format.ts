@@ -11,7 +11,8 @@ import { flatLine } from '../notes/flatten.js';
 import { isAlwaysFollow } from '../notes/units.js';
 import { shownPath, type NoteCounts } from '../notes/home.js';
 import { trailHome } from '../notes/trail-home.js';
-import { formatNoteHits, learningCredit, learningSavedTokens, learningSavingsLine, sectionLead, whereToRead, type Note, type NoteHit } from '../notes/notes.js';
+import { formatNoteHits, learningCredit, learningSavedTokens, learningSavingsLine, sectionLead, staleLine, whereToRead, type Note, type NoteHit } from '../notes/notes.js';
+import { markStale } from '../notes/stale.js';
 import { summaryView, type SummaryView } from './summary-view.js';
 
 const C = {
@@ -192,7 +193,7 @@ function commandNames(command: string, file: string): boolean {
  * tool it chose, on any model and in subagents. Standing learnings are left
  * out, since the session-start hook already lists them.
  */
-export function notesOnTouch(notes: Note[], touch: Touch, s: SessionState, cap = TOUCH_NOTES_CAP, view: SummaryView = summaryView()): string | null {
+export function notesOnTouch(notes: Note[], touch: Touch, s: SessionState, cap = TOUCH_NOTES_CAP, dir?: string, view: SummaryView = summaryView()): string | null {
   const seen = new Set(s.injectedNotes ?? []);
   const about = (n: Note) =>
     n.touches.some((t) => {
@@ -201,6 +202,7 @@ export function notesOnTouch(notes: Note[], touch: Touch, s: SessionState, cap =
     });
   const fresh = notes.filter((n) => !n.standing && !seen.has(n.path || n.title) && about(n)).slice(0, cap);
   if (!fresh.length) return null;
+  if (dir) markStale(fresh, dir);
   s.injectedNotes = [...(s.injectedNotes ?? []), ...fresh.map((n) => n.path || n.title)].slice(-INJECTED_POINTERS_CAP);
   const hits: NoteHit[] = fresh.map((note) => ({ note, score: 0, shared: [] }));
   countSaved(s, hits);
@@ -426,7 +428,8 @@ export function standingDirective(notes: Note[]): string {
     const where = n.scope === 'personal' ? 'the user\'s own' : 'added to this repo';
     // Always follow: who added it, since that's what Claude names when it won't go against one.
     const mark = isAlwaysFollow(n) ? `always follow, ${where}${n.author ? `, added by ${flatLine(n.author, 40)}` : ''}` : where;
-    return `  · ${cut ? flatLine(n.body, 320) : flatLine(n.title)}${what} (${mark})`;
+    const stale = n.stale?.length ? `\n    may be stale: ${staleLine(n)}` : '';
+    return `  · ${cut ? flatLine(n.body, 320) : flatLine(n.title)}${what} (${mark})${stale}`;
   });
   const always = shown.some(isAlwaysFollow)
     ? ' One marked always follow holds even if the user asks otherwise: don\'t go against it; stop and say which learning it is and who added it.'

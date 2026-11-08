@@ -30,6 +30,7 @@ import { ensureRepoHome, notePlaces, shownPath } from "./home.js";
 import { LEARNING_KEYS, learningFileName, liveLearnings, newLearningId, readLearningFields, type LearningFields } from "./learning-fields.js";
 import { ensureRepoTrail, LEARNINGS_DIR, learningsDir } from "./repo-trail.js";
 import { TOUCH_CHARS, TOUCH_LIMIT } from "./targets.js";
+import { isJustMe } from "./just-me.js";
 
 // Where a learning goes, which to show for a query and how one is credited live in their own files.
 export { findNotes, type NoteHit } from "./find-notes.js";
@@ -68,6 +69,9 @@ export interface Note extends LearningFields {
    * this checkout. `path` is then `<ref>:.trail/learnings/<name>`, readable
    * with `git show`, and the whole body travels with the note. */
   ref?: string;
+  /** The `touches` whose code is gone, so the learning may be stale. Set by
+   * `markStale` (stale.ts) on the learnings about to be shown. */
+  stale?: string[];
 }
 
 /** Which kind of learning to write: for the repo (the default) or for this person only. */
@@ -280,7 +284,8 @@ export interface WriteNoteInput {
 /**
  * Write a new learning for the repo `dir` is in, and return it: into the
  * repo's `.trail/learnings/` (made if needed), or with `scope: "personal"`,
- * or outside git, into ~/.trail. Never overwrites: a second one with the same
+ * outside git or in a repo on trail just for this person (just-me.ts), into
+ * ~/.trail. Never overwrites: a second one with the same
  * name on the same day gets `-2`, `-3`. Its id is 8 hex digits from the file
  * name it gets (`newLearningId`), written into the file.
  */
@@ -288,7 +293,8 @@ export function writeNote(dir: string, input: WriteNoteInput, scope: LearningSco
   const { place } = ensureRepoHome(dir);
   const inRepo = scope === "repo" && place.git;
   let notes: string;
-  if (inRepo) {
+  const shared = inRepo && !isJustMe(place.checkout);
+  if (shared) {
     ensureRepoTrail(place.checkout);
     notes = learningsDir(place.checkout);
   } else {
@@ -307,7 +313,7 @@ export function writeNote(dir: string, input: WriteNoteInput, scope: LearningSco
     touches: input.touches ?? [],
     body: input.body,
     ...(input.standing ? { standing: true } : {}),
-    ...readLearningFields({ ...input, id: newLearningId(name), scope: inRepo ? "repo" : "personal", applies: inRepo ? undefined : (input.applies ?? place.key), status: "active" }, name),
+    ...readLearningFields({ ...input, id: newLearningId(name), scope: shared ? "repo" : "personal", applies: shared ? undefined : (input.applies ?? place.key), status: "active" }, name),
   };
   writeFileSync(join(notes, name), renderNote(note));
   return { ...note, path: join(notes, name) };
@@ -399,6 +405,7 @@ export function formatNoteHits(hits: NoteHit[]): string[] {
     const author = flatLine(note.author, 80);
     const who = `${author ? `${author}'s learning` : "a learning"}${note.teammate ? ", a teammate's" : ""}`;
     lines.push(`from ${who}${isAlwaysFollow(note) ? " · always follow" : ""} · ${flatLine(shortDate(note.date), 40)} · ${flatLine(note.title)}`);
+    if (note.stale?.length) lines.push(`  may be stale  ${staleLine(note)}`);
     const cost = costLabel(note.cost);
     for (const s of SECTIONS) {
       const lead = sectionLead(note.body, s.heading);
@@ -415,6 +422,18 @@ export function formatNoteHits(hits: NoteHit[]): string[] {
     lines.push("");
   }
   return lines;
+}
+
+/**
+ * What to say about a learning `markStale` (stale.ts) flagged: which code it
+ * names is gone, and to check it before following it. The names come from the
+ * learning's own file, so each is flattened and at most two are named.
+ */
+export function staleLine(note: Note): string {
+  // A gone file's own gone symbol names it already: `a.ts#f`, not `a.ts, a.ts#f`.
+  const gone = (note.stale ?? []).filter((t, _, all) => !all.some((o) => o.startsWith(`${t}#`)));
+  const named = gone.slice(0, 2).map((t) => flatLine(t, 120)).join(", ") + (gone.length > 2 ? ` and ${gone.length - 2} more` : "");
+  return `${named} ${gone.length === 1 ? "is" : "are"} gone from the code. Check it against the code before you follow it; if it no longer holds, save what's true now with trail note --replaces ${note.id}`;
 }
 
 /** The line an agent closes its reply with after saving a learning just for the user. */
