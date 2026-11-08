@@ -49,8 +49,9 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
   /** `graft init` completed. Tells us which agents people actually wire, and
    *  how many decline telemetry at the picker. `statusline` says whose status
    *  line Claude Code shows in the repo afterwards: trail's, the one the person
-   *  or their team already had, or none (`--no-statusline`). */
-  init_completed: new Set<string>(['agents', 'consent', 'statusline']),
+   *  or their team already had, or none (`--no-statusline`). `scope`: who trail is for in
+   *  the repo (`just_me`/`team`, or `unasked` when nobody chose). */
+  init_completed: new Set<string>(['agents', 'consent', 'statusline', 'scope']),
   /** A build finished. The activation event — an install that never reaches one
    *  of these is the funnel leak we most want to see. `overlap`: another build or
    *  sync of the same map was already running when this one started. */
@@ -165,7 +166,7 @@ export const HOOK_MS_BUCKETS = ['<50ms', '50-100ms', '100-300ms', '300ms-1s', '1
  * for it. Every key of the skills events is listed here.
  */
 export const VALUES: Record<string, Record<string, ReadonlySet<string>>> = {
-  init_completed: { statusline: new Set(['trail', 'theirs', 'off']) },
+  init_completed: { statusline: new Set(['trail', 'theirs', 'off']), scope: new Set(['just_me', 'team', 'unasked']) },
   cold_start: Object.fromEntries(INIT_KINDS.flatMap((k) => [`offered_${k}`, `kept_${k}`]).map((key) => [key, new Set(SMALL_COUNTS)])),
   skill_offered: { moment: new Set(['asked', 'repeated', 'repaired', 'correction', 'update', 'drift', 'retire', 'promote']) },
   skill_answer: { answer: new Set(['yes', 'no', 'show', 'none', 'off', 'retire']) },
