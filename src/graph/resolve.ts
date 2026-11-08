@@ -397,10 +397,18 @@ function resolveName(
   // Without it a unique name match ANYWHERE in the repo wins, which is how a Go
   // builtin ended up resolving into a TypeScript test — see FAMILIES above.
   const global = (globalName.get(name) ?? []).filter(
-    (n) => kinds.includes(n.kind) && reachable(file, n.path),
+    (n) =>
+      kinds.includes(n.kind) &&
+      reachable(file, n.path) &&
+      (!file.endsWith(".go") || sameGoPackage(file, n.path)),
   );
   if (global.length === 1) return { id: global[0].id, confidence: "inferred" };
   return null;
+}
+
+function sameGoPackage(file: string, candidatePath: string): boolean {
+  if (posix.dirname(toPosixPath(file)) !== posix.dirname(toPosixPath(candidatePath))) return false;
+  return file.endsWith("_test.go") || !candidatePath.endsWith("_test.go");
 }
 
 /**

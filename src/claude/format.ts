@@ -1,4 +1,4 @@
-import { basename } from 'node:path';
+import { basename, sep } from 'node:path';
 import type { Stats, SessionState } from './state.js';
 import type { GraphV1, EdgeV1 } from '../graph/types.js';
 // The injection gate reuses the federation floors rather than inventing its own:
@@ -32,12 +32,14 @@ export function freshnessSegment(s: Stats): string {
 export function renderStatusline(
   stats: Stats | null,
   session: SessionState | null,
-  ctx: { ctxPct: number | null; notes?: number },
+  ctx: { ctxPct: number | null; notes?: number; folder?: string },
 ): string[] {
+  // The folder first: with several terminals open, it's what tells them apart.
+  const mark = C.muted('◤ ') + (ctx.folder ? C.text(ctx.folder) + SEP : '');
   if (!stats) {
-    return [C.muted(`◤ ${brand()} · not built · run `) + C.text(cmd('graft build'))];
+    return [mark + C.muted(`${brand()} · not built · run `) + C.text(cmd('graft build'))];
   }
-  const top = [C.muted('◤ ') + C.indigo(brand()), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];
+  const top = [mark + C.indigo(brand()), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];
   top.push(freshnessSegment(stats));
   // Past sessions' learnings, so a session that starts with some knows they're there.
   if (ctx.notes) top.push(C.amber(`${ctx.notes} learning${ctx.notes === 1 ? '' : 's'}`));
@@ -60,10 +62,13 @@ export function renderStatusline(
   return lines;
 }
 
+/** Graph paths use '/'; the edited path uses the OS's separator, so on Windows its '\' becomes '/'.
+ * Elsewhere a '\' is part of a file name and stays. */
 function nodeIdsInFile(w: GraphV1, filePath: string): Set<string> {
   const nodes = w.nodes ?? [];
+  const file = filePath.split(sep).join('/');
   return new Set(
-    nodes.filter((n) => n.path && (filePath === n.path || filePath.endsWith(`/${n.path}`)))
+    nodes.filter((n) => n.path && (file === n.path || file.endsWith(`/${n.path}`)))
       .map((n) => n.id),
   );
 }
