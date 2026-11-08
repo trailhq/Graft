@@ -5,16 +5,9 @@ date: 2026-10-15
 branch: main
 cost: { minutes: 113, tokens: 927495 }
 touches:
-  - src/ask/ask.ts
-  - src/cli.ts
-  - src/graph/extract.ts
-  - test/graph-bindings.test.ts
-  - ".github/copilot-instructions.md"
-  - AGENTS.md
-  - GEMINI.md
-  - data/.web-token
-  - data/share-link.txt
-  - src/ask/jev-ask.ts
+  - .github/workflows/codeql.yml
+  - scripts/pack-trail.mjs
+  - src/notes/pr-reviews.ts
 ---
 
 ## Decided
@@ -27,5 +20,5 @@ touches:
 - Stripping HTML comments with a single `.replace(/<!--[\s\S]*?-->/g, "")`. CodeQL flags it as high (js/incomplete-multi-character-sanitization) because `<!<!---->--` leaves `<!--` behind. The rule skips a replace whose result loops back into itself, and skips anchored regexes. So repeat until stable, then drop an unclosed `<!--` to the end (`dropHtmlComments` in src/notes/pr-reviews.ts).
 
 ## Watch out
-- Telemetry can't single out a repo: `repo_id` is a random UUID per checkout, with no name or remote. `learning_reused` fires only from `trail ask`, so a credit given through the hook shim to a teammate without trail isn't logged. Measure a rollout like assign's from git instead: learnings on dev, and PR open-to-merge time.
+- Telemetry can't single out a repo: `repo_id` is a random UUID per checkout, with no name or remote. `learning_reused` fires only from `trail ask`, so a credit given through the hook shim to a teammate without trail isn't logged. Measure a rollout in another repo from git instead: learnings on dev, and PR open-to-merge time.
 - `trail init` reads sessions from every worktree git lists for the repo, so a fresh worktree still sees the main checkout's past sessions.

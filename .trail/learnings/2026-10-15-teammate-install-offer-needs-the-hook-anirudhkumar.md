@@ -5,16 +5,8 @@ date: 2026-10-15
 branch: main
 cost: { minutes: 129, tokens: 957765 }
 touches:
-  - src/ask/ask.ts
-  - src/cli.ts
-  - src/graph/extract.ts
-  - test/graph-bindings.test.ts
-  - ".github/copilot-instructions.md"
-  - AGENTS.md
-  - GEMINI.md
-  - data/.web-token
-  - data/share-link.txt
-  - src/ask/jev-ask.ts
+  - src/claude/shim-template.ts
+  - src/claude/init.ts
 ---
 
 ## Decided
@@ -25,6 +17,6 @@ touches:
 - Committing only `.trail/`: Claude Code never reads it on its own, so nobody without trail is nudged. Every `trail init` also edits the tracked `.claude/settings.json` and `.mcp.json` (src/claude/init.ts:38), and those edits leak into unrelated PRs.
 
 ## Watch out
-- NanoNets/assign's .gitignore has `.claude/*` with negations only for settings.json, hooks/ and skills/, so `.claude/helpers/` is ignored and the shim never gets committed. Add `!.claude/helpers/`. trail init doesn't detect this yet.
+- A repo whose .gitignore has `.claude/*` with negations only for settings.json, hooks/ and skills/, so `.claude/helpers/` is ignored and the shim never gets committed. Add `!.claude/helpers/`. trail init doesn't detect this yet.
 - The shim treats `@nanonets/graft` on PATH as trail (PKGS/BINS), and `~/.trail/install.json` points it at the last init's build. To demo "no trail" on one Mac, uninstall both packages and move `~/.trail` aside.
 - Saying yes to the offer installs whatever is on npm, which may be older than main.

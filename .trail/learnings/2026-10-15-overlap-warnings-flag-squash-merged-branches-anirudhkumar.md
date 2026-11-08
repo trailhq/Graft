@@ -5,16 +5,8 @@ date: 2026-10-15
 branch: main
 cost: { minutes: 121, tokens: 947825 }
 touches:
-  - src/ask/ask.ts
-  - src/cli.ts
-  - src/graph/extract.ts
-  - test/graph-bindings.test.ts
-  - ".github/copilot-instructions.md"
-  - AGENTS.md
-  - GEMINI.md
-  - data/.web-token
-  - data/share-link.txt
-  - src/ask/jev-ask.ts
+  - src/notes/branches.ts
+  - src/notes/edit-overlap.ts
 ---
 
 ## Decided
