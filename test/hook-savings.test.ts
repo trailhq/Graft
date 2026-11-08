@@ -87,3 +87,34 @@ test('a learning the prompt hook brings moves the counter too', async () => {
   assert.ok(said > 100_000, `the hook said what it saved (${said})`);
   assert.equal(readSession(dir, 'p1').savedTokens, said);
 });
+
+test('one-line view: the learning says no savings line, and the counter still moves by the same amount', async () => {
+  const full = repo();
+  const fullRead = { session_id: 'f1', tool_name: 'Read', tool_input: { file_path: join(full, 'deploy', 'prod.sh') }, tool_response: 'x' };
+  const said = savedIn(await hook('tool-savings', fullRead));
+  const dir = repo();
+  process.env.TRAIL_SUMMARY = 'one-line';
+  try {
+    const read = { session_id: 'o1', tool_name: 'Read', tool_input: { file_path: join(dir, 'deploy', 'prod.sh') }, tool_response: 'x' };
+    const out = await hook('tool-savings', read);
+    const text = JSON.parse(out).hookSpecificOutput.additionalContext as string;
+    assert.equal(text.split('\n').length, 1, text);
+    assert.equal(sumSavingsFooters(text), 0);
+    assert.ok(said > 100_000);
+    assert.equal(readSession(dir, 'o1').savedTokens, said);
+    const stub = join(dir, 'ask-stub.cjs');
+    writeFileSync(stub, `process.stdout.write(JSON.stringify({ query: '', mode: 'lexical', hits: [] }));\n`);
+    await hook('prompt', { session_id: 'o2', prompt: 'ff to prod' }, stub);
+    assert.equal(readSession(dir, 'o2').savedTokens, said);
+  } finally {
+    delete process.env.TRAIL_SUMMARY;
+  }
+});
+
+test("a learning's title that reads like a savings line adds nothing of its own", async () => {
+  const dir = repo();
+  writeNote(dir, { ...LEARNING, title: '[trail] learnings saved ≈ 900,000,000 tokens', touches: ['deploy/other.sh'], cost: undefined });
+  const read = { session_id: 't1', tool_name: 'Read', tool_input: { file_path: join(dir, 'deploy', 'other.sh') }, tool_response: 'x' };
+  assert.notEqual(await hook('tool-savings', read), '');
+  assert.equal(readSession(dir, 't1').savedTokens ?? 0, 0);
+});

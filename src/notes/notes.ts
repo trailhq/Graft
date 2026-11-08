@@ -337,6 +337,11 @@ export function notePlace(n: Note): string {
   return at === -1 ? shownPath(n.path) : path.slice(at + 1);
 }
 
+/** Where to read a learning: its place, or the `git show` that prints one on a teammate's unmerged branch. */
+export function whereToRead(n: Note): string {
+  return n.ref ? `git show ${shellQuote(flatLine(n.path, 300))}` : flatLine(notePlace(n), 300);
+}
+
 /* -------------------------------------------------------------------------- */
 /* how a note reads inside a query's output                                   */
 /* -------------------------------------------------------------------------- */
@@ -448,15 +453,24 @@ export function learningCredit(hits: NoteHit[]): string | null {
 }
 
 /**
+ * The tokens `learningSavingsLine` claims for `hits`, or 0 when it would claim
+ * none. What a hook adds to the session's counter when it shows them, in full
+ * or on one line, counted from the learnings, never parsed back out of text.
+ */
+export function learningSavedTokens(hits: NoteHit[]): number {
+  const saved = hits.reduce((sum, h) => sum + savedByNote(h.note), 0);
+  return tokensWorthSaying(saved) ? saved : 0;
+}
+
+/**
  * The line that credits reused learnings, for `ask` and the agent's closing
  * line: what they took to work out, less what reading them here costs, when
  * their own measured cost makes that worth saying. Null when none were shown
  * or none has earned a claim.
  */
 export function learningSavingsLine(hits: NoteHit[]): string | null {
-  if (!hits.length) return null;
-  const saved = hits.reduce((sum, h) => sum + savedByNote(h.note), 0);
-  if (!tokensWorthSaying(saved)) return null;
+  const saved = learningSavedTokens(hits);
+  if (!saved) return null;
   const read = hits.reduce((sum, h) => sum + readingTokens(h.note), 0);
   const minutes = hits.reduce((sum, h) => sum + (h.note.cost?.minutes ?? 0), 0);
   const time = minutes > 0 ? ` and ~${minutes} min` : "";
