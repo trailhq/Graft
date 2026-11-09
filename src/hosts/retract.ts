@@ -35,7 +35,7 @@ import { piHookTargets } from './pi-hooks.js';
 import { antigravitySkillTargets } from './antigravity.js';
 import { claudeGlobalTargets } from './claude-global.js';
 import { claudeTargetsFor, legacyClaudeTargets, TRAIL_HOOK, TRAIL_STATUSLINE, trailSkillPath } from '../claude/init.js';
-import { isGraftAllowEntry, isGraftFooterRegex } from '../claude/settings-merge.js';
+import { isGraftAllowEntry, isGraftFooterRegex, isGraftStatusline } from '../claude/settings-merge.js';
 import type { WriteScope } from './plan.js';
 import type { Brand } from '../brand.js';
 
@@ -224,10 +224,9 @@ function removeTomlSection(path: string, apply: boolean): RetractAction {
 /**
  * Remove graft's fragments from `.claude/settings.json`, keeping the user's.
  *
- * The statusline check is by *shim path*, not exact string equality: an older
- * version's command differed in shape, and `mergeGraftSettings` would read that
- * as a hand-written statusline and refuse to touch it forever. Matching the
- * helper path recognizes graft's own output across every version that wrote it.
+ * The statusline check is init's own (`isGraftStatusline`), not exact string
+ * equality: it accepts every shape a version of graft/trail wrote, and rejects a
+ * user's wrapper that merely calls the helper, which init also leaves alone.
  */
 function stripClaudeSettings(path: string, apply: boolean): RetractAction {
   if (!existsSync(path)) return 'absent';
@@ -239,10 +238,11 @@ function stripClaudeSettings(path: string, apply: boolean): RetractAction {
   }
   if (typeof root !== 'object' || root === null || Array.isArray(root)) return 'skipped-unparseable';
   const before = JSON.stringify(root);
-  const isGraftCmd = (v: unknown) => /(graft|trail)-statusline\.cjs|\.trail\/statusline\.cjs/.test(JSON.stringify(v ?? ''));
 
+  // The same test init uses: only the standalone shim call is ours, so a user's
+  // wrapper that also runs the helper stays.
   for (const key of ['statusLine', 'subagentStatusLine']) {
-    if (root[key] !== undefined && isGraftCmd(root[key])) delete root[key];
+    if (isGraftStatusline(root[key])) delete root[key];
   }
 
   if (root.hooks && typeof root.hooks === 'object' && !Array.isArray(root.hooks)) {
