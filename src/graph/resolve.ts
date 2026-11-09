@@ -161,14 +161,9 @@ export function resolveEdges(
   // node ids. A Gleam package roots every module at its own `src/` (or `test/`),
   // so an `import app/thing` is exactly that suffix under some unknown root.
   const gleamFilesBySuffix = new Map<string, string[]>();
-  // Python module resolution: a dotted module name (`util`, `pkg.sub`) → the file
-  // node ids it can denote. The source root is unknown, so every dotted suffix of a
-  // file's path is a key, exactly like the Java index above.
-  const pyFilesByModule = new Map<string, string[]>();
   const hasGoModules = !!opts.goModules?.length;
   for (const n of nodes) {
     if (n.kind === "file") {
-      if (PY_EXT.test(n.path)) indexPyModule(n, pyFilesByModule);
       if (hasGoModules && n.path.endsWith(".go")) {
         const dir = posix.dirname(toPosixPath(n.path));
         push(goFilesByDir, dir, n.id);
@@ -341,7 +336,7 @@ export function resolveEdges(
           // `util.f()` / `u.f()` / `sub.f()`: the receiver is an imported module, so
           // look the name up inside that module's file only. Anything the module does
           // not define, or a module that is not in the repo, links nothing.
-          const hit = resolvePyModuleMember(e, perFileName, byId, pyFilesByModule);
+          const hit = resolvePyModuleMember(e, perFileName, byId);
           if (hit) add(e.source, hit.id, "calls", "extracted");
           continue;
         }
@@ -415,42 +410,57 @@ export function resolveEdges(
   return out;
 }
 
-/** Index a Python file under every dotted suffix of its module path:
- * `src/app/util.py` → `src.app.util`, `app.util`, `util`; `pkg/__init__.py` → `pkg`. */
-function indexPyModule(file: NodeV1, index: Map<string, string[]>): void {
-  const parts = toPosixPath(file.path).replace(PY_EXT, "").split("/");
-  if (parts.at(-1) === "__init__") parts.pop();
-  for (let i = 0; i < parts.length; i++) push(index, parts.slice(i).join("."), file.id);
+/** The directories a Python import can be rooted at, from `file`, nearest first: the
+ * importer's own package tree up from the first ancestor that is not itself a
+ * package (a package directory, one with an `__init__.py`, is never on `sys.path`),
+ * then each higher ancestor, then the repo root, each followed by its `src/` and
+ * `lib/`. A module is importable as `a.b` only at one of these, so a file whose path
+ * merely ENDS in `a/b.py` (an `app/serializers/json.py` against the stdlib `json`)
+ * is not a match. */
+function pyImportRoots(file: string, byId: Map<string, NodeV1>): string[] {
+  const tops: string[] = [];
+  for (let dir = posix.dirname(toPosixPath(file)); dir !== "." && dir !== "/"; dir = posix.dirname(dir)) {
+    if (!byId.has(`${dir}/__init__.py`)) tops.push(dir);
+  }
+  tops.push("");
+  return tops.flatMap((t) => [t, posix.join(t, "src"), posix.join(t, "lib")]);
 }
+
+/** Memo for {@link resolvePyModule}, per node index: every `util.f()` call in a file
+ * asks the same `(file, spec)` question. */
+const pyModuleMemo = new WeakMap<Map<string, NodeV1>, Map<string, string | null>>();
 
 /** The repo file a Python module specifier denotes, or null when it is external,
  * unresolvable or ambiguous. Relative specifiers (`.`, `..a`) are anchored at the
- * importing file's package; absolute ones use the suffix index, and a tie is
- * broken by the importer's own directory (a script's sibling import) before
- * giving up. */
-function resolvePyModule(
-  spec: string,
-  file: string,
-  byId: Map<string, NodeV1>,
-  index: Map<string, string[]>,
-): string | null {
+ * importing file's package. Absolute ones are looked up under {@link pyImportRoots}
+ * in order, as `sys.path` would: the first root holding the module wins, and two
+ * different files at that one root (`m.py` and `m/__init__.py`) drop. */
+function resolvePyModule(spec: string, file: string, byId: Map<string, NodeV1>): string | null {
+  let memo = pyModuleMemo.get(byId);
+  if (!memo) pyModuleMemo.set(byId, (memo = new Map()));
+  const key = `${file}\0${spec}`;
+  if (memo.has(key)) return memo.get(key)!;
+  const found = lookupPyModule(spec, file, byId);
+  memo.set(key, found);
+  return found;
+}
+
+function lookupPyModule(spec: string, file: string, byId: Map<string, NodeV1>): string | null {
   const dots = /^\.*/.exec(spec)![0].length;
-  const rest = spec.slice(dots);
+  const rest = spec.slice(dots).split(".").join("/");
+  const filesAt = (base: string): string[] =>
+    [`${base}.py`, `${base}.pyi`, posix.join(base, "__init__.py")].filter((c) => byId.get(c)?.kind === "file");
   if (dots > 0) {
     let dir = posix.dirname(toPosixPath(file));
     for (let i = 1; i < dots; i++) dir = posix.dirname(dir);
-    const base = rest ? posix.join(dir, rest.split(".").join("/")) : dir;
-    for (const c of [`${base}.py`, `${base}.pyi`, posix.join(base, "__init__.py")]) {
-      if (byId.get(c)?.kind === "file") return c;
-    }
-    return null;
+    // A bare `.` / `..` is the package itself: only its `__init__` can stand for it,
+    // never a `<dir>.py` that happens to sit beside the directory.
+    if (!rest) return byId.get(posix.join(dir, "__init__.py"))?.kind === "file" ? posix.join(dir, "__init__.py") : null;
+    return filesAt(posix.join(dir, rest))[0] ?? null;
   }
-  const candidates = index.get(spec) ?? [];
-  if (candidates.length === 1) return candidates[0];
-  if (candidates.length > 1) {
-    const dir = posix.dirname(toPosixPath(file));
-    const sibling = candidates.filter((c) => posix.dirname(toPosixPath(c)) === dir);
-    if (sibling.length === 1) return sibling[0];
+  for (const root of pyImportRoots(file, byId)) {
+    const hits = filesAt(posix.join(root, rest));
+    if (hits.length > 0) return hits.length === 1 ? hits[0] : null;
   }
   return null;
 }
@@ -461,16 +471,15 @@ function resolvePyModuleMember(
   e: RawEdge,
   perFileName: Map<string, Map<string, NodeV1[]>>,
   byId: Map<string, NodeV1>,
-  index: Map<string, string[]>,
 ): NodeV1 | null {
   if (!PY_EXT.test(e.file) || !e.name || !e.recvModule) return null;
   // `from pkg import m`: if `pkg` itself defines `m`, that attribute wins over a
   // submodule of the same name, and `m.f()` is a call on that value, not a module.
   if (e.recvModuleOf) {
-    const pkgFile = resolvePyModule(e.recvModuleOf.pkg, e.file, byId, index);
+    const pkgFile = resolvePyModule(e.recvModuleOf.pkg, e.file, byId);
     if (pkgFile && perFileName.get(pkgFile)?.has(e.recvModuleOf.name)) return null;
   }
-  const target = resolvePyModule(e.recvModule, e.file, byId, index);
+  const target = resolvePyModule(e.recvModule, e.file, byId);
   if (!target) return null;
   const inFile = perFileName.get(target)?.get(e.name) ?? [];
   for (const kinds of [["function"], PY_CTOR_KINDS] as Kind[][]) {

@@ -1172,7 +1172,95 @@ function collectPyModules(root: SyntaxNode): Map<string, PyModuleBinding> {
   };
   visit(root);
   for (const local of conflicted) out.delete(local);
+  for (const local of pyRebindsAtModuleLevel(root)) out.delete(local);
   return out;
+}
+
+/**
+ * The names a Python scope binds other than by `import`: parameters (functions
+ * only), assignment / `for` / `with ... as` / walrus targets, and nested `def` /
+ * `class` names. A nested function or class is its own scope: only its name counts.
+ */
+function pyBoundNames(scope: SyntaxNode, moduleScope: boolean): Set<string> {
+  const bound = new Set<string>();
+  const bindTargets = (n: SyntaxNode | null): void => {
+    if (!n) return;
+    if (n.type === "identifier") bound.add(n.text);
+    else if (n.type === "pattern_list" || n.type === "tuple_pattern" || n.type === "list_pattern" || n.type === "list_splat_pattern")
+      for (const c of n.namedChildren) bindTargets(c);
+  };
+  const visit = (node: SyntaxNode): void => {
+    if (!sameSyntaxNode(node, scope) && (node.type === "function_definition" || node.type === "class_definition")) {
+      const name = node.childForFieldName("name");
+      if (name) bound.add(name.text);
+      return;
+    }
+    switch (node.type) {
+      case "identifier":
+        // A lambda's parameters are its own scope, so they only count (conservatively)
+        // inside a function; at module level they would drop bindings for nothing.
+        if (!moduleScope && (node.parent?.type === "parameters" || node.parent?.type === "lambda_parameters"))
+          bound.add(node.text);
+        break;
+      case "default_parameter":
+      case "typed_parameter":
+      case "typed_default_parameter":
+        bindTargets(node.childForFieldName("name") ?? node.namedChildren[0] ?? null);
+        break;
+      case "list_splat_pattern":
+      case "dictionary_splat_pattern":
+        bindTargets(node.namedChildren[0] ?? null);
+        break;
+      case "assignment":
+        // `mod = None` at module level is the `except ImportError:` fallback for an
+        // optional import, not a rebinding to some other value.
+        if (moduleScope && node.childForFieldName("right")?.type === "none") break;
+        bindTargets(node.childForFieldName("left"));
+        break;
+      case "augmented_assignment":
+      case "for_statement":
+      case "for_in_clause":
+        bindTargets(node.childForFieldName("left"));
+        break;
+      case "named_expression":
+        bindTargets(node.childForFieldName("name"));
+        break;
+      case "as_pattern": {
+        const target = node.childForFieldName("alias");
+        bindTargets(target?.namedChildren[0] ?? target);
+        break;
+      }
+    }
+    for (const child of node.namedChildren) visit(child);
+  };
+  visit(scope);
+  return bound;
+}
+
+/**
+ * Module names the file rebinds: `config = config.load()` at module level turns
+ * `config` into a value, so a later `config.get()` is a call on that value, not on
+ * the module. The same goes for a function that declares `global config` and
+ * assigns it. Any rebinding anywhere in the file drops the name, whether or not
+ * it comes before the call: stay silent rather than guess an order.
+ */
+function pyRebindsAtModuleLevel(root: SyntaxNode): Set<string> {
+  const rebound = pyBoundNames(root, true);
+  const visit = (node: SyntaxNode): void => {
+    if (node.type === "function_definition") {
+      const globals = new Set<string>();
+      const findGlobals = (n: SyntaxNode): void => {
+        if (n.type === "global_statement") for (const c of n.namedChildren) globals.add(c.text);
+        // Nested defs have their own `global` declarations and are visited below.
+        else if (n.type !== "function_definition" && n.type !== "class_definition") for (const c of n.namedChildren) findGlobals(c);
+      };
+      for (const child of node.namedChildren) findGlobals(child);
+      if (globals.size > 0) for (const name of pyBoundNames(node, false)) if (globals.has(name)) rebound.add(name);
+    }
+    for (const child of node.namedChildren) visit(child);
+  };
+  visit(root);
+  return rebound;
 }
 
 /**
@@ -1186,51 +1274,7 @@ function withoutShadowedPyModules(
   definition: SyntaxNode,
 ): ReadonlyMap<string, PyModuleBinding> {
   if (modules.size === 0) return modules;
-  const shadowed = new Set<string>();
-  const bindTargets = (n: SyntaxNode | null): void => {
-    if (!n) return;
-    if (n.type === "identifier") shadowed.add(n.text);
-    else if (n.type === "pattern_list" || n.type === "tuple_pattern" || n.type === "list_pattern" || n.type === "list_splat_pattern")
-      for (const c of n.namedChildren) bindTargets(c);
-  };
-  const visit = (node: SyntaxNode): void => {
-    if (!sameSyntaxNode(node, definition) && (node.type === "function_definition" || node.type === "class_definition")) {
-      const name = node.childForFieldName("name");
-      if (name) shadowed.add(name.text);
-      return;
-    }
-    switch (node.type) {
-      case "identifier":
-        if (node.parent?.type === "parameters" || node.parent?.type === "lambda_parameters") shadowed.add(node.text);
-        break;
-      case "default_parameter":
-      case "typed_parameter":
-      case "typed_default_parameter":
-        bindTargets(node.childForFieldName("name") ?? node.namedChildren[0] ?? null);
-        break;
-      case "list_splat_pattern":
-      case "dictionary_splat_pattern":
-        bindTargets(node.namedChildren[0] ?? null);
-        break;
-      case "assignment":
-      case "augmented_assignment":
-      case "for_statement":
-      case "for_in_clause":
-        bindTargets(node.childForFieldName("left"));
-        break;
-      case "named_expression":
-        bindTargets(node.childForFieldName("name"));
-        break;
-      case "as_pattern":
-        {
-          const target = node.childForFieldName("alias");
-          bindTargets(target?.namedChildren[0] ?? target);
-        }
-        break;
-    }
-    for (const child of node.namedChildren) visit(child);
-  };
-  visit(definition);
+  const shadowed = pyBoundNames(definition, false);
   if (![...shadowed].some((name) => modules.has(name))) return modules;
   return new Map([...modules].filter(([local]) => !shadowed.has(local)));
 }

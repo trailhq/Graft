@@ -29,6 +29,10 @@ def resolve_plan():
 
 def release_lock():
     return 3
+
+
+def shared_fn():
+    return 10
 `;
 
 /** Same name as `util.release_lock` — only the import can say which one is meant. */
@@ -128,6 +132,125 @@ def run():
     return os.getcwd()
 `;
 
+/** \`json\` is the stdlib here. \`app/serializers/json.py\` merely ENDS in \`json.py\`: it
+ * is not importable as \`json\` from \`app/views.py\`, so no edge may be made. */
+const SER_JSON = `def dumps(x):
+    return str(x)
+`;
+
+const VIEWS_JSON = `import json
+
+
+def run(x):
+    return json.dumps(x)
+`;
+
+/** Source roots that ARE plausible: \`src/\` under the repo root, and the top of the
+ * importer's own package tree (\`backend/\`, the first ancestor with no \`__init__.py\`). */
+const SRC_MOD = `def make_src():
+    return 8
+`;
+
+const USE_SRC = `import src_mod
+
+
+def run():
+    return src_mod.make_src()
+`;
+
+const BACKEND_MODELS = `def make_model():
+    return 9
+`;
+
+const BACKEND_VIEWS = `import app.models as m
+
+
+def run():
+    return m.make_model()
+`;
+
+/** \`config = config.load()\` rebinds the name to a value, so \`config.get()\` is a call on
+ * that value (\`Config.get\`), not on the module's own \`get\`. */
+const CONFIG = `class Config:
+    def get(self):
+        return 1
+
+
+def load():
+    return Config()
+
+
+def get():
+    return 2
+`;
+
+const CALL_REBIND = `import config
+
+config = config.load()
+
+
+def run():
+    return config.get()
+`;
+
+/** Rebinding through \`global\` inside a function is a module-level rebinding too. */
+const CALL_GLOBAL_REBIND = `import config
+
+
+def reset():
+    global config
+    config = object()
+
+
+def run():
+    return config.get()
+`;
+
+/** \`scripts/\` has no \`__init__.py\`, so it is a script directory: its own \`util.py\`
+ * is what \`import util\` finds from there, ahead of the repo-root \`util.py\`. */
+const SCRIPTS_UTIL = `def shared_fn():
+    return 11
+`;
+
+const SCRIPTS_RUN = `import util
+
+
+def run():
+    return util.shared_fn()
+`;
+
+/** \`pkgr.py\` sits beside the \`pkgr/\` package. \`from . import x\` in the package names
+ * \`pkgr/__init__.py\`, never \`pkgr.py\`, and that \`__init__\` defines \`x\` itself. */
+const PKGR_FILE = `def other():
+    return 12
+`;
+
+const PKGR_INIT = `def x():
+    return 13
+`;
+
+const PKGR_X = `def f():
+    return 14
+`;
+
+const PKGR_USER = `from . import x
+
+
+def run():
+    return x.f()
+`;
+
+/** The optional-dependency idiom: the \`None\` fallback is not a rebinding of the module. */
+const CALL_OPTIONAL = `try:
+    import util as uu2
+except ImportError:
+    uu2 = None
+
+
+def run():
+    return uu2.resolve_plan()
+`;
+
 function makeFixture(): string {
   const dir = mkdtempSync(join(tmpdir(), "graft-python-modcalls-"));
   mkdirSync(join(dir, "pkg"), { recursive: true });
@@ -140,6 +263,28 @@ function makeFixture(): string {
   writeFileSync(join(dir, "pkg", "sib.py"), SIB);
   writeFileSync(join(dir, "pkg", "rel_user.py"), REL_USER);
   writeFileSync(join(dir, "call_shapes.py"), CALL_SHAPES);
+  mkdirSync(join(dir, "app", "serializers"), { recursive: true });
+  writeFileSync(join(dir, "app", "serializers", "json.py"), SER_JSON);
+  writeFileSync(join(dir, "app", "views.py"), VIEWS_JSON);
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "src_mod.py"), SRC_MOD);
+  writeFileSync(join(dir, "use_src.py"), USE_SRC);
+  mkdirSync(join(dir, "backend", "app"), { recursive: true });
+  writeFileSync(join(dir, "backend", "app", "__init__.py"), "");
+  writeFileSync(join(dir, "backend", "app", "models.py"), BACKEND_MODELS);
+  writeFileSync(join(dir, "backend", "app", "views.py"), BACKEND_VIEWS);
+  writeFileSync(join(dir, "config.py"), CONFIG);
+  writeFileSync(join(dir, "call_rebind.py"), CALL_REBIND);
+  writeFileSync(join(dir, "call_global_rebind.py"), CALL_GLOBAL_REBIND);
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  writeFileSync(join(dir, "scripts", "util.py"), SCRIPTS_UTIL);
+  writeFileSync(join(dir, "scripts", "run.py"), SCRIPTS_RUN);
+  mkdirSync(join(dir, "pkgr"), { recursive: true });
+  writeFileSync(join(dir, "pkgr.py"), PKGR_FILE);
+  writeFileSync(join(dir, "pkgr", "__init__.py"), PKGR_INIT);
+  writeFileSync(join(dir, "pkgr", "x.py"), PKGR_X);
+  writeFileSync(join(dir, "pkgr", "user.py"), PKGR_USER);
+  writeFileSync(join(dir, "call_optional.py"), CALL_OPTIONAL);
   writeFileSync(join(dir, "util.py"), UTIL);
   writeFileSync(join(dir, "other.py"), OTHER);
   writeFileSync(join(dir, "call_direct.py"), CALL_DIRECT);
@@ -239,6 +384,72 @@ test("Python: multi-name, parenthesized, commented and aliased import lists", as
     const targets = (await callTargets(dir, "call_shapes.py#run")).sort();
     // `util.resolve_plan()` is NOT here: `from util import *` binds no module name.
     assert.deepEqual(targets, ["pkg/sib.py#sib_fn", "pkg/sub.py#sub_fn", "util.py#acquire_lock"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Python: a module is matched at a source root, not by any file whose path ends in its name", async () => {
+  const dir = makeFixture();
+  try {
+    // `import json` is the stdlib; app/serializers/json.py is not importable as `json` from app/views.py.
+    assert.deepEqual(await callTargets(dir, "app/views.py#run"), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Python: modules under src/ and under the importer's own top package still resolve", async () => {
+  const dir = makeFixture();
+  try {
+    assert.deepEqual(await callTargets(dir, "use_src.py#run"), ["src/src_mod.py#make_src"]);
+    assert.deepEqual(await callTargets(dir, "backend/app/views.py#run"), ["backend/app/models.py#make_model"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Python: `config = config.load()` at module level shadows the module for later calls", async () => {
+  const dir = makeFixture();
+  try {
+    assert.deepEqual(await callTargets(dir, "call_rebind.py#run"), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Python: rebinding the module name through `global` in a function shadows it too", async () => {
+  const dir = makeFixture();
+  try {
+    assert.deepEqual(await callTargets(dir, "call_global_rebind.py#run"), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Python: a script's own directory wins over the repo root for a same-named module", async () => {
+  const dir = makeFixture();
+  try {
+    assert.deepEqual(await callTargets(dir, "scripts/run.py#run"), ["scripts/util.py#shared_fn"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Python: `from . import x` reads the package's __init__, not a sibling pkg.py", async () => {
+  const dir = makeFixture();
+  try {
+    // pkgr/__init__.py defines `x`, so `x.f()` is a call on that function, not on pkgr/x.py.
+    assert.deepEqual(await callTargets(dir, "pkgr/user.py#run"), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Python: an `except ImportError: mod = None` fallback does not unbind the module", async () => {
+  const dir = makeFixture();
+  try {
+    assert.deepEqual(await callTargets(dir, "call_optional.py#run"), ["util.py#resolve_plan"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
