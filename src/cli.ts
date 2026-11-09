@@ -315,9 +315,9 @@ function parseTabs(raw: string | undefined): VizTab[] | undefined {
 /**
  * Commands that own the upgrade story themselves (`version`, `upgrade`) or must
  * not editorialize on stderr at startup (`mcp` runs its own upkeep at boot, and
- * `_update-check` IS the fetch).
+ * internal helpers must not schedule another copy of themselves).
  */
-const UPKEEP_SKIP = new Set(["version", "upgrade", "_update-check", "mcp"]);
+const UPKEEP_SKIP = new Set(["version", "upgrade", "_update-check", "_telemetry-flush", "mcp"]);
 
 /**
  * Every other command: top up the cached registry answer in the background and,
