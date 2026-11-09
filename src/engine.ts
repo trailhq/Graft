@@ -31,6 +31,8 @@ export interface InitOptions {
   extensions?: string[];
   /** Repo-relative directory prefixes to limit the concept pass (`--only-dir`). */
   onlyDirs?: string[];
+  /** Max files summarized in parallel during the concept pass (`-j`). Default 8. */
+  concurrency?: number;
   /** Max concept synthesis batches in flight at once. Default 4. */
   synthConcurrency?: number;
   /** Char budget of summary text one concept-synthesis call carries. Default 48_000. */
@@ -72,6 +74,7 @@ export class Graft {
       contextDir: this.cfg.contextDir,
       extensions: opts.extensions,
       onlyDirs: opts.onlyDirs,
+      concurrency: opts.concurrency,
       synthConcurrency: opts.synthConcurrency,
       synthBatchChars: opts.synthBatchChars,
       model: this.modelLabel(),
