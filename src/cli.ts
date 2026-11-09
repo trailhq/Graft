@@ -1661,7 +1661,7 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
     // guessing (pre-0.8 this silently wired every agent the machine had ever
     // installed — see --yes to get that back).
     const home = homedir();
-    const plan = planInit(repo, { home });
+    const plan = planInit(repo, { home, mcp: opts.mcp, hooks: opts.hooks, global: opts.global });
     const detectedIds = plan.filter((p) => p.detected).map((p) => p.id);
     const noAgents = (opts as { agents?: unknown }).agents === false;
 
@@ -1717,7 +1717,7 @@ async function runInitCommand(dir: string, opts: InitOptions, progress?: InitPro
         console.error(`· --agents auto: repo files for Claude Code, Cursor, Codex and OpenCode; laptop settings for ${autoSel.agents.length ? agentList(autoSel.agents) : "none (no agent found here)"}\n`);
       console.error(formatPlan(laptopOnly(plan, laptop), ids, repo, home));
       for (const child of children)
-        console.error(`\n· ${child}/ (workspace child)\n` + formatPlan(laptopOnly(planInit(join(repo, child), { home }), laptop), ids, join(repo, child), home));
+        console.error(`\n· ${child}/ (workspace child)\n` + formatPlan(laptopOnly(planInit(join(repo, child), { home, mcp: opts.mcp, hooks: opts.hooks, global: opts.global }), laptop), ids, join(repo, child), home));
       return null;
     }
     if (ids.length === 0) {
@@ -2305,7 +2305,12 @@ function wireTarget(
         if (trust) say(`⚠ ${trust}`);
       }
       // Only worth saying when there was actually something out-of-repo to skip.
-      if (opts.global === false && selectedWrites(plan, ids).some((w) => w.scope === "global"))
+      // `plan` already reflects --no-global, so ask the unsuppressed plan whether
+      // there was anything out-of-repo to skip.
+      if (
+        opts.global === false &&
+        selectedWrites(planInit(repo, { home, mcp: opts.mcp, hooks: opts.hooks }), ids).some((w) => w.scope === "global")
+      )
         say("· skipped out-of-repo writes (--no-global)");
     }
 
