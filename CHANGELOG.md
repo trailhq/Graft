@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Prevent telemetry helpers from repeatedly starting new copies when a sandbox
+  blocks writes to the telemetry state. Internal flush commands skip startup
+  upkeep, and background flushes require a saved timestamp before spawning.
+
 - **Elixir remote calls resolve through `alias`** (#351) in the generic tree-sitter tier, so
   `graft callers` and `graft_trace_calls` work on Elixir. `Cart.total(x)` used to be
   captured as a bare `total` and dropped as ambiguous the moment another `total` existed
