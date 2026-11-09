@@ -490,6 +490,8 @@ compiler-grade layer, all `$0` and deterministic (no model, no key):
   call edges via a generic tree-sitter extractor, one grammar per language:
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
   Dart, Clojure, Nix, Lua, Gleam, Julia**, and **OCaml, Zig, GLSL** (symbols only for now, no call edges).
+  **Bash** (`.sh`, `.bash`) also uses this tier for function symbols;
+  Bash call edges and extensionless shell scripts are not yet supported.
 
 - **Single-file components**: **Vue** (`.vue`), **Svelte** (`.svelte`) and
   **Astro** (`.astro`). The wrapper grammar only locates the `<script>` block
