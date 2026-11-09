@@ -484,13 +484,18 @@ compiler-grade layer, all `$0` and deterministic (no model, no key):
   **Kotlin**, **PHP**, **Swift** (classes, structs, enums, actors, protocols;
   extension members attach to the extended type), **R** (`.R`/`.r`: plain
   functions, S3/S4/R6 classes and methods, roxygen `@export`,
-  `library()`/`source()` imports), and **Vue** single-file components (their
-  `<script>` blocks go through the TypeScript extractor).
+  `library()`/`source()` imports).
 
 - **Broad**: symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
   Dart, Clojure, Nix, Lua, Gleam**, and **OCaml, Zig** (symbols only for now, no call edges).
+
+- **Single-file components**: **Vue** (`.vue`), **Svelte** (`.svelte`) and
+  **Astro** (`.astro`). The wrapper grammar only locates the `<script>` block
+  (and Astro's `---` frontmatter); the code inside goes through the
+  full-fidelity TypeScript extractor, so a call from a component into a `.ts`
+  module resolves to a real edge.
 
 - **Compiler-grade edges (opt-in)**: `trail build --lsp` adds precise
   `lsp_resolved` call edges (member calls the static pass can't type) when a
@@ -499,7 +504,7 @@ compiler-grade layer, all `$0` and deterministic (no model, no key):
   **gopls** (Go), **pyright** (Python), **typescript-language-server** (TS/JS).
   It's best-effort: with no server installed the graph is unchanged.
 
-Twenty-four languages, plus Vue single-file components. A file whose language isn't listed is skipped, not
+Twenty-four languages, plus Vue, Svelte and Astro single-file components. A file whose language isn't listed is skipped, not
 indexed. Adding a broad-tier language is a small contribution; see
 [CREDITS.md](CREDITS.md) for the folks who added the current set.
 
