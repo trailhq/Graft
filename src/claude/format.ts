@@ -6,7 +6,7 @@ import type { GraphV1, EdgeV1 } from '../graph/types.js';
 // question in both places, and one set of calibrated numbers beats two.
 import { HIGH_FLOOR, STRONG_FLOOR } from '../ask/fuse.js';
 import { dollarsSaved, formatDollars } from '../context/price.js';
-import { brand, cmd, tag } from '../brand.js';
+import { brand, cmd, inBrand, tag } from '../brand.js';
 import { flatLine } from '../notes/flatten.js';
 import { isAlwaysFollow } from '../notes/units.js';
 import { shownPath, type NoteCounts } from '../notes/home.js';
@@ -365,7 +365,20 @@ export function formatOrientation(indexMd: string, budgetBytes = 1500, staleNote
     teamNotesDirective(notes, keepsNotes) +
     skills;
   const banner = staleNote ? `${staleNote}\n\n` : "";
-  return `${banner}${directive}\nrepo map (${mapDir}/INDEX.md):\n${indexMd.slice(0, budgetBytes)}`;
+  return `${banner}${directive}\nrepo map (${mapDir}/INDEX.md):\n${indexInBrand(indexMd).slice(0, budgetBytes)}`;
+}
+
+/**
+ * INDEX.md's preamble in the running name. A map built before the rename keeps
+ * graft's spelling on disk until the next full build (query-path refreshes skip
+ * `writeIndex`), so under trail it would teach `graft ask` and `graft_*` tools
+ * that this machine does not have. Only the preamble is rewritten, with the same
+ * `inBrand` that `writeIndex` uses: the concept and file lists below it are the
+ * repo's own words.
+ */
+function indexInBrand(indexMd: string): string {
+  const cut = indexMd.indexOf('\n## ');
+  return cut < 0 ? inBrand(indexMd) : inBrand(indexMd.slice(0, cut)) + indexMd.slice(cut);
 }
 
 const total = (n: number | NoteCounts) => (typeof n === 'number' ? n : n.repo + n.personal);
