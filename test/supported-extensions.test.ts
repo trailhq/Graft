@@ -20,7 +20,7 @@ test("supportedExtensions covers both tiers, sorted and de-duped", () => {
   // depth tier
   for (const e of [".ts", ".tsx", ".py", ".go", ".java", ".js", ".php", ".kt", ".kts", ".swift"]) assert.ok(exts.includes(e), `depth ${e}`);
   // breadth tier
-  for (const e of [".rs", ".rb", ".c", ".cpp", ".gleam"]) assert.ok(exts.includes(e), `breadth ${e}`);
+  for (const e of [".rs", ".rb", ".c", ".cpp", ".gleam", ".glsl"]) assert.ok(exts.includes(e), `breadth ${e}`);
   // container tier
   for (const e of [".vue", ".svelte", ".astro"]) assert.ok(exts.includes(e), `container ${e}`);
   // de-duped (.java is in BOTH tiers but must appear once) and sorted

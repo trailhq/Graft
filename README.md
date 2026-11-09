@@ -489,7 +489,7 @@ compiler-grade layer, all `$0` and deterministic (no model, no key):
 - **Broad**: symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
-  Dart, Clojure, Nix, Lua, Gleam, Julia**, and **OCaml, Zig** (symbols only for now, no call edges).
+  Dart, Clojure, Nix, Lua, Gleam, Julia**, and **OCaml, Zig, GLSL** (symbols only for now, no call edges).
 
 - **Single-file components**: **Vue** (`.vue`), **Svelte** (`.svelte`) and
   **Astro** (`.astro`). The wrapper grammar only locates the `<script>` block
