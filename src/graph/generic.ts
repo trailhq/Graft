@@ -65,6 +65,7 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "gleam", exts: [".gleam"], wasm: "gleam" },
   { name: "powershell", exts: [".ps1", ".psm1"], wasm: "powershell" },
   { name: "julia", exts: [".jl"], wasm: "julia" },
+  { name: "glsl", exts: [".glsl"], wasm: "glsl" }, // #293; gdscript is #299
 ];
 
 /**
