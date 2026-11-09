@@ -754,10 +754,11 @@ test("a throwing grammar is a per-file build error, cached as a failure (#139)",
     assert.ok(g, "graph built");
     assert.ok(!g!.nodes.some((n) => n.path === "lib.rs"), "failed file has no file node");
 
-    // The extract cache must remember the failure, not an empty success: an
-    // incremental rebuild of the unchanged file replays the error.
+    // The extract cache must remember the failure, not an empty success. An
+    // entry carrying an error is re-parsed rather than replayed (#312), so the
+    // still-throwing grammar reports the error again on the incremental rebuild.
     const second = await buildGraph(dir, { reuse: true });
-    assert.equal(second.parsed, 0, "unchanged file is not re-parsed");
+    assert.equal(second.parsed, 1, "a cached failure is re-parsed, not replayed (#312)");
     assert.equal(second.errors.length, 1, `error replayed (got: ${second.errors.join("; ")})`);
     assert.match(second.errors[0], /rust grammar threw/);
   } finally {

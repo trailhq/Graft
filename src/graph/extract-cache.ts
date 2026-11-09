@@ -45,9 +45,11 @@ export interface ExtractEntry {
   nodes: NodeV1[];
   rawEdges: RawEdge[];
   /** Set when this file couldn't be read or parsed. The entry exists anyway so the
-   * freshness probe doesn't flag the file as new on every query; replaying it
-   * re-reports the same error and contributes no nodes, exactly as a cold build
-   * would. */
+   * freshness probe doesn't flag the file as new on every query — but it is never
+   * replayed as a result: {@link buildGraph} re-parses an entry carrying an error,
+   * because the failure can belong to the run (a wasm grammar aborting after the
+   * heap ran out) rather than to the bytes this entry is keyed on, and a cold build
+   * would have re-parsed it. See #312. */
   error?: string;
   /** The breadth-tier grammar that parsed this file standing in for its depth-tier
    * one, whose grammar didn't load. Absent for every other file. The entry is
