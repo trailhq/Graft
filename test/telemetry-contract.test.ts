@@ -5,19 +5,22 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   EVENTS,
+  VALUES,
   countBucket,
   durationBucket,
   errorCode,
   filesBucket,
+  hookMsBucket,
+  initKindCounts,
   isTrackedCommand,
   langsValue,
   savedTokensBucket,
 } from '../src/telemetry/contract.js';
-import { track } from '../src/telemetry/track.js';
+import { detectHost, track } from '../src/telemetry/track.js';
 import { peek } from '../src/telemetry/queue.js';
 import { tmpRepo } from './helpers.js';
 
@@ -66,18 +69,164 @@ test('every event carries the common properties, and no identifier beyond them',
   const home = sandbox('tel-common');
   const ev = track('first_run', {}, { home, env: OPEN });
   assert.ok(ev);
-  for (const k of ['app_version', 'os', 'arch', 'node_major', 'ci', 'agent_host']) {
+  for (const k of ['app_version', 'os', 'arch', 'node_major', 'ci', 'agent_host', 'cli_name']) {
     assert.ok(k in ev.properties, `missing common property ${k}`);
   }
   // distinct_id is the random install uuid and nothing else.
   assert.match(ev.distinct_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 });
 
-test('the contract lists exactly the seven documented events', () => {
+test('agent_host tells the Claude desktop app and Codex apart from the terminal, sending only a fixed label', () => {
+  assert.equal(detectHost(undefined, { CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' }), 'claude-desktop');
+  assert.equal(detectHost(undefined, { CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli' }), 'claude-code');
+  assert.equal(detectHost(undefined, { CLAUDECODE: '1' }), 'claude-code');
+  assert.equal(detectHost(undefined, { CLAUDE_CODE_ENTRYPOINT: 'something/odd' }), 'claude-code', 'any other entrypoint is plain Claude Code: the value never travels');
+  assert.equal(detectHost(undefined, { CODEX_THREAD_ID: 't-1' }), 'codex');
+  assert.equal(detectHost(undefined, { CODEX_SANDBOX: 'seatbelt' }), 'codex');
+  assert.equal(detectHost(undefined, {}), 'cli');
+  assert.equal(detectHost('mcp', { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' }), 'mcp', 'the surface a caller names wins');
+  assert.equal(detectHost(undefined, { TRAIL_AGENT_HOST: 'codex' }), 'codex', "a hook's children carry its payload's host");
+  assert.equal(detectHost(undefined, { TRAIL_AGENT_HOST: 'my-laptop' }), 'cli', 'a value outside the set is ignored');
+  const home = sandbox('tel-host-desktop');
+  const ev = track('first_run', {}, { home, env: { CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' } });
+  assert.equal(ev?.properties.agent_host, 'claude-desktop');
+});
+
+// Pinned rather than counted, so adding an event is a deliberate edit here and
+// a matching row in TELEMETRY.md, never something that arrives with a feature.
+test('the contract lists exactly the twenty-seven documented events', () => {
   assert.deepEqual(Object.keys(EVENTS).sort(), [
-    'build_completed', 'build_failed', 'first_run', 'init_completed', 'install', 'query',
-    'session_summary',
+    'brain_signup_opened', 'brain_signup_settled', 'build_completed', 'build_failed',
+    'cold_start', 'first_run', 'guardrail', 'hook_ms', 'init_completed', 'install', 'learnings_committed', 'note_saved', 'query', 'repo_seen', 'session_shared', 'session_summary', 'share_bundle',
+    'skill_answer', 'skill_changed', 'skill_offered', 'skill_promoted', 'skill_saved', 'skill_stale', 'skill_used', 'skill_value', 'team_pull', 'wall_hit',
   ]);
+});
+
+// What init offered and what was kept, by kind (2026-10-29): exact small counts, so the share kept can be read per kind.
+test('cold_start counts init\'s offers and keeps by kind, exact to 5, and drops any other value', () => {
+  const items = [{ kind: 'skill' }, { kind: 'guardrail' }, { kind: 'preference' }, { kind: 'preference' }, { kind: 'review' }];
+  assert.deepEqual(initKindCounts('kept', items), { kept_skills: '1', kept_always_follow: '1', kept_learnings: '2' });
+  assert.deepEqual(initKindCounts('offered', Array(7).fill({ kind: 'preference' })), { offered_skills: '0', offered_always_follow: '0', offered_learnings: '6+' });
+  const home = sandbox('tel-cold-start-kinds');
+  const ev = track('cold_start', { source: 'keep', outcome: 'kept', ...initKindCounts('kept', items), offered_learnings: 'no-timeout' }, { home, env: OPEN });
+  assert.equal(ev?.properties.kept_always_follow, '1');
+  assert.equal(ev?.properties.kept_learnings, '2');
+  assert.equal(ev?.properties.offered_learnings, undefined, 'a value other than 0 to 5 or 6+ is dropped');
+});
+
+test('init_completed says whose status line shows, from a closed set', () => {
+  const home = sandbox('tel-init-statusline');
+  assert.equal(track('init_completed', { agents: 'claude', statusline: 'theirs' }, { home, env: OPEN })?.properties.statusline, 'theirs');
+  assert.equal(track('init_completed', { agents: 'claude', statusline: 'sh ~/.claude/statusline.sh' }, { home, env: OPEN })?.properties.statusline, undefined);
+});
+
+// --- the skills events (spec section 20): counts and closed sets, never content ---
+
+/** Each skills event with the keys it may carry, as the spec lists them. */
+const SKILL_EVENTS: Record<string, string[]> = {
+  skill_offered: ['moment'],
+  skill_answer: ['answer'],
+  skill_saved: ['from', 'scope'],
+  skill_changed: ['op'],
+  skill_value: ['channel'],
+  skill_promoted: ['to'],
+  team_pull: ['outcome'],
+  skill_used: ['outcome'],
+  skill_stale: ['reason'],
+  guardrail: ['class', 'outcome'],
+  wall_hit: ['class', 'had_lesson'],
+  hook_ms: ['event', 'bucket'],
+};
+
+test('learning_reused is gone: it counted learnings before they were deduped', () => {
+  const home = sandbox('tel-no-reuse');
+  assert.equal(track('learning_reused', { teammate: 'true', saved_tokens_bucket: '1-5k' }, { home, env: OPEN }), null);
+  assert.equal(track('takeaway_saved', { new_skill: 'true' }, { home, env: OPEN }), null, 'trail learn is gone, and its event with it');
+  assert.doesNotMatch(readFileSync(join(process.cwd(), 'src', 'cli.ts'), 'utf8'), /learning_reused/);
+});
+
+test('each skills event carries exactly the keys the spec lists, and every key has a closed set of values', () => {
+  for (const [event, keys] of Object.entries(SKILL_EVENTS)) {
+    assert.deepEqual([...EVENTS[event]!].sort(), [...keys].sort(), event);
+    for (const k of keys) assert.ok(VALUES[event]?.[k]?.size, `${event}.${k} has no closed set`);
+  }
+  assert.deepEqual([...VALUES.skill_answer!.answer!].sort(), ['no', 'none', 'off', 'retire', 'show', 'yes']);
+  assert.deepEqual([...VALUES.skill_saved!.scope!].sort(), ['personal', 'repo', 'team']);
+  assert.deepEqual([...VALUES.skill_promoted!.to!].sort(), ['repo', 'team']);
+  assert.deepEqual([...VALUES.skill_used!.outcome!].sort(), ['checked', 'failed', 'unchecked']);
+  assert.deepEqual([...VALUES.wall_hit!.had_lesson!].sort(), ['false', 'true']);
+});
+
+test('a skills event drops content-like keys: names, titles, steps, commands, prompts and paths never go', () => {
+  const home = sandbox('tel-skill-content-keys');
+  const content = {
+    name: 'release-npm',
+    title: 'Release to npm',
+    description: 'Publishes the package to npm',
+    steps: 'git pull --ff-only origin main',
+    command: 'npm publish',
+    prompt: 'pull and publish 0.22.1',
+    text: 'you forgot to push the tag',
+    path: '/home/dev/acme/.agents/skills/release-npm/SKILL.md',
+    repo: 'acme/api',
+    skill: 'release-npm',
+    lesson: 'push the tag first',
+  };
+  for (const [event, keys] of Object.entries(SKILL_EVENTS)) {
+    const legal = Object.fromEntries(keys.map((k) => [k, [...VALUES[event]![k]!][0]!]));
+    const ev = track(event, { ...content, ...legal }, { home, env: OPEN });
+    assert.ok(ev, event);
+    for (const k of Object.keys(content)) assert.equal(Object.hasOwn(ev.properties, k), false, `${event} kept ${k}`);
+    for (const k of keys) assert.equal(ev.properties[k], legal[k], `${event}.${k}`);
+    const wire = JSON.stringify(ev);
+    for (const v of Object.values(content)) assert.equal(wire.includes(v), false, `${event} carried "${v}"`);
+  }
+});
+
+test('a skills event drops a value outside its closed set, even under an allowed key', () => {
+  const home = sandbox('tel-skill-content-values');
+  const offered = track('skill_offered', { moment: 'pull and publish 0.22.1' }, { home, env: OPEN });
+  assert.ok(offered);
+  assert.equal(Object.hasOwn(offered.properties, 'moment'), false, 'a prompt is not a moment');
+  const used = track('skill_used', { outcome: 'release-npm' }, { home, env: OPEN });
+  assert.equal(Object.hasOwn(used!.properties, 'outcome'), false, 'a skill name is not an outcome');
+  const wall = track('wall_hit', { class: 'npm ERR! code E401 /home/dev/.npmrc', had_lesson: 'true' }, { home, env: OPEN });
+  assert.equal(Object.hasOwn(wall!.properties, 'class'), false, 'error text is not a class');
+  assert.equal(wall!.properties.had_lesson, 'true');
+  const ms = track('hook_ms', { event: 'prompt', bucket: '137' }, { home, env: OPEN });
+  assert.equal(ms!.properties.event, 'prompt');
+  assert.equal(Object.hasOwn(ms!.properties, 'bucket'), false, 'a raw number is not a bucket');
+  assert.equal(track('hook_ms', { event: 'prompt', bucket: hookMsBucket(137) }, { home, env: OPEN })!.properties.bucket, '100-300ms');
+});
+
+test('no event in the contract has a key that names content', () => {
+  const contentKeys = /^(name|title|text|body|prompt|query|path|file|files|steps?|skill|lesson|description|message|error|url|repo|remote|branch)$/;
+  for (const [event, keys] of Object.entries(EVENTS)) for (const k of keys) assert.doesNotMatch(k, contentKeys, `${event}.${k}`);
+});
+
+test('hookMsBucket collapses a hook time to a label', () => {
+  assert.equal(hookMsBucket(0), '<50ms');
+  assert.equal(hookMsBucket(49), '<50ms');
+  assert.equal(hookMsBucket(50), '50-100ms');
+  assert.equal(hookMsBucket(299), '100-300ms');
+  assert.equal(hookMsBucket(300), '300ms-1s');
+  assert.equal(hookMsBucket(2999), '1-3s');
+  assert.equal(hookMsBucket(60_000), '3s+');
+});
+
+// TELEMETRY.md is the published contract: an event or key it doesn't list must not be sendable.
+test('TELEMETRY.md lists every event and every key the contract allows, and no event the contract lacks', () => {
+  const doc = readFileSync(join(process.cwd(), 'TELEMETRY.md'), 'utf8');
+  const rows = new Map<string, string>();
+  for (const line of doc.split(/\r?\n/)) {
+    const m = /^\| `([a-z_]+)` \|(.*)$/.exec(line);
+    if (m && !['app_version', 'os', 'arch', 'node_major', 'ci', 'agent_host', 'cli_name', 'repo_id'].includes(m[1]!)) rows.set(m[1]!, m[2]!);
+  }
+  assert.deepEqual([...rows.keys()].sort(), Object.keys(EVENTS).sort());
+  for (const [event, keys] of Object.entries(EVENTS)) {
+    for (const k of keys) assert.ok(rows.get(event)!.includes(`\`${k}\``), `TELEMETRY.md's ${event} row doesn't name ${k}`);
+    for (const [k, values] of Object.entries(VALUES[event] ?? {})) for (const v of values) assert.ok(rows.get(event)!.includes(`\`${v}\``), `TELEMETRY.md's ${event} row doesn't name ${k} value ${v}`);
+  }
 });
 
 test('only the known commands are tracked', () => {
@@ -169,4 +318,42 @@ test('langsValue drops anything that is not a plain language token', () => {
   assert.equal(langsValue(['ts', 'my repo']), 'ts', 'a space is not a language token');
   // Real language labels survive, including the awkward ones.
   assert.equal(langsValue(['c++', 'c#', 'objective-c', 'f#']), 'c#,c++,f#,objective-c');
+});
+
+// --- the brain signup handoff ---
+
+// The push handoff is the one flow that spans both products, and the outcome is
+// the half that can vanish: a user who reads the URL and walks away kills the
+// process. Only an event already queued survives that, which is why `opened` is
+// the denominator and `settled` is not.
+test('brain signup: the outcome is a category, never the sentence the user saw', () => {
+  const home = sandbox('tel-brain-signup-outcome');
+  const ev = track(
+    'brain_signup_settled',
+    {
+      outcome: 'timed_out',
+      duration_bucket: durationBucket(5 * 60 * 1000),
+      error: 'timed out waiting for the browser — run `trail login` again',
+    },
+    { home, env: OPEN },
+  );
+  assert.equal(ev?.properties.outcome, 'timed_out');
+  assert.equal(ev?.properties.duration_bucket, '2-10m');
+  // The printed sentence names the repo and the link, so it must not ride along
+  // even when a call site passes it.
+  assert.equal(ev?.properties.error, undefined);
+});
+
+test('brain signup: opened carries only whether an agent ran it', () => {
+  const home = sandbox('tel-brain-signup-opened');
+  const ev = track('brain_signup_opened', { mode: 'agent', repo: 'acme/app', port: '51234' }, { home, env: OPEN });
+  assert.ok(ev);
+  assert.equal(ev.properties.mode, 'agent');
+  assert.equal(ev.properties.repo, undefined);
+  assert.equal(ev.properties.port, undefined);
+});
+
+test('brain signup: both events are in the contract', () => {
+  assert.ok(EVENTS.brain_signup_opened);
+  assert.ok(EVENTS.brain_signup_settled);
 });

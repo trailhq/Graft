@@ -1,20 +1,31 @@
 /**
- * `graft init`'s closing epilogue: the ASCII wordmark + numbered next steps,
+ * `init`'s closing epilogue: the ASCII wordmark (trail's or graft's, by the name it ran as) + numbered next steps,
  * printed to stderr after the per-file ✓/·/⚠ lines. Extracted out of cli.ts
  * so the exact text — spacing is hand-aligned, not incidental — can be
  * unit-tested without spawning the CLI.
  */
+import { brand, cmd } from "./brand.js";
 
-// The widest line (index 4, tied with index 2 at 26 chars) gets the live
-// node/edge stats appended, when a graph exists.
-const WORDMARK_LINES = [
-  "                   __ _",
-  "   __ _ _ __ __ _ / _| |_",
-  "  / _` | '__/ _` | |_| __|",
-  " | (_| | | | (_| |  _| |_",
-  "  \\__, |_|  \\__,_|_|  \\__|",
-  "  |___/",
-];
+// The live node/edge stats go on the wordmark's bottom line of letters (index
+// 4 in both), when a graph exists. graft's stays byte for byte: its output is
+// read by scripts.
+const WORDMARKS: Record<"trail" | "graft", string[]> = {
+  trail: [
+    "  _             _ _",
+    " | |_ _ __ __ _(_) |",
+    " | __| '__/ _` | | |",
+    " | |_| | | (_| | | |",
+    "  \\__|_|  \\__,_|_|_|",
+  ],
+  graft: [
+    "                   __ _",
+    "   __ _ _ __ __ _ / _| |_",
+    "  / _` | '__/ _` | |_| __|",
+    " | (_| | | | (_| |  _| |_",
+    "  \\__, |_|  \\__,_|_|  \\__|",
+    "  |___/",
+  ],
+};
 const STATS_LINE_INDEX = 4;
 
 // Nanonets indigo, and a muted grey for the secondary stats suffix — only
@@ -45,23 +56,23 @@ export function formatInitEpilogue(opts: InitEpilogueOptions): string {
   const { graphBuilt, nodes, edges } = opts;
   const tty = Boolean(process.stderr.isTTY);
 
-  const wordmark = WORDMARK_LINES.map((l) => (tty ? indigo(l) : l));
+  const wordmark = WORDMARKS[brand()].map((l) => (tty ? indigo(l) : l));
   if (graphBuilt && nodes !== undefined && edges !== undefined) {
     const stats = `  ${nodes.toLocaleString("en-US")} nodes · ${edges.toLocaleString("en-US")} edges`;
     wordmark[STATS_LINE_INDEX] += tty ? muted(stats) : stats;
   }
 
   const steps: Step[] = [
-    ...(graphBuilt ? [] : [{ label: "build the graph", command: "graft build" }]),
-    { label: "restart your agent", command: "a new session picks up graft automatically" },
+    ...(graphBuilt ? [] : [{ label: "build the graph", command: cmd("graft build") }]),
+    { label: "restart your agent", command: `a new session picks up ${brand()} automatically` },
     {
       label: "code as usual",
-      command: "ask your agent to fix a bug or explain a flow —",
+      command: "ask your agent to fix a bug or explain a flow:",
       extra: ["it now answers from the graph"],
     },
     {
       label: "explore by hand",
-      command: 'graft ask "where is auth handled?" · graft callers <fn> · graft viz',
+      command: `${cmd("graft ask")} "where is auth handled?" · ${cmd("graft callers")} <fn> · ${cmd("graft viz")}`,
     },
   ];
 
@@ -79,7 +90,7 @@ export function formatInitEpilogue(opts: InitEpilogueOptions): string {
     }
   });
 
-  const closing = `${indent}share it: git add .claude && git commit — teammates run \`graft build\` for their own local graph`;
+  const closing = `${indent}share it: git add .claude && git commit; teammates run \`${cmd("graft build")}\` for their own local graph`;
 
   return [...wordmark, "", ...stepLines, "", closing].join("\n");
 }

@@ -32,10 +32,11 @@ test('writes shim + hooks.json (version 1), idempotent on re-run', () => {
   assertRunnableShim(shimPath(repo), 'shim is executable');
   const cfg = JSON.parse(readFileSync(cfgPath(repo), 'utf8'));
   assert.equal(cfg.version, 1, 'Cursor hooks.json carries a schema version');
-  const sub = (event: string) => cfg.hooks[event][0].command.match(/cjs" (\S+)$/)?.[1];
+  const sub = (event: string) => cfg.hooks[event][0].command.match(/cjs" (\S+) \|\| exit 0$/)?.[1]; // D116 item 6: every event fails open
   assert.equal(sub('postToolUse'), 'cursor-post-tool');
   assert.equal(sub('afterMCPExecution'), 'cursor-mcp');
   assert.equal(sub('sessionEnd'), 'cursor-session-end');
+  assert.equal(sub('sessionStart'), 'cursor-session-start');
   // postToolUse filters to the read/shell tools; the MCP + end hooks take every event.
   assert.match(cfg.hooks.postToolUse[0].matcher, /Read\|Grep\|Glob\|Search\|Shell/);
   assert.ok(!('matcher' in cfg.hooks.afterMCPExecution[0]), 'no matcher on afterMCPExecution');
@@ -44,7 +45,7 @@ test('writes shim + hooks.json (version 1), idempotent on re-run', () => {
   const again = installCursorHooks(repo);
   assert.deepEqual(again.map((x) => x.action), ['unchanged', 'unchanged'], 'idempotent');
   const after = JSON.parse(readFileSync(cfgPath(repo), 'utf8'));
-  for (const ev of ['postToolUse', 'afterMCPExecution', 'sessionEnd'])
+  for (const ev of ['postToolUse', 'afterMCPExecution', 'sessionEnd', 'sessionStart'])
     assert.equal(after.hooks[ev].length, 1, `${ev} not duplicated on re-run`);
 });
 
@@ -64,7 +65,7 @@ test('foreign hook entries and a pre-existing version are preserved; stale graft
   const entries = JSON.parse(readFileSync(cfgPath(repo), 'utf8')).hooks.postToolUse;
   assert.equal(entries.length, 2, 'foreign kept, stale graft replaced by fresh');
   assert.ok(entries.some((e: any) => e.command === 'other-tool.sh'), 'foreign entry preserved');
-  assert.ok(entries.some((e: any) => /graft-hooks\.cjs" cursor-post-tool$/.test(e.command)), 'fresh graft entry present');
+  assert.ok(entries.some((e: any) => /graft-hooks\.cjs" cursor-post-tool \|\| exit 0$/.test(e.command)), 'fresh graft entry present');
   assert.ok(!JSON.stringify(entries).includes('/old/'), 'stale graft entry removed');
 });
 

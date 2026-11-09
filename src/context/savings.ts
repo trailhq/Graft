@@ -14,6 +14,7 @@
  */
 import type { GraphV1 } from '../graph/types.js';
 import { formatDollars } from './price.js';
+import { brand, tag } from "../brand.js";
 
 export interface Savings {
   /** How many source files the baseline covers. */
@@ -89,20 +90,40 @@ export function setInputRate(usdPerMtok: number | null): void {
  * `hasSavingsTally` (claude/tally.ts) recognises, so adding money here does not
  * quietly zero the reported-turns metric. */
 export function savingsTurnNudge(savedTokens: number): string {
-  const sum = ' — sum each such line across your graft calls — e.g. ';
+  const b = brand();
+  const sum = ` — sum each such line across your ${b} calls — e.g. `;
   if (inputRateUsdPerMtok === null || savedTokens <= 0) {
     return (
-      ' At the end of your reply, tell the user the total graft tokens saved ' +
-      `this turn${sum}"🌱 graft saved ~N tokens this turn".`
+      ` At the end of your reply, tell the user the total ${b} tokens saved ` +
+      `this turn${sum}"🌱 ${b} saved ~N tokens this turn".`
     );
   }
   const usd = (savedTokens * inputRateUsdPerMtok) / 1_000_000;
   return (
     ` This call is worth ${formatDollars(usd)} at the rate this session is ` +
     'actually paying for input tokens. At the end of your reply, tell the user ' +
-    `the total graft tokens saved this turn and what they were worth${sum}` +
-    '"🌱 graft saved ~N tokens (~$X) this turn".'
+    `the total ${brand()} tokens saved this turn and what they were worth${sum}` +
+    `"🌱 ${brand()} saved ~N tokens (~$X) this turn".`
   );
+}
+
+/**
+ * Digits grouped for display, pinned to en-US.
+ *
+ * Not a style choice: the `[graft] tokens saved ≈ N` line below is read back by
+ * {@link sumSavingsFooters}, whose regex knows `,` and nothing else. Rendered
+ * with the machine's locale instead, a de-DE or tr-TR box wrote `1.990` and
+ * graft parsed its own footer as `1` — every savings total downstream, and the
+ * dollar value beside it, off by a factor of a thousand (#338). fr-FR and ru-RU
+ * group with a narrow no-break space and lost it the same way.
+ *
+ * Every number graft renders goes through here, not only the parsed one: a
+ * statusline that grouped differently from the footer right above it would be
+ * its own small bug. `src/cli-epilogue.ts` pins the same way, for the same
+ * reason.
+ */
+export function groupDigits(n: number): string {
+  return n.toLocaleString('en-US');
 }
 
 /** The one-line savings estimate for a command's text output, so the agent gets
@@ -118,9 +139,9 @@ export function savingsLine(body: string, saved: Savings | undefined): string {
   const delta = base - pack;
   const pct = Math.round((delta / base) * 100);
   return (
-    `[graft] tokens saved ≈ ${delta.toLocaleString()} (${pct}%) — this output ≈ ` +
-    `${pack.toLocaleString()} tok vs reading the ${saved.files} file(s) it covers whole ≈ ` +
-    `${base.toLocaleString()} tok (estimate).` +
+    `${tag()} tokens saved ≈ ${groupDigits(delta)} (${pct}%) — this output ≈ ` +
+    `${groupDigits(pack)} tok vs reading the ${saved.files} file(s) it covers whole ≈ ` +
+    `${groupDigits(base)} tok (estimate).` +
     savingsTurnNudge(delta)
   );
 }
@@ -134,7 +155,8 @@ export function savingsLine(body: string, saved: Savings | undefined): string {
  */
 export function sumSavingsFooters(text: string): number {
   let total = 0;
-  for (const m of text.matchAll(/\[graft\] tokens saved ≈ ([\d,]+)/g)) {
+  // The code a query saved reading, and the digging a reused learning saved.
+  for (const m of text.matchAll(/\[(?:graft|trail)\] (?:tokens|learnings) saved ≈ ([\d,]+)/g)) {
     total += Number(m[1].replace(/,/g, '')) || 0;
   }
   return total;

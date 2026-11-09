@@ -17,8 +17,9 @@
  * during a flush land in a fresh queue instead of being dropped by the truncate.
  */
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
-import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { appendPrivateFile, writePrivateFile } from '../util/private-file.js';
 
 /**
  * The ceiling on the queue. An unflushable machine — permanently offline, or a
@@ -45,8 +46,8 @@ export function queuePath(home: string = homedir()): string {
 export function enqueue(event: unknown, home?: string): void {
   const path = queuePath(home);
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(path, JSON.stringify(event) + '\n');
+    // Owner-only, folder included: it waits here to be sent.
+    appendPrivateFile(path, JSON.stringify(event) + '\n');
     trim(path);
   } catch { /* unwritable home, full disk — telemetry is never worth an error */ }
 }
@@ -74,7 +75,7 @@ function trim(path: string): void {
       kept.push(lines[i]);
     }
     kept.reverse();
-    writeFileSync(path, kept.length ? kept.join('\n') + '\n' : '');
+    writePrivateFile(path, kept.length ? kept.join('\n') + '\n' : '');
   } catch { /* leave it; the next drain clears it anyway */ }
 }
 
@@ -121,8 +122,7 @@ export function requeue(events: unknown[], home?: string): void {
   const path = queuePath(home);
   try {
     const pending = (() => { try { return readFileSync(path, 'utf8'); } catch { return ''; } })();
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, events.map((e) => JSON.stringify(e)).join('\n') + '\n' + pending);
+    writePrivateFile(path, events.map((e) => JSON.stringify(e)).join('\n') + '\n' + pending);
     trim(path);
   } catch { /* best effort */ }
 }

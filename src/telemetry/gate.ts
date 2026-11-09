@@ -20,6 +20,7 @@
  */
 import { posthogKey } from './key.js';
 import { readState } from './identity.js';
+import { cmd } from '../brand.js';
 
 export type OffReason = 'no-key' | 'do-not-track' | 'ci' | 'disabled';
 
@@ -74,9 +75,9 @@ export function telemetryOn(home?: string, env: NodeJS.ProcessEnv = process.env)
  *  user who thinks they disabled it can see which switch actually took. */
 export function explainOff(reason: OffReason): string {
   switch (reason) {
-    case 'no-key':        return 'off — this build has no telemetry key (a fork, or a local `npm run build`); nothing can be sent';
-    case 'do-not-track':  return 'off — DO_NOT_TRACK is set in this environment';
-    case 'ci':            return 'off — this looks like CI';
-    case 'disabled':      return 'off — you disabled it (`graft telemetry enable` to turn it back on)';
+    case 'no-key':        return 'off: this build has no telemetry key (a fork, or a local `npm run build`), so nothing can be sent';
+    case 'do-not-track':  return 'off: DO_NOT_TRACK is set in this environment';
+    case 'ci':            return 'off: this looks like CI';
+    case 'disabled':      return `off: you disabled it (\`${cmd('graft telemetry enable')}\` to turn it back on)`;
   }
 }

@@ -14,6 +14,10 @@ import { checkGraph } from "../src/graph/check.js";
 import { extractFile } from "../src/graph/extract.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import type { GraphV1, NodeV1 } from "../src/graph/types.js";
+import { warmDepthGrammars } from "../src/graph/depth-parser.js";
+
+// extractFile is synchronous; its WASM grammars load once, up front.
+await warmDepthGrammars(["php"]);
 
 const APP_PHP = `<?php
 namespace App;

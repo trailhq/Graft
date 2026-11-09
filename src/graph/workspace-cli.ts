@@ -8,8 +8,11 @@
 import { Graft } from "../engine.js";
 import { contextDirFor, ensureGitignored } from "../context/node-file.js";
 import { patchBuildConfig, type BuildConfig } from "../util/state.js";
+import { brand, cmd, PACKAGE_FOR } from "../brand.js";
+import { nativeFallbackNotice } from "./native.js";
 import type { EngineConfig } from "../ai/providers.js";
 import { formatAsk } from "../ask/ask.js";
+import { errorCode, track } from "../telemetry/index.js";
 import type { Direction } from "./traverse.js";
 import {
   federateAsk,
@@ -27,6 +30,12 @@ export interface WorkspaceBuildOptions {
   deep: boolean;
   extensions?: string[];
   concurrency?: number;
+  /** Max concept synthesis batches in flight per child (default 4). */
+  synthConcurrency?: number;
+  /** Char budget of summary text per synthesis call per child (default 48000). */
+  synthBatchChars?: number;
+  /** If true, fail the build if any child repository had structural graph errors. */
+  strict?: boolean;
   /** Provider/model/key config for child builds — WITHOUT any contextDir
    * override, so each child writes to its own `<child>/graft/`. */
   childConfig: EngineConfig;
@@ -40,12 +49,19 @@ export interface WorkspaceBuildOptions {
   followSubmodules?: boolean;
   /** An explicit CLI nested-clone choice to persist into every child repo. */
   followNestedRepos?: boolean;
+  /** The npm package this runs from, for the fix in the native-parser notice. */
+  packageName?: string;
 }
 
 /** Build every git child into its own committable `graft/`, then replace the
  * parent's `graft/` with `workspace.json`. Prints the one-time split warning
  * first when migrating away from a mega-graph. */
 export async function runWorkspaceBuild(root: string, opts: WorkspaceBuildOptions): Promise<void> {
+  // Depth grammars load once per process, so the children share one answer:
+  // collected here and printed once at the end, not once per repo.
+  const fellBack = { languages: new Set<string>(), packages: new Set<string>() };
+  const failedChildren: string[] = [];
+  let firstStructuralError: string | undefined;
   const buildChild = async (childDir: string, childName: string): Promise<void> => {
     // Persisted BEFORE the child build itself runs, same as the single-repo
     // path in cli.ts, so this build and every later no-flag child build agree.
@@ -63,10 +79,32 @@ export async function runWorkspaceBuild(root: string, opts: WorkspaceBuildOption
       patchBuildConfig(childDir, childConfigPatch);
     }
     const engine = new Graft({ ...opts.childConfig, contextDir: undefined });
-    if (opts.deep) await engine.init(childDir, { extensions: opts.extensions });
-    const g = await engine.graph(childDir, { llm: opts.deep, concurrency: opts.concurrency });
-    console.log(`✓ ${childName}/: ${g.nodes} nodes, ${g.edges} edges, ${g.cards} cards [${g.languages.join(", ")}]`);
+    if (opts.deep) {
+      await engine.init(childDir, {
+        extensions: opts.extensions,
+        concurrency: opts.concurrency,
+        synthConcurrency: opts.synthConcurrency,
+        synthBatchChars: opts.synthBatchChars,
+      });
+    }
+    const g = await engine.graph(childDir, { llm: opts.deep, concurrency: opts.concurrency, extensions: opts.extensions });
+    if (g.structuralErrors > 0) {
+      failedChildren.push(childName);
+      firstStructuralError ??= g.errors[0];
+      if (opts.strict) {
+        console.error(
+          `✗ ${childName}/: wiring incomplete — ${g.structuralErrors} structural error(s), ` +
+            `${g.nodes} nodes, ${g.edges} edges, ${g.cards} cards.`,
+        );
+      } else {
+        console.log(`✓ ${childName}/: ${g.nodes} nodes, ${g.edges} edges, ${g.cards} cards [${g.languages.join(", ")}]`);
+      }
+    } else {
+      console.log(`✓ ${childName}/: ${g.nodes} nodes, ${g.edges} edges, ${g.cards} cards [${g.languages.join(", ")}]`);
+    }
     for (const e of g.errors) console.error(`✗ ${childName}/: ${e}`);
+    for (const l of g.nativeFallback?.languages ?? []) fellBack.languages.add(l);
+    for (const p of g.nativeFallback?.packages ?? []) fellBack.packages.add(p);
   };
 
   const { children } = await splitWorkspace(
@@ -81,8 +119,26 @@ export async function runWorkspaceBuild(root: string, opts: WorkspaceBuildOption
   // Each child self-ignored during its own build; the parent's federation
   // index (graft/workspace.json) is written outside buildGraph, so ignore it here too.
   ensureGitignored(root, contextDirFor(root, opts.override));
-  console.log(`✓ workspace: ${children.length} repos federated → graft/workspace.json`);
-  console.log(`  graft/ is git-ignored — each teammate runs \`graft build\` to regenerate it locally.`);
+  if (opts.strict && failedChildren.length > 0) {
+    track(
+      "build_failed",
+      { stage: "graph", code: errorCode(new Error(firstStructuralError ?? "structural build failure")) },
+      { repo: root },
+    );
+    console.error(
+      `✗ workspace incomplete: ${failedChildren.length} of ${children.length} repo(s) had structural errors ` +
+        `(${failedChildren.join(", ")}); partial graphs were federated → graft/workspace.json`,
+    );
+    process.exitCode = 1;
+  } else {
+    console.log(`✓ workspace: ${children.length} repos federated → graft/workspace.json`);
+  }
+  console.log(`  graft/ is git-ignored — each teammate runs \`${cmd("graft build")}\` to regenerate it locally.`);
+  const notice = nativeFallbackNotice(
+    { languages: [...fellBack.languages].sort(), packages: [...fellBack.packages].sort() },
+    opts.packageName ?? PACKAGE_FOR[brand()],
+  );
+  if (notice) console.error(notice);
 }
 
 export function runWorkspaceAsk(

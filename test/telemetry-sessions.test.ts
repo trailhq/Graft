@@ -121,11 +121,11 @@ test('a session is counted exactly once, however often the hook runs', () => {
 
 test('the rollup marks the file instead of deleting it, so a resumed session keeps its state', () => {
   const { repo, home } = fixture('sess-keep');
-  writeSessionFile(repo, 's1', { graftReads: 3, lastQuery: 'how does auth work', injectedPointers: ['a.ts'] }, SESSION_IDLE_MS + 1000);
+  writeSessionFile(repo, 's1', { graftReads: 3, promptAsks: 2, injectedPointers: ['a.ts'] }, SESSION_IDLE_MS + 1000);
   flushClosedSessions(repo, Date.now(), home, OPEN);
   const s = readSession(repo, 's1');
   assert.equal(s.summarized, true);
-  assert.equal(s.lastQuery, 'how does auth work');
+  assert.equal(s.promptAsks, 2);
   assert.deepEqual(s.injectedPointers, ['a.ts']);
 });
 

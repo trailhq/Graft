@@ -34,6 +34,12 @@ test('two-line bar: size + freshness + ctx + last', () => {
   assert.match(lines[1], /last: pkce\.ts/);
 });
 
+test('the folder comes first, so terminals in different repos tell apart', () => {
+  const stats = { ...emptyStats(), nodeCount: 5, edgeCount: 6, totalCount: 5 };
+  assert.match(strip(renderStatusline(stats, null, { ctxPct: null, folder: 'api_server' })[0]), /^◤ api_server · (trail|graft) · 5 nodes/);
+  assert.match(strip(renderStatusline(null, null, { ctxPct: null, folder: 'api_server' })[0]), /^◤ api_server · (trail|graft) · not built/);
+});
+
 test('syncing overrides stale; synced when clean', () => {
   const base = { ...emptyStats(), nodeCount: 1, edgeCount: 0, totalCount: 1 };
   assert.match(strip(renderStatusline({ ...base, syncing: true, dirty: true }, null, { ctxPct: null })[0]), /syncing/);
@@ -64,6 +70,10 @@ test('formatBlastRadius renders callers or null', () => {
   assert.match(strip(txt!), /blast radius for pkce\.ts/);
   assert.match(strip(txt!), /exchange \(client\.ts\)/);
   assert.equal(formatBlastRadius(wiring2, '/abs/repo/src/unknown.ts'), null);
+  // The edited path is the OS's: on Windows '\' separates, elsewhere it is part of a file name.
+  const backslashed = formatBlastRadius(wiring2, '/abs/repo/src\\pkce.ts');
+  if (process.platform === 'win32') assert.match(strip(backslashed ?? ''), /exchange \(client\.ts\)/, 'a Windows path');
+  else assert.equal(backslashed, null, 'a POSIX file name containing a backslash');
 });
 
 test('formatRetrieval renders top hits, trims snippet, first pointer only', () => {
@@ -105,7 +115,7 @@ const gateAsk = (over: Record<string, unknown> = {}) => ({
   ],
   ...over,
 }) as any;
-const freshSession = () => ({ lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, savedTokens: 0, injectedPointers: [] as string[] });
+const freshSession = () => ({ graftReads: 0, sourceReads: 0, savedTokens: 0, injectedPointers: [] as string[] });
 
 test('relevantRetrieval injects on good coverage and records pointers', () => {
   const s = freshSession();
@@ -201,10 +211,9 @@ test('formatOrientation prepends a staleness banner when one is supplied', () =>
   assert.doesNotMatch(strip(formatOrientation(md, 1500)), /ahead of your working tree/);
 });
 
-test('renderSubagent shows agent name and its last query', () => {
-  const out = strip(renderSubagent('Explore', { lastQuery: null, perAgentQuery: { Explore: 'pkce flow' }, graftReads: 0, sourceReads: 0 }));
-  assert.match(out, /Explore/);
-  assert.match(out, /pkce flow/);
+test('renderSubagent shows the agent name', () => {
+  const out = strip(renderSubagent('Explore', { graftReads: 2, sourceReads: 0, savedTokens: 0 }));
+  assert.equal(out, '◤ Explore');
 });
 
 test('renderSubagent without a query still shows the agent', () => {

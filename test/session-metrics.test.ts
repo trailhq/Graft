@@ -167,9 +167,9 @@ test('latestSession picks the most recently touched session file', () => {
   assert.equal(s.graftReads, 8);
 });
 
-test('formatSessionStats renders the mix, savings and last query', () => {
+test('formatSessionStats renders the mix, savings and how many prompts were asked about', () => {
   const out = formatSessionStats({
-    id: 'abc', lastQuery: 'where is auth', perAgentQuery: {},
+    id: 'abc', promptAsks: 4,
     graftReads: 8, sourceReads: 2, savedTokens: 12345,
   });
   assert.match(out, /session abc/);
@@ -177,7 +177,7 @@ test('formatSessionStats renders the mix, savings and last query', () => {
   assert.match(out, /source reads:\s+2/);
   assert.match(out, /80% graft/);
   assert.match(out, /12,345/);
-  assert.match(out, /where is auth/);
+  assert.match(out, /prompts asked:\s+4/);
 });
 
 test('formatSessionStats has a friendly empty state', () => {
@@ -189,7 +189,7 @@ test('formatSessionStats prices the saving once the session has been billed', ()
   // which formats as <$0.01? No: $0.06. The point is that it is the MEASURED
   // rate, an order of magnitude under this model's $5/Mtok list price.
   const out = formatSessionStats({
-    id: 'abc', lastQuery: null, perAgentQuery: {},
+    id: 'abc',
     graftReads: 8, sourceReads: 2, savedTokens: 100_000,
     inputCostMicros: 600_000, inputTokensBilled: 1_000_000,
   });
@@ -201,7 +201,7 @@ test('formatSessionStats omits the dollar line rather than claiming zero', () =>
   // Cursor: its hooks name no transcript, so nothing has ever been billed. The
   // token count still stands; a "$0.00" next to it would be a false claim.
   const out = formatSessionStats({
-    id: 'abc', lastQuery: null, perAgentQuery: {},
+    id: 'abc',
     graftReads: 8, sourceReads: 2, savedTokens: 100_000,
   });
   assert.match(out, /tokens saved:\s+~100,000/);

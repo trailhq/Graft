@@ -34,10 +34,10 @@ test('explicit agents list overrides detection and flags unknown ids', () => {
 test('all writes every host and re-run converges (idempotent)', () => {
   const home = fresh(); const repo = fresh();
   const first = runHostsInit(repo, { home, all: true });
-  assert.equal(first.written.length, 10);
+  assert.equal(first.written.length, 11);
   const second = runHostsInit(repo, { home, all: true });
   assert.ok(second.written.every((w) => w.action === 'unchanged'));
-  // `agents` and `antigravity` share AGENTS.md, but the fenced section is written once
+  // `agents`, `antigravity`, `hermes` and `pi` share AGENTS.md, but the fenced section is written once
   const agents = readFileSync(join(repo, 'AGENTS.md'), 'utf8');
   assert.equal(agents.match(/graft:start/g)!.length, 1);
 });
@@ -52,6 +52,17 @@ test('preserves user content around the fenced section', () => {
   const text = readFileSync(target, 'utf8');
   assert.ok(text.startsWith('# House rules'));
   assert.ok(text.includes('graft ask'));
+});
+
+test('CLI: init --help warns that agent selection removes user-level wiring', () => {
+  const res = runCli(['init', '--help'], { home: fresh() });
+  assert.equal(res.status, 0, res.describe());
+  const help = res.stdout.replace(/\s+/g, ' ');
+  const agents = help.match(/--agents <ids\.\.\.>(.*?)--all-agents/)?.[1] ?? '';
+  assert.match(agents, /removes .*wiring for unlisted agents, including user-level files/);
+  assert.match(agents, /unless --no-global/);
+  assert.match(agents, /pass every agent you use/);
+  assert.match(help, /--no-global\s+skip writes and removals outside this repo/);
 });
 
 test('CLI: graft init --agents gemini writes GEMINI.md and exits 0', () => {
@@ -161,6 +172,21 @@ test('global: false keeps the instruction file but skips every ~ write', () => {
   assert.ok(existsSync(join(repo, 'opencode.json')));
 });
 
+test('pi host is detected and writes the AGENTS.md section', () => {
+  const home = fresh(); const repo = fresh();
+  mkdirSync(join(home, '.pi'), { recursive: true });
+  const r = runHostsInit(repo, { home });
+
+  assert.deepEqual(r.written.map((w) => w.id), ['pi']);
+  const agents = readFileSync(join(repo, 'AGENTS.md'), 'utf8');
+  assert.equal(agents.match(/graft:start/g)!.length, 1);
+  assert.ok(agents.includes('graft ask'));
+  // pi's active layer is user-level: the hook shim + the event adapter under
+  // ~/.pi, exactly as the Codex host installs its hooks under ~/.codex.
+  assert.deepEqual(r.hooks.map((h) => h.id), ['pi-hook-shim', 'pi-hooks']);
+  assert.ok(existsSync(join(home, '.pi', 'agent', 'extensions', 'graft-hooks.ts')));
+});
+
 // --- CLI: choosing what gets written ------------------------------------
 
 /**
@@ -193,7 +219,7 @@ test('CLI: --dry-run prints the plan, both sections, and writes nothing', () => 
   mkdirSync(join(home, '.codex'), { recursive: true });
   const out = cliStderr(repo, home, ['--dry-run']);
 
-  assert.match(out, /would write — this repo:/);
+  assert.match(out, /would write in this repo:/);
   // The plan prints display paths, which keep the platform separator.
   assert.ok(out.includes(join('.claude', 'settings.json')), out);
   assert.match(out, /AGENTS\.md/);
@@ -218,7 +244,7 @@ test('CLI: --yes wires every detected agent (the pre-0.8 default)', () => {
 test('CLI: --no-global writes AGENTS.md but leaves ~/.codex alone', () => {
   const home = fresh(); const repo = fresh();
   mkdirSync(join(home, '.codex'), { recursive: true });
-  const out = cliStderr(repo, home, ['--agents', 'agents', '--no-global']);
+  const out = cliStderr(repo, home, ['--agents', 'agents', '--no-global', '--verbose']);
   assert.ok(existsSync(join(repo, 'AGENTS.md')));
   assert.deepEqual(readdirSync(join(home, '.codex')), []);
   assert.match(out, /skipped out-of-repo writes/);
@@ -230,7 +256,7 @@ test('CLI: the graph build is attempted even when claude is not selected', () =>
   // Regression: the build used to sit inside `if (wantClaude)`, so picking only
   // cursor wired .cursor/ and never built the graph its rule file points at.
   const out = cliStderr(repo, home, ['--agents', 'cursor']);
-  assert.match(out, /(built the graph|skipped graph build)/);
+  assert.match(out, /(built the graph|graph built|skipped graph build|skipped the graph build)/);
 });
 
 test('CLI: --no-global stays quiet when the selection has nothing out-of-repo', () => {

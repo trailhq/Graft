@@ -1,14 +1,16 @@
 /**
  * "Saved" vs "said": the turn-end check that measures whether the agent actually
- * told the user what graft saved. Its rules: read only the last turn, never
- * count one reply twice, and count NEITHER total for a turn we cannot observe.
+ * told the user what graft saved. Its rules: judge only the reply since the
+ * person's last prompt, read only what the transcript gained since the last
+ * read, never count one reply twice, and count NEITHER total for a turn we
+ * cannot observe.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hasSavingsTally, lastAssistantTurn, lastTurnBilling } from '../src/claude/tally.js';
+import { catchUpTranscript, hasSavingsTally } from '../src/claude/tally.js';
 import { main } from '../src/claude/hooks.js';
 import { readSession, writeSession } from '../src/claude/state.js';
 
@@ -35,7 +37,7 @@ function assistant(uuid: string, text: string): string {
   return JSON.stringify({ type: 'assistant', uuid, message: { role: 'assistant', content: [{ type: 'text', text }] } });
 }
 function userPrompt(text: string): string {
-  return JSON.stringify({ type: 'user', uuid: `u-${text}`, message: { role: 'user', content: text } });
+  return JSON.stringify({ type: 'user', uuid: `u-${text}`, origin: { kind: 'human' }, message: { role: 'user', content: text } });
 }
 function toolResult(text: string): string {
   return JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: text }] } });
@@ -45,46 +47,61 @@ function transcript(lines: string[]): string {
   writeFileSync(p, lines.join('\n') + '\n');
   return p;
 }
+/** A fresh cursor file, as `<id>.hooks.json` would be. */
+function cursor(): string {
+  return join(mkdtempSync(join(tmpdir(), 'graft-tally-cursor-')), 's.hooks.json');
+}
+/** The open reply after reading `lines` from the top. */
+function turnOf(lines: string[]) {
+  const r = catchUpTranscript(transcript(lines), cursor());
+  return r.fresh ? r.turn : null;
+}
 
-test('the whole last turn is read, not just its final text block', () => {
-  const p = transcript([
+test('the whole reply since the typed prompt is read, not just its final text block', () => {
+  const turn = turnOf([
     userPrompt('older question'),
     assistant('a1', 'no tally in this earlier turn'),
     userPrompt('how does auth work'),
     assistant('a2', '🌱 graft saved ~5,000 tokens this turn'),
     toolResult('[graft] tokens saved ≈ 1,000'),
     assistant('a3', 'Done.'),
-  ]);
-  const turn = lastAssistantTurn(p)!;
+  ])!;
   assert.equal(turn.uuid, 'a3', 'uuid is the last assistant entry of the turn');
-  assert.equal(hasSavingsTally(turn.text), true, 'a tally in an earlier block of the same turn still counts');
+  assert.equal(turn.tally, true, 'a tally in an earlier block of the same turn still counts');
 });
 
 test('the previous turn is not read into this one', () => {
-  const p = transcript([
-    userPrompt('first'),
-    assistant('a1', '🌱 graft saved ~9,000 tokens this turn'),
-    userPrompt('second'),
-    assistant('a2', 'Nothing to report.'),
-  ]);
-  const turn = lastAssistantTurn(p)!;
-  assert.equal(hasSavingsTally(turn.text), false);
+  const turn = turnOf([userPrompt('first'), assistant('a1', '🌱 graft saved ~9,000 tokens this turn'), userPrompt('second'), assistant('a2', 'Nothing to report.')])!;
+  assert.equal(turn.tally, false);
+});
+
+test('only what the person typed starts a turn: a task notice, a command wrapper or a compaction summary does not', () => {
+  const notice = JSON.stringify({ type: 'user', origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>\n<status>completed</status>\n</task-notification>' } });
+  const wrapper = JSON.stringify({ type: 'user', message: { role: 'user', content: '<command-name>/review</command-name>' } });
+  const summary = JSON.stringify({ type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued from a previous conversation.' } });
+  for (const row of [notice, wrapper, summary]) {
+    const turn = turnOf([userPrompt('how does auth work'), assistant('a1', '🌱 graft saved ~5,000 tokens this turn'), row, assistant('a2', 'Done.')])!;
+    assert.equal(turn.tally, true, `not a new turn: ${row.slice(0, 60)}`);
+    assert.equal(turn.uuid, 'a2');
+  }
 });
 
 test('a subagent’s prose is never what the user read', () => {
-  const p = transcript([
+  const turn = turnOf([
     userPrompt('go'),
-    JSON.stringify({ type: 'assistant', uuid: 's1', isSidechain: true,
-      message: { role: 'assistant', content: [{ type: 'text', text: '🌱 graft saved ~4,000 tokens this turn' }] } }),
+    JSON.stringify({ type: 'assistant', uuid: 's1', isSidechain: true, message: { role: 'assistant', content: [{ type: 'text', text: '🌱 graft saved ~4,000 tokens this turn' }] } }),
     assistant('a1', 'The subagent finished.'),
-  ]);
-  assert.equal(hasSavingsTally(lastAssistantTurn(p)!.text), false);
+  ])!;
+  assert.equal(turn.tally, false);
 });
 
-test('an unobservable turn yields null rather than a false negative', () => {
-  assert.equal(lastAssistantTurn(undefined), null, 'no transcript_path (e.g. Codex)');
-  assert.equal(lastAssistantTurn('/nope/missing.jsonl'), null, 'unreadable file');
-  assert.equal(lastAssistantTurn(transcript([userPrompt('go')])), null, 'no assistant prose yet');
+test('an unobservable turn reads as nothing new rather than a false negative', () => {
+  assert.equal(catchUpTranscript('/nope/missing.jsonl', cursor()).fresh, false, 'unreadable file');
+  assert.equal(turnOf([userPrompt('go')])!.uuid, null, 'no assistant prose yet');
+  const c = cursor();
+  const p = transcript([userPrompt('go'), assistant('a1', 'hi')]);
+  assert.equal(catchUpTranscript(p, c).fresh, true);
+  assert.equal(catchUpTranscript(p, c).fresh, false, 'read again with nothing appended: nothing new');
 });
 
 /* ---------------------------------------------------------------------- */
@@ -97,6 +114,8 @@ async function runHook(event: string, stdin: object): Promise<void> {
 }
 
 function repo(): string {
+  // The hooks' transcript cursor lives under the trail home: never the real one.
+  process.env.TRAIL_HOME = mkdtempSync(join(tmpdir(), 'graft-tally-home-'));
   const d = mkdtempSync(join(tmpdir(), 'graft-tally-repo-'));
   mkdirSync(join(d, 'graft', '.cache', 'session'), { recursive: true });
   process.env.CLAUDE_PROJECT_DIR = d;
@@ -158,7 +177,7 @@ test('a turn whose reply cannot be read is dropped from both totals', async () =
 
 test('a pre-existing session file with none of these fields still parses', async () => {
   const d = repo();
-  writeSession(d, 's1', { lastQuery: null, perAgentQuery: {}, graftReads: 3, sourceReads: 1, savedTokens: 900 });
+  writeSession(d, 's1', { graftReads: 3, sourceReads: 1, savedTokens: 900 });
   await runHook('tool-savings', { session_id: 's1', tool_response: '[graft] tokens saved ≈ 100' });
   const p = transcript([userPrompt('how does auth work'), assistant('a1', 'graft saved ~1,000 tokens this turn')]);
   await runHook('stop', { session_id: 's1', transcript_path: p });
@@ -195,58 +214,58 @@ function billed(
   });
 }
 
-test('lastTurnBilling: one API response split across lines is billed once', () => {
+test('billing: one API response split across lines is billed once', () => {
   // The trap this exists for: Claude Code writes a thinking block and a tool_use
   // block of the SAME response as two entries, each repeating the same usage.
   // Summing lines would bill this turn twice and halve every dollar figure.
   const usage = { input: 10, cacheCreate: 1_000, cacheRead: 100_000 };
-  const p = transcript([
+  const b = catchUpTranscript(transcript([
     userPrompt('a question'),
     billed('a1', 'msg_1', { type: 'thinking', thinking: '...' }, usage),
     billed('a2', 'msg_1', { type: 'tool_use', name: 'Bash', input: {} }, usage),
-  ]);
-  const b = lastTurnBilling(p)!;
-  assert.equal(b.uuid, 'a2');
+  ]), cursor());
   assert.equal(b.tokens, 101_010, 'the response is counted once, not twice');
   // 10 fresh + 1,000 written at 1.25x + 100,000 read at 0.1x, at $5/Mtok.
   assert.equal(b.costMicros, Math.round((10 + 1_250 + 10_000) * 5));
 });
 
-test('lastTurnBilling: distinct responses in one turn are summed', () => {
-  const p = transcript([
+test('billing: distinct responses are summed', () => {
+  const b = catchUpTranscript(transcript([
     userPrompt('a question'),
     billed('a1', 'msg_1', { type: 'text', text: 'first' }, { input: 100, cacheCreate: 0, cacheRead: 0 }),
     billed('a2', 'msg_2', { type: 'text', text: 'second' }, { input: 200, cacheCreate: 0, cacheRead: 0 }),
-  ]);
-  const b = lastTurnBilling(p)!;
+  ]), cursor());
   assert.equal(b.tokens, 300);
 });
 
-test('lastTurnBilling: the previous turn is not billed again', () => {
-  const p = transcript([
-    userPrompt('older question'),
-    billed('a1', 'msg_1', { type: 'text', text: 'old' }, { input: 9_999, cacheCreate: 0, cacheRead: 0 }),
-    userPrompt('current question'),
-    billed('a2', 'msg_2', { type: 'text', text: 'new' }, { input: 100, cacheCreate: 0, cacheRead: 0 }),
-  ]);
-  assert.equal(lastTurnBilling(p)!.tokens, 100);
+test('billing: a response billed by an earlier read is never billed again, even when its lines straddle two reads', () => {
+  const c = cursor();
+  const p = transcript([userPrompt('older question'), billed('a1', 'msg_1', { type: 'text', text: 'old' }, { input: 9_999, cacheCreate: 0, cacheRead: 0 })]);
+  assert.equal(catchUpTranscript(p, c).tokens, 9_999);
+  appendFileSync(p, [userPrompt('current question'), billed('a2', 'msg_2', { type: 'thinking', thinking: '...' }, { input: 100, cacheCreate: 0, cacheRead: 0 })].join('\n') + '\n');
+  assert.equal(catchUpTranscript(p, c).tokens, 100, 'only the new response');
+  appendFileSync(p, billed('a3', 'msg_2', { type: 'text', text: 'new' }, { input: 100, cacheCreate: 0, cacheRead: 0 }) + '\n');
+  const third = catchUpTranscript(p, c);
+  assert.equal(third.tokens, 0, 'the rest of msg_2 arrived later: still billed once');
+  assert.equal(third.turn.uuid, 'a3');
 });
 
-test('lastTurnBilling: an unpriced model is left out of the rate entirely', () => {
+test('billing: an unpriced model is left out of the rate entirely', () => {
   // Not zero-cost — absent. Keeping its tokens in the denominator with no cost
   // in the numerator would drag the blended rate toward zero and quietly
   // under-report every saving after it.
-  const p = transcript([
+  const b = catchUpTranscript(transcript([
     userPrompt('a question'),
     billed('a1', 'msg_1', { type: 'text', text: 'x' }, { input: 500, cacheCreate: 0, cacheRead: 0 }, 'some-future-model'),
     billed('a2', 'msg_2', { type: 'text', text: 'y' }, { input: 100, cacheCreate: 0, cacheRead: 0 }),
-  ]);
-  assert.equal(lastTurnBilling(p)!.tokens, 100);
+  ]), cursor());
+  assert.equal(b.tokens, 100);
 });
 
-test('lastTurnBilling: null when there is nothing to bill', () => {
-  assert.equal(lastTurnBilling(undefined), null, 'a host whose Stop hook names no transcript');
-  assert.equal(lastTurnBilling('/no/such/file.jsonl'), null, 'unreadable');
-  const noUsage = transcript([userPrompt('q'), assistant('a1', 'a reply with no usage recorded')]);
-  assert.equal(lastTurnBilling(noUsage), null, 'entries carrying no usage');
+test('billing: nothing to bill when no entry carries usage, and a subagent is never billed', () => {
+  const none = catchUpTranscript(transcript([userPrompt('q'), assistant('a1', 'a reply with no usage recorded')]), cursor());
+  assert.equal(none.tokens, 0);
+  assert.equal(none.costMicros, 0);
+  const side = JSON.stringify({ ...JSON.parse(billed('s1', 'msg_9', { type: 'text', text: 'sub' }, { input: 700, cacheCreate: 0, cacheRead: 0 })), isSidechain: true });
+  assert.equal(catchUpTranscript(transcript([userPrompt('q'), side]), cursor()).tokens, 0);
 });

@@ -76,7 +76,7 @@ test('never chosen means on — the documented default', () => {
 
 test('every reason has a sentence naming the switch that is closed', () => {
   for (const r of ['no-key', 'do-not-track', 'ci', 'disabled'] as const) {
-    assert.match(explainOff(r), /^off — \S/);
+    assert.match(explainOff(r), /^off: \S/);
   }
   assert.match(explainOff('do-not-track'), /DO_NOT_TRACK/);
   assert.match(explainOff('disabled'), /graft telemetry enable/);

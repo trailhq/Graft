@@ -21,6 +21,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { extractFile, mintId } from "../src/graph/extract.js";
+import { warmDepthGrammars } from "../src/graph/depth-parser.js";
+
+// extractFile is synchronous; its WASM grammars load once, up front.
+await warmDepthGrammars(["typescript", "python", "go"]);
 
 function assertUniqueIds(nodes: { id: string }[], label: string): void {
   const ids = nodes.map((n) => n.id);

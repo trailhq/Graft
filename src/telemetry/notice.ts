@@ -14,16 +14,17 @@
  * who see it — this catches everyone else.
  */
 import { patchState, readState } from './identity.js';
-import { explainOff, offReason } from './gate.js';
+import { doNotTrack, explainOff, offReason } from './gate.js';
 import { peek } from './queue.js';
 import { buildBatch } from './send.js';
 import { posthogHost } from './key.js';
+import { brand, cmd, inBrand } from '../brand.js';
 
-export const TELEMETRY_DOC_URL = 'https://github.com/NanoNets/context-graph-engine/blob/main/TELEMETRY.md';
+export const TELEMETRY_DOC_URL = 'https://github.com/trailhq/Trail-Code/blob/main/TELEMETRY.md';
 
 export const NOTICE = [
   '· graft collects anonymous usage stats (no code, no file paths, no queries).',
-  `  What exactly: ${TELEMETRY_DOC_URL} — turn it off with \`graft telemetry disable\`.`,
+  `  What exactly: ${TELEMETRY_DOC_URL}. Turn it off with \`graft telemetry disable\`.`,
 ].join('\n');
 
 /**
@@ -36,7 +37,7 @@ export function firstRunNotice(home?: string, env?: NodeJS.ProcessEnv): string |
     if (offReason(home, env) !== null) return null; // nothing to disclose if nothing can be sent
     if (readState(home)?.noticeShownAt) return null;
     patchState({ noticeShownAt: new Date().toISOString() }, home);
-    return NOTICE;
+    return inBrand(NOTICE, brand(env));
   } catch {
     return null;
   }
@@ -49,20 +50,21 @@ export function formatStatus(home?: string, env?: NodeJS.ProcessEnv): string {
   const pending = peek(home).length;
   const lines = [
     reason === null
-      ? 'telemetry: on — anonymous, aggregate-only'
+      ? 'telemetry: on, anonymous and aggregate-only'
       : `telemetry: ${explainOff(reason)}`,
     `  contract:  ${TELEMETRY_DOC_URL}`,
   ];
+  if (doNotTrack(env)) lines.push('  update check: off — DO_NOT_TRACK is set');
   if (reason === null || reason === 'disabled') {
     lines.push(`  endpoint:  ${posthogHost()}`);
     lines.push(`  queued:    ${pending} event${pending === 1 ? '' : 's'} waiting for the next daily flush`);
   }
   lines.push(
     reason === 'disabled'
-      ? '  enable:    graft telemetry enable'
-      : '  disable:   graft telemetry disable  (or set DO_NOT_TRACK=1)',
+      ? `  enable:    ${cmd('graft telemetry enable')}`
+      : `  disable:   ${cmd('graft telemetry disable')}  (or set DO_NOT_TRACK=1)`,
   );
-  lines.push('  inspect:   graft telemetry debug   (prints the exact batch, sends nothing)');
+  lines.push(`  inspect:   ${cmd('graft telemetry debug')}   (prints the exact batch, sends nothing)`);
   return lines.join('\n');
 }
 
@@ -77,16 +79,16 @@ export function formatDebug(home?: string): string {
   if (events.length === 0) {
     return [
       'telemetry: nothing queued.',
-      '  Run a graft command first — events are written locally and flushed once a day.',
+      '  Run a graft command first: events are written locally and flushed once a day.',
     ].join('\n');
   }
   // A literal placeholder, never the key itself. This output is written to be
   // pasted into an issue; the project key is not the user's to share and is not
   // needed to audit what graft sends.
-  const body = { api_key: '<omitted — graft\'s own ingestion key>', ...buildBatch(events) };
+  const body = { api_key: '<omitted: graft\'s own ingestion key>', ...buildBatch(events) };
   return [
     `telemetry: ${events.length} event(s) queued. This is the exact body a flush would POST`,
-    `to ${posthogHost()}/batch/ — running this command sends nothing.`,
+    `to ${posthogHost()}/batch/. Running this command sends nothing.`,
     '',
     JSON.stringify(body, null, 2),
   ].join('\n');

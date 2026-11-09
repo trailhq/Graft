@@ -9,8 +9,10 @@
  * on top of each other. `claude/state.ts` re-exports all of this, so nothing
  * outside had to change when it moved.
  */
-import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync, openSync, writeSync, closeSync, fchmodSync, constants } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join, dirname, isAbsolute } from 'node:path';
+import { mapDirFor } from '../context/map-dir.js';
 
 export interface Stats {
   nodeCount: number; edgeCount: number; languages: string[];
@@ -20,6 +22,11 @@ export interface Stats {
 }
 
 export const LOCK_STALE_MS = 300000;
+/** Past this, a lock is taken over even when its pid is alive: that pid may be a new
+ * process that got a dead one's number. Longer than any build's own time limit (a
+ * first build gets 10 minutes, `graph/refresh.ts`), so a build that is still running
+ * keeps its lock. */
+export const LOCK_MAX_MS = 15 * 60_000;
 
 export function emptyStats(): Stats {
   return { nodeCount: 0, edgeCount: 0, languages: [], totalCount: 0, readyCount: 0,
@@ -42,7 +49,7 @@ const LOCK_FILE = '.sync.lock';
  */
 export function resolveContextDir(projectDir: string): string {
   const override = process.env.GRAFT_DIR;
-  if (!override) return join(projectDir, 'graft');
+  if (!override) return mapDirFor(projectDir);
   return isAbsolute(override) ? override : join(projectDir, override);
 }
 
@@ -66,11 +73,23 @@ export function readJson<T>(p: string): T | null {
  * open) accumulates one full-size file per attempt, and nothing in graft ever lists
  * `.cache/` to clean them up.
  */
-export function writeJsonAtomic(p: string, value: unknown, compact = false): void {
+export function writeJsonAtomic(p: string, value: unknown, compact = false, mode?: number): void {
   mkdirSync(dirname(p), { recursive: true });
-  const tmp = `${p}.${process.pid}.tmp`;
+  // A name no one can guess, opened new-only and never through a link: a link
+  // planted where the temp file goes is neither written through nor renamed
+  // into place (D85).
+  const tmp = `${p}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
   try {
-    writeFileSync(tmp, compact ? JSON.stringify(value) : JSON.stringify(value, null, 2));
+    // `mode` applies to the new file before it's renamed into place, so a
+    // secret is never readable by others even for a moment.
+    const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), mode ?? 0o666);
+    try {
+      if (mode !== undefined && process.platform !== 'win32') fchmodSync(fd, mode);
+      const buf = Buffer.from(compact ? JSON.stringify(value) : JSON.stringify(value, null, 2), 'utf8');
+      for (let off = 0; off < buf.length; ) off += writeSync(fd, buf, off, buf.length - off);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, p);
   } catch (e) {
     try { rmSync(tmp, { force: true }); } catch { /* nothing more we can do */ }
@@ -87,9 +106,10 @@ export function writeStats(d: string, s: Stats): void { writeJsonAtomic(statsPat
  * Missing fields always retain backwards-compatible defaults.
  */
 export interface BuildConfig {
-  /** SKIP_DIRS names to include in this repo's walks, persisted so a LATER
-   * no-flag build — and the fingerprint/refresh path, which never sees CLI
-   * flags at all — behave identically to the invocation that set it. */
+  /** SKIP_DIRS names and named hidden directories (except `.git`, `.trail`, `.graft`) to include
+   * in this repo's walks, persisted so a LATER no-flag build — and the
+   * fingerprint/refresh path, which never sees CLI flags at all — behave
+   * identically to the invocation that set it. */
   includeDirs?: string[];
   /** Whether initialized Git submodules (gitlinks) are folded into this repo's
    * graph. Absent/false keeps the historical boundary at the superproject. */
@@ -102,11 +122,6 @@ export interface BuildConfig {
    * checkout someone parked in the tree. Absent/false keeps the historical
    * boundary. */
   followNestedRepos?: boolean;
-  /** The Trail brain this repo's rules come from: the brain id and the token to
-   * read it with. Persisted here — in the git-ignored `.graft/` — rather than in
-   * `~/.graft/`, because a brain belongs to one repository and two checkouts on
-   * one machine must not share one. `undefined` clears it. */
-  brain?: { brainId: string; token: string; baseUrl?: string };
 }
 
 /** Local, Git-ignored repository configuration. Kept outside generated
@@ -119,6 +134,8 @@ export function buildConfigPath(d: string): string { return join(d, BUILD_CONFIG
 /** Keep local build configuration out of Git without coupling it to the
  * generated graph directory. Best-effort, matching graph-cache ignore setup. */
 function ensureBuildConfigIgnored(d: string): void {
+  const noGitignore = process.env.GRAFT_NO_GITIGNORE;
+  if (noGitignore && noGitignore !== '0' && noGitignore !== 'false') return;
   const path = join(d, '.gitignore');
   let current = '';
   try { current = readFileSync(path, 'utf8'); } catch { /* no .gitignore yet */ }
@@ -193,9 +210,7 @@ export function acquireLockIn(cache: string): boolean {
     return true;
   } catch (e: any) {
     if (e?.code !== 'EEXIST') throw e;
-    let stale: boolean;
-    try { stale = Date.now() - statSync(p).mtimeMs >= LOCK_STALE_MS; } catch { stale = true; }
-    if (!stale) return false;
+    if (!lockStale(p)) return false;
     try { rmSync(p); } catch { /* another process reclaimed it */ }
     try { writeFileSync(p, payload, { flag: 'wx' }); return true; }
     catch (e2: any) { if (e2?.code === 'EEXIST') return false; throw e2; }
@@ -203,4 +218,54 @@ export function acquireLockIn(cache: string): boolean {
 }
 export function releaseLockIn(cache: string): void {
   try { rmSync(join(cache, LOCK_FILE)); } catch { /* already gone */ }
+}
+/** Whether someone holds the lock in `cache`: the file is there and not yet reclaimable. */
+export function lockHeldIn(cache: string): boolean {
+  const p = join(cache, LOCK_FILE);
+  try { statSync(p); } catch { return false; }
+  return !lockStale(p);
+}
+
+/**
+ * Put this process's pid in a lock it was handed. `claude/sync-run.ts` runs the build
+ * for whoever took the lock and then exited, so the lock must name the process that
+ * is actually building, or it reads as abandoned once LOCK_STALE_MS passes.
+ */
+export function claimLock(d: string): void {
+  try { writeFileSync(join(cacheDir(d), LOCK_FILE), JSON.stringify({ pid: process.pid, at: new Date().toISOString() })); } catch { /* the age rule still covers it */ }
+}
+
+/**
+ * Whether another live process holds the lock in `cache`: a build or sync of this map
+ * is already running. Our own pid and our parent's don't count: `sync-run` holds the
+ * lock for the `build` it starts.
+ */
+export function lockHeldByOther(cache: string): boolean {
+  if (!lockHeldIn(cache)) return false;
+  const pid = lockPid(join(cache, LOCK_FILE));
+  return pid !== null && pid !== process.pid && pid !== process.ppid;
+}
+
+/**
+ * A lock is reclaimable when its owner is gone and it is older than LOCK_STALE_MS, or
+ * when it is older than LOCK_MAX_MS whoever holds it. Age alone used to be enough, so a
+ * first build past five minutes on a slow laptop lost its lock to the next query, which
+ * started a second full build beside it, and five minutes later a third.
+ */
+function lockStale(p: string): boolean {
+  let age: number;
+  try { age = Date.now() - statSync(p).mtimeMs; } catch { return true; }
+  if (age >= LOCK_MAX_MS) return true;
+  if (age < LOCK_STALE_MS) return false;
+  const pid = lockPid(p);
+  return pid === null || !pidAlive(pid);
+}
+
+function lockPid(p: string): number | null {
+  const pid = readJson<{ pid?: unknown }>(p)?.pid;
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e: any) { return e?.code === 'EPERM'; }
 }

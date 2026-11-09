@@ -1,0 +1,10 @@
+# The build context is sent to the daemon before anything runs, so everything
+# here is time paid on every single build.
+.git
+node_modules
+dist
+viewer/dist
+data
+graft
+.claude
+*.log

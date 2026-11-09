@@ -7,10 +7,10 @@
  * `npm run build` all produce a graft whose telemetry module short-circuits on
  * the very first check.
  *
- * Runs from `prepublishOnly`, after `npm run build`. Without GRAFT_POSTHOG_KEY
- * in the environment it prints a warning and changes nothing — publishing a
- * telemetry-less build is a valid thing to do, and it must never be a hard
- * failure at the moment someone is trying to ship.
+ * Runs from `prepare`, after `npm run build`. Without GRAFT_POSTHOG_KEY in the
+ * environment it changes nothing, and warns only when npm is packing or
+ * publishing — publishing a telemetry-less build is a valid thing to do, and it
+ * must never be a hard failure at the moment someone is trying to ship.
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -23,7 +23,10 @@ const key = process.env.GRAFT_POSTHOG_KEY ?? '';
 const host = process.env.GRAFT_POSTHOG_HOST ?? '';
 
 if (!key) {
-  console.warn('⚠ GRAFT_POSTHOG_KEY not set — publishing a build that sends no telemetry.');
+  // `prepare` also runs on every `npm install` in a clone, where no key is expected.
+  if (['publish', 'pack'].includes(process.env.npm_command ?? '')) {
+    console.warn('⚠ GRAFT_POSTHOG_KEY not set — publishing a build that sends no telemetry.');
+  }
   process.exit(0);
 }
 if (!existsSync(target)) {

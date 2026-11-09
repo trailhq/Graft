@@ -31,11 +31,12 @@
  */
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
-import { sumSavingsFooters } from '../context/savings.js';
+import { groupDigits, sumSavingsFooters } from '../context/savings.js';
 import { dollarsSaved, formatDollars } from '../context/price.js';
 import { readSession, writeSession, sessionDir, listSessionIds, type SessionState } from './state.js';
 import type { AgentHost } from '../telemetry/contract.js';
 import { GRAFT_MCP_TOOL_NAMES } from '../mcp/tool-names.js';
+import { brand, cmd } from '../brand.js';
 
 export type ToolKind = 'graft' | 'source';
 
@@ -73,13 +74,15 @@ export function isGraftMcpTool(toolName: string): boolean {
   return GRAFT_MCP_TOOL_NAMES.has(bare);
 }
 
-/** Whether a shell command line invokes the graft CLI (any of its install shapes). */
+/** Whether a shell command line invokes the CLI under either name (any of its install shapes). */
 export function commandInvokesGraft(command: string): boolean {
   const c = command.trim();
-  if (/dist[/\\]cli\.js/.test(c)) return true; // running from a source checkout
-  // `graft …`, `graft-dev …`, `npx [-y] [@nanonets/]graft …`, at the start of the
-  // line or of a &&/;/| segment — not "mygraft" or a path that merely contains it.
-  return /(^|[|&;]\s*)(npx\s+(-y\s+)?(@nanonets\/)?)?graft(-dev)?\b/i.test(c);
+  // running from a source checkout
+  if (/dist[/\\](cli|bin[/\\](trail|graft))\.js/.test(c)) return true;
+  // `graft …`, `graft-dev …`, `npx [-y] [@nanonets/]graft …`, and the same for
+  // `trail` / `@trailhq/trail-code`, at the start of the line or of a &&/;/| segment —
+  // not "mygraft" or a path that merely contains it.
+  return /(^|[|&;]\s*)(npx\s+(-y\s+)?(@nanonets\/|@trailhq\/)?)?(graft|trail)(-dev)?\b/i.test(c);
 }
 
 /**
@@ -142,6 +145,21 @@ export function recordToolUse(dir: string, sessionId: string, use: ToolUse): voi
   writeSession(dir, id, s);
 }
 
+/**
+ * Add the savings lines in text a hook is about to hand the agent to the
+ * session's running total; the caller writes the session.
+ *
+ * The prompt and file-touch hooks bring learnings with the same
+ * `[trail] learnings saved ≈ N` line `trail ask` prints, and only the copy in a
+ * tool's output was ever counted. Past its first hour a session mostly edits,
+ * tests and checks, so its learnings come by hook, and without this the
+ * statusline sat on one number for the rest of the session.
+ */
+export function addHookSavings(s: SessionState, text: string): void {
+  const saved = sumSavingsFooters(text);
+  if (saved > 0) s.savedTokens = (s.savedTokens ?? 0) + saved;
+}
+
 export interface SessionSummary extends SessionState {
   id: string;
 }
@@ -186,7 +204,7 @@ export function sessionInputRate(dir: string): number | null {
 
 export function formatSessionStats(s: SessionSummary | null): string {
   if (s === null) {
-    return 'graft stats: no session recorded yet — use graft in an agent session, then look again.';
+    return `${cmd('graft stats')}: no session recorded yet. Use ${brand()} in an agent session, then look again.`;
   }
   const graft = s.graftReads ?? 0;
   const source = s.sourceReads ?? 0;
@@ -195,17 +213,17 @@ export function formatSessionStats(s: SessionSummary | null): string {
   const mix =
     total === 0 ? 'no retrieval yet' : `${Math.round((graft / total) * 100)}% graft`;
   const lines = [
-    `graft stats — session ${s.id}`,
+    `${cmd('graft stats')}: session ${s.id}`,
     `  graft reads:   ${graft}`,
     `  source reads:  ${source}   (Read / Grep / Glob)`,
     `  mix:           ${mix}`,
-    `  tokens saved:  ~${saved.toLocaleString()}`,
+    `  tokens saved:  ~${groupDigits(saved)}`,
   ];
   // Omitted, not zeroed, when no turn has been billed yet: a host whose hooks
   // name no transcript can't know what a token costs here, and a made-up rate
   // would be worse than the silence.
   const usd = dollarsSaved(saved, s.inputCostMicros, s.inputTokensBilled);
   if (usd !== null) lines.push(`  value saved:   ~${formatDollars(usd)}`);
-  if (s.lastQuery) lines.push(`  last query:    ${s.lastQuery}`);
+  if (s.promptAsks) lines.push(`  prompts asked: ${s.promptAsks}`);
   return lines.join('\n');
 }

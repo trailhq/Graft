@@ -37,7 +37,7 @@ test('writes shim + hooks.json entry, idempotent on re-run', () => {
   const cfg = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
   // Full Claude-Code parity: retrieval on prompt, orientation on start, blast
   // radius on edit, one background sync at turn end.
-  const sub = (event: string) => cfg.hooks[event][0].hooks[0].command.match(/cjs" (\S+)$/)?.[1];
+  const sub = (event: string) => cfg.hooks[event][0].hooks[0].command.match(/cjs" (\S+) \|\| exit 0$/)?.[1]; // D116 item 6: every event fails open
   assert.equal(sub('UserPromptSubmit'), 'prompt', 'the coupling-seed retrieval hook');
   assert.equal(sub('SessionStart'), 'session-start', 'orientation hook');
   assert.equal(sub('PostToolUse'), 'post-edit', 'edit hook (sync split out to Stop)');
@@ -51,8 +51,10 @@ test('writes shim + hooks.json entry, idempotent on re-run', () => {
   const again = installCodexHooks(home);
   assert.deepEqual(again.map((x) => x.action), ['unchanged', 'unchanged'], 'idempotent');
   const after = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'));
-  for (const ev of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'])
+  for (const ev of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop'])
     assert.equal(after.hooks[ev].length, 1, `${ev} not duplicated on re-run`);
+  // Phase 2 (2.11): PostToolUse carries the edit entry and the Bash one (codex-post-bash).
+  assert.equal(after.hooks.PostToolUse.length, 2, 'PostToolUse not duplicated on re-run');
 });
 
 test('foreign hook entries are preserved; stale graft entries replaced', () => {
@@ -66,9 +68,10 @@ test('foreign hook entries are preserved; stale graft entries replaced', () => {
   }));
   installCodexHooks(home);
   const entries = JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8')).hooks.PostToolUse;
-  assert.equal(entries.length, 2, 'foreign kept, stale graft replaced by fresh');
+  // Phase 2 (2.11): the stale edit entry replaced in place, the Bash entry (codex-post-bash) added at the end.
+  assert.equal(entries.length, 3, 'foreign kept, stale graft replaced by fresh');
   assert.ok(entries.some((e: any) => e.hooks[0].command === 'other-tool'), 'foreign entry preserved');
-  assert.ok(entries.some((e: any) => /graft-hooks\.cjs" post-edit$/.test(e.hooks[0].command)), 'fresh graft entry present');
+  assert.ok(entries.some((e: any) => /graft-hooks\.cjs" post-edit \|\| exit 0$/.test(e.hooks[0].command)), 'fresh graft entry present');
   assert.ok(!JSON.stringify(entries).includes('/old/'), 'stale graft entry removed');
 });
 

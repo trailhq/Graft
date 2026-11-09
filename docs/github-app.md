@@ -1,4 +1,4 @@
-# The graft GitHub App
+# The Trail-code GitHub App
 
 Posts a blast-radius comment on every pull request, and hosts the interactive
 graph behind a signed link.
@@ -13,9 +13,9 @@ instead of a workflow file per repo.
 
 ## What it does per pull request
 
-1. Verifies the webhook signature, queues the job, answers `202` — GitHub gives
+1. Verifies the webhook signature, queues the job, answers `202`. GitHub gives
    up on a delivery after ten seconds and a review takes longer.
-2. Fetches `refs/pull/<n>/merge` and the base branch, shallow — falling back to
+2. Fetches `refs/pull/<n>/merge` and the base branch, shallow, falling back to
    `refs/pull/<n>/head` for a closed or merged pull request, whose merge ref
    GitHub has deleted. The head ref is then diffed against the base branch as it
    stood at the merge, so the radius is still the pull request's own change.
@@ -36,7 +36,7 @@ settings → GitHub Apps → New).
 | Field | Value |
 | --- | --- |
 | Webhook URL | `https://<your-host>/webhook` |
-| Webhook secret | a long random string — keep it, it is `GRAFT_WEBHOOK_SECRET` |
+| Webhook secret | a long random string; keep it, it is `GRAFT_WEBHOOK_SECRET` |
 | Repository permissions | **Contents: Read-only**, **Pull requests: Read & write** |
 | Subscribe to events | **Pull request** |
 | Where can this be installed | your choice |
@@ -45,7 +45,7 @@ Nothing else. Contents-read is what clones the code; pull-requests-write is what
 posts the comment. It never needs Actions, Checks, Administration or write
 access to code.
 
-Then **Generate a private key** — the download is the only copy — and note the
+Then **Generate a private key** (the download is the only copy) and note the
 **App ID**.
 
 ### 2. Run it
@@ -62,94 +62,44 @@ docker run -p 3000:3000 \
 ```
 
 The image needs `git` and nothing else at runtime, runs as non-root, and answers
-`/healthz` with its queue depth. Any container host works — Fly, Cloud Run, ECS,
+`/healthz` with its queue depth. Any container host works: Fly, Cloud Run, ECS,
 a VM. `GRAFT_PUBLIC_URL` must be the origin GitHub and your reviewers can reach,
 because it is what the comment's link is built from.
 
 The process refuses to start if any of those four are missing: a server that
 boots without a webhook secret looks healthy and silently rejects every delivery.
 
-The volume is the fifth thing and it is optional — but without it, every link
+The volume is the fifth thing and it is optional, but without it, every link
 already posted to a pull request breaks the first time the container is replaced.
 The token in a link is derived from the page id rather than stored, so the link
 keeps verifying and simply 404s, with nothing in the comment to say why. The image
 already points `GRAFT_PAGE_DIR` at `/var/lib/graft/pages` (500 pages of ~50 kB,
 so ~25 MB is the ceiling); mount anything durable there and the pages come back
 with the process. Set the variable yourself on hosts that are not this image, or
-leave it empty to keep the store in memory — it is deliberately not required, as
+leave it empty to keep the store in memory. It is deliberately not required, as
 a server that refuses to boot reviews nothing at all.
 
 ### 3. Install it on a repository
 
 App settings → Install App → pick the repos. **Installing requires admin on the
-repository** (or org-owner for an org-wide install) — the one thing an App does
+repository** (or org-owner for an org-wide install): the one thing an App does
 not get you around.
-
-## Reading a repository into a Trail brain
-
-The App has a second, optional job: reading one repository's own history so
-Trail can mine rules out of it. That is what backs "paste a repo URL" during
-brain onboarding, and it lives here because this is the only service holding the
-GitHub App credentials and the only one that can build a symbol graph.
-
-`POST /brain/build`, off unless `GRAFT_BRAIN_BUILD_SECRET` is set:
-
-```bash
-curl -X POST https://<your-host>/brain/build \
-  -H "authorization: Bearer $GRAFT_BRAIN_BUILD_SECRET" \
-  -H 'content-type: application/json' \
-  -d '{"owner":"acme","repo":"api"}'
-```
-
-It resolves the installation for `acme/api` (`GET /repos/{owner}/{repo}/installation`,
-App-JWT authed), clones it shallow, builds the graph, and reads:
-
-- **commit subjects and bodies**, `--no-merges --reverse`, up to 1000
-- **closed pull requests and their discussion**, most-discussed first, bots dropped
-- **exported symbols**, with the body hash that later tells Trail whether a rule
-  still describes the code it was mined from
-
-What comes back is a digest of that — **messages, titles, comments, symbol ids
-and hashes. No source code.** Two modes:
-
-| Request | Response |
-| --- | --- |
-| `owner` + `repo` | `202` with the digest, for the caller to ingest itself |
-| plus `brainId` + `brainToken` | the digest is POSTed to the brain; `202` with its job id |
-
-The platform uses the first: it already holds the user's session and writes to
-the brain directly, so handing this service a workspace key just to have it call
-back would mean minting a credential per build for nothing.
-
-`404` with an `error` means the App is not installed on the repository — the
-expected answer for "someone pasted a repo we cannot see", not a failure. The
-caller turns it into a choice: install the App, or run `graft init --brain`
-locally, where the code never leaves the machine.
-
-| Variable | Meaning |
-| --- | --- |
-| `GRAFT_BRAIN_BUILD_SECRET` | Bearer secret for the route. Unset disables it entirely. |
-| `GRAFT_BRAIN_URL` | Platform base URL the digest is posted to, when a `brainToken` is sent. Overrides anything a request supplies, so a caller cannot redirect a repository's history elsewhere. |
 
 ## Security
 
 The App clones code written by strangers on every fork PR while holding a token
 for the base repository, so:
 
-- **Nothing from the repo is executed** — no `npm install`, no build step, no
+- **Nothing from the repo is executed**: no `npm install`, no build step, no
   postinstall. The graph comes from tree-sitter reading source text.
 - **Git is told not to run anything either**: `core.hooksPath=/dev/null`,
   `GIT_TERMINAL_PROMPT=0`, `GIT_CONFIG_NOSYSTEM=1`, no submodule recursion.
 - **The token never lands in the checkout.** It is passed per-invocation as an
   auth header, not baked into a remote URL that `.git/config` and the reflog
   would keep. It is redacted out of error text before anything is logged.
-- **Pages are capabilities, not public URLs.** `/p/<id>?t=<hmac>` — an unknown
+- **Pages are capabilities, not public URLs.** `/p/<id>?t=<hmac>`: an unknown
   page and a bad token are both `404`, so the endpoint cannot be used to
   discover which pull requests exist. Links expire with the page they point at.
-- **`/brain/build` sends no source.** Its digest is commit messages, pull-request
-  discussion, symbol ids and hashes; the checkout is deleted in a `finally`. The
-  route is off until `GRAFT_BRAIN_BUILD_SECRET` is set, and the secret is
-  compared in constant time — it is long-lived, unlike a per-payload signature.
 
 ## What is not built yet
 
@@ -160,7 +110,7 @@ for the base repository, so:
   a PR rebuilds its page. A shared store is the fix when there is more than one
   instance.
 - **The evidence quotes** in the comment's collapsed list arrive when #180 lands
-  (`markdownReport(report, { root })` — additive, one line here).
+  (`markdownReport(report, { root })`, additive, one line here).
 
 ## Deploying to AWS App Runner
 
@@ -212,5 +162,5 @@ the App's webhook URL to `https://graft.nanonets.ai/webhook`.
   error, which reads like a broken entrypoint.
 - **One instance, pinned.** Viewer pages live in the process, so a second
   instance would 404 links minted by the first. Raising `--max-size` means
-  moving `PageStore` to S3 or a database first — the cap is correctness, not
+  moving `PageStore` to S3 or a database first: the cap is correctness, not
   cost control.
