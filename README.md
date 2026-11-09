@@ -489,7 +489,7 @@ compiler-grade layer, all `$0` and deterministic (no model, no key):
 - **Broad**: symbols (functions, classes, methods, types, …) plus name-resolved
   call edges via a generic tree-sitter extractor, one grammar per language:
   **Rust, C, C++, C#, Ruby, Scala, Elixir, Solidity,
-  Dart, Clojure, Nix, Lua, Gleam**, and **OCaml, Zig** (symbols only for now, no call edges).
+  Dart, Clojure, Nix, Lua, Gleam, Julia**, and **OCaml, Zig** (symbols only for now, no call edges).
 
 - **Single-file components**: **Vue** (`.vue`), **Svelte** (`.svelte`) and
   **Astro** (`.astro`). The wrapper grammar only locates the `<script>` block
@@ -505,7 +505,7 @@ compiler-grade layer, all `$0` and deterministic (no model, no key):
   own files. It's best-effort: a missing or failed server leaves those languages
   on the AST graph while the other servers still run.
 
-Twenty-four languages, plus Vue, Svelte and Astro single-file components. A file whose language isn't listed is skipped, not
+Twenty-five languages, plus Vue, Svelte and Astro single-file components. A file whose language isn't listed is skipped, not
 indexed. Adding a broad-tier language is a small contribution; see
 [CREDITS.md](CREDITS.md) for the folks who added the current set.
 
