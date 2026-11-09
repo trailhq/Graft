@@ -290,3 +290,68 @@ test("Go extraction: a bare call resolves inside its own package only", async ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Go extraction: a package-qualified call resolves into the imported package's directory", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-go-pkg-call-"));
+  try {
+    mkdirSync(join(dir, "pkg", "util"), { recursive: true });
+    mkdirSync(join(dir, "pkg", "other"), { recursive: true });
+    writeFileSync(join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n");
+    writeFileSync(
+      join(dir, "main.go"),
+      'package main\n\nimport (\n\t"fmt"\n\t"example.com/app/pkg/util"\n)\n\nfunc run() {\n\tfmt.Println(util.Helper())\n}\n',
+    );
+    writeFileSync(
+      join(dir, "alt.go"),
+      'package main\n\nimport ut "example.com/app/pkg/util"\n\nfunc alt() string { return ut.Format() }\n',
+    );
+    writeFileSync(join(dir, "pkg", "util", "helper.go"), 'package util\n\nfunc Helper() string { return "hi" }\n');
+    writeFileSync(join(dir, "pkg", "util", "format.go"), 'package util\n\nfunc Format() string { return "" }\n');
+    writeFileSync(join(dir, "pkg", "other", "other.go"), "package other\n\nfunc Helper() {}\nfunc Format() {}\n");
+
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+
+    const calls = (source: string) =>
+      graph.edges.filter((e) => e.relation === "calls" && e.source === source).map((e) => e.target);
+    assert.deepEqual(calls("main.go#run"), ["pkg/util/helper.go#Helper"]);
+    assert.deepEqual(calls("alt.go#alt"), ["pkg/util/format.go#Format"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Go extraction: a local that shadows an import name is not the package", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-go-pkg-shadow-"));
+  try {
+    mkdirSync(join(dir, "config"));
+    writeFileSync(join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n");
+    writeFileSync(
+      join(dir, "config", "config.go"),
+      'package config\n\nfunc Get(k string) string { return k }\nfunc Load() (string, error) { return "", nil }\n',
+    );
+    writeFileSync(
+      join(dir, "main.go"),
+      'package main\n\nimport "example.com/app/config"\n\n' +
+        'func short() { config := load(); config.Get("x") }\n' +
+        'func param(config cfg) { config.Get("x") }\n' +
+        'func variable() { var config = load(); config.Get("x") }\n' +
+        'func ranged(cs []cfg) { for _, config := range cs { config.Get("x") } }\n' +
+        'func rebound() { config, _ := config.Load(); config.Get("x") }\n' +
+        'func direct() { config.Get("x") }\n',
+    );
+
+    await buildGraph(dir);
+    const graph = readGraph(wiringPath(join(dir, "graft")))!;
+
+    const calls = (source: string) =>
+      graph.edges
+        .filter((e) => e.relation === "calls" && e.source === source && e.target.startsWith("config/"))
+        .map((e) => e.target);
+    for (const fn of ["short", "param", "variable", "ranged"]) assert.deepEqual(calls(`main.go#${fn}`), [], fn);
+    assert.deepEqual(calls("main.go#rebound"), ["config/config.go#Load"]);
+    assert.deepEqual(calls("main.go#direct"), ["config/config.go#Get"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
