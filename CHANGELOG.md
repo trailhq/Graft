@@ -9,6 +9,16 @@
   available, workspace builds report failed children, and `--allow-partial`
   continues to waive only incomplete LLM meaning passes.
 
+- **`graft build --include-dir` can opt a named hidden directory into the
+  repo-root walk** (#221). Default is unchanged: `.github`, `.vscode`, `.kb`
+  and every other dot-directory stay skipped. Pass `--include-dir .kb` (a
+  bare name, same switch as `build/` / `vendor/`) and the walk descends into
+  that directory so its nodes land on the same root graph the MCP server and
+  hooks already point at. The choice persists in `.graft/config.json`, so a
+  later no-flag build still includes it. `.git`, `.trail` and `.graft` are
+  never overridable: the CLI rejects them with a non-zero exit. Git's ignore
+  rules stay authoritative; the flag only lifts graft's own skip.
+
 ### Fixed
 
 - Prevent telemetry helpers from repeatedly starting new copies when a sandbox
