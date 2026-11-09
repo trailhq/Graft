@@ -64,20 +64,24 @@ test("with --strict, --deep fallback without a key still fails for structural er
   assert.match(r.stderr, /falling back to the structural build/, r.describe());
 });
 
-test("a replayed cached structural failure exits 0 by default, and exits 1 with --strict", () => {
+test("an incremental build re-parses a cached failure: it clears once the run is healthy, and --strict still fails while it recurs", () => {
   const root = repo("cli-structural-incremental");
   const r1 = runCliWithWasmParserFailure([
     "build", root, "--no-gitignore", "--no-ignore",
   ]);
   assert.equal(r1.status, 0, r1.describe());
 
-  const replay = runCli(["build", root, "--no-gitignore", "--no-ignore"]);
-  assert.equal(replay.status, 0, replay.describe());
-  assert.match(replay.stdout, /parsed: 0 of 2 files \(2 replayed from cache\)/, replay.describe());
+  // A cached failure is re-parsed, not replayed (#312): the failure can belong to
+  // the run rather than the file, so the healthy file alone comes from cache.
+  const strictRecurring = runCliWithWasmParserFailure([
+    "build", root, "--strict", "--no-gitignore", "--no-ignore",
+  ]);
+  assertStructuralFailure(strictRecurring);
 
-  const strictReplay = runCli(["build", root, "--strict", "--no-gitignore", "--no-ignore"]);
-  assert.equal(strictReplay.status, 1, strictReplay.describe());
-  assert.match(strictReplay.stderr, /wiring incomplete: 1 structural error\(s\)/, strictReplay.describe());
+  const healed = runCli(["build", root, "--strict", "--no-gitignore", "--no-ignore"]);
+  assert.equal(healed.status, 0, healed.describe());
+  assert.match(healed.stdout, /parsed: 1 of 2 files \(1 replayed from cache\)/, healed.describe());
+  assert.doesNotMatch(healed.stderr, /wiring incomplete/, healed.describe());
 });
 
 test("a healthy structural build keeps the success banner and exits 0", () => {
