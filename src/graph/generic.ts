@@ -64,6 +64,7 @@ export const GENERIC_LANGS: readonly GenericLang[] = [
   { name: "lua", exts: [".lua"], wasm: "lua" },
   { name: "gleam", exts: [".gleam"], wasm: "gleam" },
   { name: "powershell", exts: [".ps1", ".psm1"], wasm: "powershell" },
+  { name: "julia", exts: [".jl"], wasm: "julia" },
 ];
 
 /**
