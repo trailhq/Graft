@@ -150,6 +150,15 @@ pub fn run() { helper() }
     defs: ["constant:limit", "function:Ready", "function:helper", "function:run", "type:State"],
     call: ["run", "helper"],
   },
+  {
+    // PowerShell: function/filter statements name via the function_name leaf
+    // token; bare command invocations (cmdlets, script functions) are calls.
+    // Bodies must put statements on their own lines — single-line
+    // `function f { param($x) ... }` hits a grammar ERROR region.
+    lang: "powershell", file: "a.ps1",
+    src: `function Get-Greeting {\n    param([string]$Name)\n    return "hi $Name"\n}\n\nfunction Show-All {\n    Get-Greeting -Name "world"\n}\n`,
+    defs: ["function:Get-Greeting", "function:Show-All"], call: ["Show-All", "Get-Greeting"],
+  },
 ];
 
 for (const s of SNIPPETS) {
