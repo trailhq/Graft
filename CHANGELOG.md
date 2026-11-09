@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- **Structural graph failures can now fail the build command with `--strict`**
+  instead of printing a successful wiring banner. Partial graph artifacts remain
+  available, workspace builds report failed children, and `--allow-partial`
+  continues to waive only incomplete LLM meaning passes.
+
 ### Fixed
 
 - **Elixir remote calls resolve through `alias`** (#351) in the generic tree-sitter tier, so
