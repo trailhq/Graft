@@ -131,7 +131,9 @@ export function statuslineWanted(opts: { statusline?: boolean } = {}): boolean {
   return opts.statusline !== false && !envNoStatusline();
 }
 
-function isGraftStatusline(value: unknown): boolean {
+/** True when a statusLine value is Graft's/Trail's own shim call, in any form init has
+ * ever written. A user's wrapper that also runs the helper is not ours. */
+export function isGraftStatusline(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
   const command = (value as Json).command;
   return typeof command === 'string' && STATUSLINE_HELPER.test(command);

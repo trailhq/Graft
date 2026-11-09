@@ -174,6 +174,59 @@ test('a statusline the user actually wrote is left alone', () => {
   assert.equal(root.statusLine.command, 'my-prompt.sh');
 });
 
+test('trail\'s own statusline in settings.local.json is removed', () => {
+  const d = fresh();
+  const local = write(d, join('.claude', 'settings.local.json'), JSON.stringify({
+    statusLine: { type: 'command', command: 'node "${CLAUDE_PROJECT_DIR:-.}/.trail/statusline.cjs"' },
+  }));
+  const r = byPath(runRetract(d, { apply: true, global: false }));
+  assert.equal(r.get(local), 'deleted', 'the file held only trail\'s statusline');
+  assert.ok(!existsSync(local));
+});
+
+test('a user wrapper that calls trail\'s helper is kept, and so is its file', () => {
+  // init keeps these (#760), so uninstall must too.
+  for (const command of [
+    'input=$(cat); printf "%s" "$input" | "$HOME/.claude/statusline.sh"; printf "%s" "$input" | node "${CLAUDE_PROJECT_DIR:-.}/.trail/statusline.cjs"',
+    'GRAFT_DIR=/opt/graft node "/abs/repo/.trail/statusline.cjs"',
+    'node /abs/repo/.claude/helpers/trail-statusline.cjs',
+  ]) {
+    const d = fresh();
+    const local = write(d, join('.claude', 'settings.local.json'), JSON.stringify({
+      statusLine: { type: 'command', command },
+      permissions: { allow: ['Bash(trail:*)'] },
+    }));
+    const r = byPath(runRetract(d, { apply: true, global: false }));
+    assert.equal(r.get(local), 'removed', `only the allowlist entry is ours: ${command}`);
+    const root = JSON.parse(readFileSync(local, 'utf8'));
+    assert.equal(root.statusLine.command, command, 'wrapper kept byte for byte');
+    assert.equal(root.permissions, undefined);
+  }
+});
+
+test('every statusline form graft/trail has written is still removed', () => {
+  for (const command of [
+    'node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs"',
+    'node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/trail-statusline.cjs"',
+    'node "${CLAUDE_PROJECT_DIR:-.}/.trail/statusline.cjs"',
+    'node .claude/helpers/graft-statusline.cjs',
+    'node ".claude/helpers/graft-statusline.cjs"',
+    'sh -c \'node .claude/helpers/graft-statusline.cjs\'',
+  ]) {
+    const d = fresh();
+    const settings = write(d, join('.claude', 'settings.json'), JSON.stringify({
+      statusLine: { type: 'command', command },
+      subagentStatusLine: { type: 'command', command },
+      model: 'opus',
+    }));
+    runRetract(d, { apply: true, global: false });
+    const root = JSON.parse(readFileSync(settings, 'utf8'));
+    assert.equal(root.statusLine, undefined, command);
+    assert.equal(root.subagentStatusLine, undefined, command);
+    assert.equal(root.model, 'opus');
+  }
+});
+
 // --------------------------------------------------------------------------
 // the cache + ignore entries
 // --------------------------------------------------------------------------
