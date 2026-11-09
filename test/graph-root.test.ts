@@ -8,6 +8,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { nearestGraftRoot, hasGraftIndex } from "../src/graph/root.js";
@@ -71,6 +72,61 @@ test("a child checkout without a graph does not fall back to a parent graph", ()
     { root: child, levels: 1 },
     "a missing child graph must resolve to the child checkout, not the parent graph",
   );
+});
+
+/** Real git, isolated from the user's config, so `.git` files are git's own shape. */
+function git(cwd: string, ...args: string[]): void {
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "protocol.file.allow=always", ...args], {
+    cwd,
+    stdio: "ignore",
+    timeout: 30_000,
+    windowsHide: true,
+    env: { ...process.env, GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+  });
+}
+
+/** A committed repo at `dir` with one file. */
+function committedRepo(dir: string): string {
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "a.ts"), "export const a = 1;\n");
+  git(dir, "init", "-q");
+  git(dir, "add", ".");
+  git(dir, "commit", "-qm", "init");
+  return dir;
+}
+
+test("a submodule walks up to the superproject graph (`--follow-submodules` indexes it there)", () => {
+  const lib = committedRepo(join(tmpRepo("root-sub-lib"), "lib"));
+  const parent = committedRepo(join(tmpRepo("root-sub-parent"), "app"));
+  git(parent, "submodule", "add", "-q", lib, "vendor/lib");
+  builtRepo(parent);
+  const deep = join(parent, "vendor", "lib", "src");
+
+  assert.deepEqual(nearestGraftRoot(deep), { root: parent, levels: 3 }, "the submodule must not bound the walk");
+});
+
+test("a submodule of an UNBUILT superproject resolves to the submodule, not the superproject", () => {
+  const lib = committedRepo(join(tmpRepo("root-sub-lib2"), "lib"));
+  const parent = committedRepo(join(tmpRepo("root-sub-parent2"), "app"));
+  git(parent, "submodule", "add", "-q", lib, "vendor/lib");
+  const sub = join(parent, "vendor", "lib");
+
+  assert.deepEqual(nearestGraftRoot(join(sub, "src")), { root: sub, levels: 1 }, "`build` in a submodule means the submodule");
+});
+
+test("a nested standalone clone (`.git` directory) inside a built repo still stops the walk", () => {
+  const parent = builtRepo(committedRepo(join(tmpRepo("root-nested"), "app")));
+  const child = committedRepo(join(parent, "toolforge"));
+
+  assert.deepEqual(nearestGraftRoot(join(child, "src")), { root: child, levels: 1 });
+});
+
+test("a linked worktree inside a built repo stops at itself, not the main checkout's graph", () => {
+  const parent = builtRepo(committedRepo(join(tmpRepo("root-wt"), "app")));
+  const wt = join(parent, ".claude", "worktrees", "wt");
+  git(parent, "worktree", "add", "-q", "-b", "wt", wt);
+
+  assert.deepEqual(nearestGraftRoot(join(wt, "src")), { root: wt, levels: 1 });
 });
 
 test("nothing indexed anywhere above → the start dir, so `build` in a fresh repo still means here", () => {
