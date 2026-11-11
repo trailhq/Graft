@@ -223,10 +223,12 @@ export async function buildGraph(
   // Enumerate once: source extraction, scope discovery, and Go module
   // resolution must agree on the same Git-ignore-aware working-tree view —
   // including the repo's persisted directory and submodule choices.
+  const repositoryTargets: Record<string, string> = Object.create(null);
   const walked = walkDir(root, readIncludeDirs(root), {
     followSubmodules: readFollowSubmodules(root),
     followNestedRepos: readFollowNestedRepos(root),
     includeIgnoredRepos: readIncludeIgnoredRepos(root),
+    onRepository: (mount, target) => { repositoryTargets[mount] = target; },
   });
   const selectedDirs = opts.onlyDirs ?? readFingerprint(outDir)?.onlyDirs;
   const onlyDirs = selectedDirs?.length ? new Set(selectedDirs) : undefined;
@@ -438,7 +440,7 @@ export async function buildGraph(
   // these source bytes." Nothing about the projections below — which is why it is
   // safe to write here, and why `graphOnly` builds (the query path, which stops
   // right after this line) are still recorded as fresh.
-  writeFingerprint(outDir, entries, selectedDirs, extensions);
+  writeFingerprint(outDir, entries, selectedDirs, extensions, repositoryTargets);
 
   // Tier-2 passive surface: project the nodes into per-file markdown cards, and
   // refresh the INDEX roster. Pure projection — no LLM, no network.

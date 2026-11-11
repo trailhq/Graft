@@ -4,6 +4,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { relPosix } from "../util/paths.js";
 
 /** Directories that are dependency/build output, never source. */
 export const SKIP_DIRS = new Set([
@@ -96,6 +97,9 @@ export interface WalkOptions {
   followNestedRepos?: boolean;
   /** Explicit parent-relative repo mounts, bypassing only the parent's ignores. */
   includeIgnoredRepos?: ReadonlySet<string>;
+  /** Observe followed repository mounts during the same walk. Paths are relative
+   * to the walk root; physical targets identify checkouts, not graph node IDs. */
+  onRepository?: (mount: string, target: string) => void;
 }
 
 /**
@@ -203,6 +207,9 @@ function gitVisibleFiles(
   const rootKey = process.platform === "win32" ? realRoot.toLowerCase() : realRoot;
   if (state.activeRoots.has(rootKey)) return [];
   state.activeRoots.add(rootKey);
+  // Record before Git runs: a child using the filesystem fallback still needs
+  // target identity for freshness, just like a successfully enumerated checkout.
+  if (traversal) opts.onRepository?.(relPosix(state.topRoot, root), realRoot);
 
   // Following uses `-t --stage` so one process can distinguish gitlinks from
   // tracked and untracked files. `-z` keeps either form safe for unusual paths.
@@ -268,7 +275,8 @@ function gitVisibleFiles(
       if (abs === root || escapedCanonical(root, abs) || !existsSync(join(abs, ".git"))) continue;
       const mount = relative(root, abs).replace(/\\/g, "/");
       const prior = entries.get(mount);
-      entries.set(mount, { gitlink: prior?.gitlink === true, nested: true });
+      const gitlink = prior?.gitlink === true;
+      entries.set(mount, { gitlink, nested: !gitlink });
     }
   }
   for (const [rel, entry] of entries) {
@@ -297,9 +305,9 @@ function gitVisibleFiles(
       }
     }
 
-    const followChild =
-      (entry.gitlink && opts.followSubmodules === true) ||
-      ((entry.nested || linkedRepo) && opts.followNestedRepos === true);
+    const followChild = entry.gitlink
+      ? opts.followSubmodules === true
+      : (entry.nested || linkedRepo) && opts.followNestedRepos === true;
     if (followChild) {
       // A deinitialized gitlink can resolve upward to the superproject when Git
       // runs inside it, and a nested-looking directory may have no repo at all.

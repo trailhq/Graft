@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { isClean, probeDrift } from "../src/graph/fingerprint.js";
+import { fingerprintPath, isClean, probeDrift, readFingerprint } from "../src/graph/fingerprint.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
 import { readBuildConfig } from "../src/util/state.js";
 import type { GraphV1 } from "../src/graph/types.js";
@@ -187,6 +187,14 @@ test("follow-nested-repos and follow-submodules are independent switches", () =>
     const both = graphOf(parent);
     assert.ok(both.nodes.some((n) => n.id === "modules/sub/src/sub.ts#subValue"));
     assert.ok(both.nodes.some((n) => n.id === "external/dep/src/dep.ts#depValue"));
+
+    // Explicit admission bypasses parent ignores, never the submodule gate.
+    expectCliOk(["build", parent, "--include-repo", "modules/sub", "--no-follow-submodules"]);
+    assert.ok(!graphOf(parent).nodes.some((n) => n.path.startsWith("modules/sub/")));
+    expectCliOk(["build", parent]);
+    assert.ok(!graphOf(parent).nodes.some((n) => n.path.startsWith("modules/sub/")));
+    expectCliOk(["build", parent, "--follow-submodules"]);
+    assert.ok(graphOf(parent).nodes.some((n) => n.id === "modules/sub/src/sub.ts#subValue"));
   } finally {
     rmSync(parent, { recursive: true, force: true });
     rmSync(sub, { recursive: true, force: true });
@@ -325,3 +333,50 @@ test("explicit ignored repository mounts preserve parent and child ignores and r
     for (const target of targets) rmSync(target, { recursive: true, force: true });
   }
 });
+
+for (const ignored of [false, true]) {
+  test(`refresh detects retargeted ${ignored ? "explicit ignored" : "visible"} repository links with identical file stats`, async () => {
+    const parent = tmpRepo("retarget-parent");
+    const targets = [tmpRepo("retarget-before"), tmpRepo("retarget-after")];
+    const mount = join(parent, "refs", "library");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    try {
+      gitRun(parent, ["init", "-q"]);
+      write(parent, "root.ts", "export const rootValue = 1;\n");
+      if (ignored) write(parent, ".gitignore", "/refs/\n");
+      for (const [i, target] of targets.entries()) {
+        gitRun(target, ["init", "-q"]);
+        write(target, "value.ts", `export function ${i ? "after" : "prior"}() { return 1; }\n`);
+        utimesSync(join(target, "value.ts"), 1_700_000_000, 1_700_000_000);
+      }
+      mkdirSync(join(parent, "refs"));
+      symlinkSync(targets[0], mount, linkType);
+      expectCliOk(["build", parent, "--follow-nested-repos", ...(ignored ? ["--include-repo", "refs/library"] : [])]);
+      assert.ok(graphOf(parent).nodes.some((n) => n.id === "refs/library/value.ts#prior"));
+      assert.ok(isClean(probeDrift(parent, join(parent, "graft"))!));
+      assert.equal((await ensureFreshGraph(parent)).refreshed, false);
+
+      unlinkSync(mount);
+      symlinkSync(targets[1], mount, linkType);
+      const drift = probeDrift(parent, join(parent, "graft"));
+      assert.ok(drift === null || !isClean(drift), "a new checkout cannot inherit the old stat fast path");
+      assert.equal((await ensureFreshGraph(parent)).refreshed, true);
+      const graph = graphOf(parent);
+      assert.ok(graph.nodes.some((n) => n.id === "refs/library/value.ts#after"));
+      assert.ok(!graph.nodes.some((n) => n.id === "refs/library/value.ts#prior"));
+      assert.ok(graph.nodes.some((n) => n.path === "root.ts"));
+      assert.equal((await ensureFreshGraph(parent)).refreshed, false, "the new identity is persisted");
+
+      // Old fingerprints still retain their filters but need one identity-aware rebuild.
+      const outDir = join(parent, "graft");
+      const legacy = readFingerprint(outDir)!;
+      delete legacy.repositoryTargets;
+      writeFileSync(fingerprintPath(outDir), JSON.stringify(legacy));
+      assert.equal((await ensureFreshGraph(parent)).refreshed, true);
+      assert.equal((await ensureFreshGraph(parent)).refreshed, false);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+      for (const target of targets) rmSync(target, { recursive: true, force: true });
+    }
+  });
+}
